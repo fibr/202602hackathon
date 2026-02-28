@@ -596,6 +596,58 @@ def main():
         panel.speed = speed
         panel.status_msg = "Touch TCP to board, then click on it"
 
+    # Plane save callback (used by GUI button and 'g' key fallback)
+    def save_plane():
+        if len(plane_samples) < 1:
+            msg = "No plane samples — press 'g' to capture"
+            if panel:
+                panel.status_msg = msg
+            print(f"  {msg}")
+            return
+        normals = np.array([s[0] for s in plane_samples])
+        distances = np.array([s[1] for s in plane_samples])
+        # Flip any normals pointing opposite to the majority
+        ref = normals[0]
+        for idx in range(1, len(normals)):
+            if np.dot(normals[idx], ref) < 0:
+                normals[idx] = -normals[idx]
+                distances[idx] = -distances[idx]
+        avg_normal = normals.mean(axis=0)
+        avg_normal /= np.linalg.norm(avg_normal)
+        avg_d = distances.mean()
+        std_d = distances.std() if len(distances) > 1 else 0.0
+        angles_deg = [np.degrees(np.arccos(np.clip(
+            np.dot(n, avg_normal), -1, 1))) for n in normals]
+        max_angle = max(angles_deg)
+        import yaml
+        plane_path = os.path.join(
+            os.path.dirname(__file__), '..', 'config', 'ground_plane.yaml')
+        os.makedirs(os.path.dirname(plane_path), exist_ok=True)
+        data = {
+            'plane_normal': avg_normal.tolist(),
+            'plane_d': float(avg_d),
+            'num_samples': len(plane_samples),
+            'std_d_mm': float(std_d * 1000),
+            'max_angle_deg': float(max_angle),
+        }
+        with open(plane_path, 'w') as f:
+            yaml.dump(data, f, default_flow_style=False)
+        print(f"\n=== Ground Plane ({len(plane_samples)} samples) ===")
+        print(f"  Normal: [{avg_normal[0]:.5f}, {avg_normal[1]:.5f}, {avg_normal[2]:.5f}]")
+        print(f"  Distance: {avg_d*1000:.1f} mm (std: {std_d*1000:.1f} mm)")
+        print(f"  Max angular deviation: {max_angle:.2f} deg")
+        print(f"  Saved to {plane_path}")
+        msg = f"Plane saved: {len(plane_samples)}x, d={avg_d*1000:.1f}mm std={std_d*1000:.1f}mm"
+        if panel:
+            panel.status_msg = msg
+        plane_samples.clear()
+
+    if panel:
+        panel.add_button(
+            lambda: f"Save Plane ({len(plane_samples)})",
+            save_plane,
+            color=(0, 100, 100))
+
     # Robot overlay (load calibration if available)
     robot_overlay = None
     calibration_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
@@ -862,15 +914,11 @@ def main():
                     print(f"  {msg}")
 
             # --- Ground plane calibration ---
+            # g = capture sample (board visible) or save via button/fallback
 
             elif key == ord('g'):
-                # Accumulate a ground plane sample from current board detection
-                if current_T_board is None:
-                    msg = "No board detected — can't sample ground plane"
-                    if panel:
-                        panel.status_msg = msg
-                    print(f"  {msg}")
-                else:
+                if current_T_board is not None:
+                    # Board visible: capture a sample
                     R_board = current_T_board[:3, :3]
                     t_board = current_T_board[:3, 3]
                     normal = R_board[:, 2]  # board Z axis in camera frame
@@ -880,57 +928,14 @@ def main():
                     if panel:
                         panel.status_msg = msg
                     print(f"  {msg}  normal=[{normal[0]:.4f},{normal[1]:.4f},{normal[2]:.4f}]")
-
-            elif key == ord('G'):
-                # Average accumulated plane samples and save
-                if len(plane_samples) < 1:
-                    msg = "No plane samples — press 'g' to capture"
+                elif len(plane_samples) > 0:
+                    # Board not visible: save (fallback for no-panel mode)
+                    save_plane()
+                else:
+                    msg = "Show board and press g to capture plane samples"
                     if panel:
                         panel.status_msg = msg
                     print(f"  {msg}")
-                else:
-                    normals = np.array([s[0] for s in plane_samples])
-                    distances = np.array([s[1] for s in plane_samples])
-
-                    # Flip any normals pointing opposite to the majority
-                    ref = normals[0]
-                    for i in range(1, len(normals)):
-                        if np.dot(normals[i], ref) < 0:
-                            normals[i] = -normals[i]
-                            distances[i] = -distances[i]
-
-                    avg_normal = normals.mean(axis=0)
-                    avg_normal /= np.linalg.norm(avg_normal)
-                    avg_d = distances.mean()
-                    std_d = distances.std()
-
-                    # Per-sample angular deviation from mean
-                    angles_deg = [np.degrees(np.arccos(np.clip(
-                        np.dot(n, avg_normal), -1, 1))) for n in normals]
-                    max_angle = max(angles_deg)
-
-                    import yaml
-                    plane_path = os.path.join(
-                        os.path.dirname(__file__), '..', 'config', 'ground_plane.yaml')
-                    os.makedirs(os.path.dirname(plane_path), exist_ok=True)
-                    data = {
-                        'plane_normal': avg_normal.tolist(),
-                        'plane_d': float(avg_d),
-                        'num_samples': len(plane_samples),
-                        'std_d_mm': float(std_d * 1000),
-                        'max_angle_deg': float(max_angle),
-                    }
-                    with open(plane_path, 'w') as f:
-                        yaml.dump(data, f, default_flow_style=False)
-
-                    print(f"\n=== Ground Plane ({len(plane_samples)} samples) ===")
-                    print(f"  Normal: [{avg_normal[0]:.5f}, {avg_normal[1]:.5f}, {avg_normal[2]:.5f}]")
-                    print(f"  Distance: {avg_d*1000:.1f} mm (std: {std_d*1000:.1f} mm)")
-                    print(f"  Max angular deviation: {max_angle:.2f} deg")
-                    print(f"  Saved to {plane_path}")
-                    msg = f"Plane saved: {len(plane_samples)} samples, d={avg_d*1000:.1f}mm std={std_d*1000:.1f}mm"
-                    if panel:
-                        panel.status_msg = msg
 
             elif key == 13:  # Enter
                 if len(pairs) < 3:

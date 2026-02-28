@@ -85,6 +85,10 @@ class RobotControlPanel:
 
         self.status_msg = ""
 
+        # Custom buttons: list of (label, callback, color) added by callers
+        self._custom_buttons = []  # [(label, callback, color)]
+        self._custom_rects = []    # computed in _layout()
+
         # Pre-compute layout positions (relative to panel_x)
         self._layout()
 
@@ -130,8 +134,26 @@ class RobotControlPanel:
         self.j1_rotate_rect = (z_x, y, z_x + PAD_SIZE, y + BTN_H)
         y += BTN_H + BTN_GAP * 2
 
+        # Custom buttons (added by callers via add_button)
+        self._custom_rects = []
+        for _ in self._custom_buttons:
+            rect = (z_x, y, z_x + PAD_SIZE, y + BTN_H)
+            self._custom_rects.append(rect)
+            y += BTN_H + BTN_GAP * 2
+
         # Status area starts here
         self.status_y = y
+
+    def add_button(self, label, callback, color=(80, 60, 100)):
+        """Add a custom button to the panel. Call before first draw.
+
+        Args:
+            label: Button text (string or callable returning string).
+            callback: Called on click (no args).
+            color: BGR tuple for button background.
+        """
+        self._custom_buttons.append((label, callback, color))
+        self._layout()  # recompute positions
 
     def _draw_btn(self, canvas, rect, label, active=False, color=None):
         """Draw a rounded-ish button on the canvas."""
@@ -216,6 +238,11 @@ class RobotControlPanel:
             j1_label = f"J1 +30  ({self._cached_angles[0]:.0f} now)"
         self._draw_btn(canvas, self.j1_rotate_rect, j1_label,
                        color=(100, 60, 0))
+
+        # --- Custom buttons ---
+        for i, (label, _cb, color) in enumerate(self._custom_buttons):
+            text = label() if callable(label) else label
+            self._draw_btn(canvas, self._custom_rects[i], text, color=color)
 
         # --- Status ---
         self._update_status_cache()
@@ -353,6 +380,12 @@ class RobotControlPanel:
         if self._in_rect(x, y, self.j1_rotate_rect):
             self._do_j1_rotate()
             return
+
+        # Custom buttons
+        for i, (_label, callback, _color) in enumerate(self._custom_buttons):
+            if self._in_rect(x, y, self._custom_rects[i]):
+                callback()
+                return
 
     def _on_drag(self, x, y):
         """Handle mouse drag in panel coords (no-op for Cartesian steps)."""
