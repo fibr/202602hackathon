@@ -15,6 +15,13 @@ camera:
   depth_min_mm: 6000          # Closest valid depth (workspace ~6-19m from camera)
   depth_max_mm: 19000         # Farthest valid depth
 
+gripper:
+  tool_length_mm: 100.0       # Flange to fingertip (measure and update)
+
+kinematics:
+  linear_step_mm: 5.0         # Interpolation step for linear moves
+  validate_on_startup: true   # Cross-check local IK vs robot's InverseKin
+
 planner:
   safe_z: 300.0               # Safe height above table (mm)
   approach_offset_z: 100.0    # Height above rod for pre-grasp (mm)

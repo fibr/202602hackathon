@@ -2,7 +2,7 @@
 """Interactive control panel for Dobot Nova5.
 
 Hold jog keys for continuous joint motion, release to stop.
-Cartesian keys step via MovL (V4 syntax) on dashboard port.
+Cartesian keys step via local IK + MovJ(joint={...}) on dashboard port.
 Gripper and other commands are instant.
 """
 
@@ -13,9 +13,11 @@ import time
 import select
 import tty
 import termios
+import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from config_loader import load_config
+from kinematics import IKSolver
 
 
 class FastRobot:
@@ -102,9 +104,9 @@ CART_LABELS = {
 }
 
 HELP = """\x1b[2J\x1b[H\
-=== Dobot Nova5 Control Panel ===
+=== Dobot Nova5 Control Panel (Local IK) ===
 
- JOINT JOG (hold)            CARTESIAN (tap to step)    GRIPPER
+ JOINT JOG (hold)            CARTESIAN (local IK+joints) GRIPPER
  1/!  J1+ / J1-              w/W  X+ / X-  (10mm)       c  Close
  2/@  J2+ / J2-              a/A  Y+ / Y-               o  Open
  3/#  J3+ / J3-              r/f  Z+ / Z-
@@ -122,11 +124,17 @@ HELP = """\x1b[2J\x1b[H\
 def main():
     config = load_config()
     rc = config.get('robot', {})
+    gc = config.get('gripper', {})
     ip = rc.get('ip', '192.168.5.1')
     port = rc.get('dashboard_port', 29999)
 
     print(f"Connecting to {ip}:{port}...")
     r = FastRobot(ip, port)
+
+    # Initialize local IK solver
+    tool_length = gc.get('tool_length_mm', 100.0)
+    ik = IKSolver(tool_length_mm=tool_length)
+    print(f"  IK solver loaded (tool_length={tool_length}mm)")
 
     # Enable
     r.send('DisableRobot()')
@@ -159,24 +167,38 @@ def main():
     JOG_GRACE = 0.15
 
     def do_cart_step(axis_idx, sign):
-        """Step in Cartesian space: read pose, offset, MovL to target."""
-        pose = r.get_pose()
-        if not pose or len(pose) < 6:
-            status("ERROR: can't read pose")
+        """Step in Cartesian space using local IK + joint-angle move."""
+        # Get current joint angles and compute current pose via local FK
+        angles = r.get_angles()
+        if not angles or len(angles) < 6:
+            status("ERROR: can't read joint angles")
             return
 
+        current_joints = np.array(angles)
+        current_pos, current_rpy = ik.forward_kin(current_joints)
+
         step = cart_step if axis_idx < 3 else CART_STEP_DEG
-        target_pose = list(pose)
-        target_pose[axis_idx] += sign * step
+        target_pos = current_pos.copy()
+        target_rpy = current_rpy.copy()
+        if axis_idx < 3:
+            target_pos[axis_idx] += sign * step
+        else:
+            target_rpy[axis_idx - 3] += sign * step
 
         axis_name = CART_LABELS[axis_idx]
         dir_ch = '+' if sign > 0 else '-'
-        cur_val = ','.join(f'{v:.1f}' for v in pose)
-        tgt_val = ','.join(f'{v:.1f}' for v in target_pose)
-        status(f"{axis_name}{dir_ch}  cur:[{cur_val}] tgt:[{tgt_val}]")
+        status(f"{axis_name}{dir_ch} IK solving...")
 
-        tp = target_pose
-        cmd = f'MovL(pose={{{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f}}})'
+        # Solve IK with current joints as seed
+        target_joints = ik.solve_ik(target_pos, target_rpy,
+                                     seed_joints_deg=current_joints)
+        if target_joints is None:
+            status(f"ERROR: IK failed for {axis_name}{dir_ch}")
+            return
+
+        # Send joint-angle move via V4 syntax on dashboard
+        j = target_joints
+        cmd = f'MovJ(joint={{{j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},{j[4]:.4f},{j[5]:.4f}}})'
         resp = r.send(cmd)
         code = resp.split(',')[0] if resp else '-1'
         if code != '0':
@@ -194,9 +216,11 @@ def main():
                     break
             prev = cur
 
-        new_pose = r.get_pose()
-        if new_pose:
-            val = ','.join(f'{v:.1f}' for v in new_pose)
+        # Show final pose from local FK
+        final_angles = r.get_angles()
+        if final_angles:
+            final_pos, final_rpy = ik.forward_kin(np.array(final_angles))
+            val = ','.join(f'{v:.1f}' for v in np.concatenate([final_pos, final_rpy]))
             status(f"{axis_name}{dir_ch} done  Pose: {val}")
         else:
             status(f"{axis_name}{dir_ch} done")
@@ -313,12 +337,12 @@ def main():
                 r.send('ClearError()')
                 status("Errors cleared")
 
-            # Home
+            # Home (using joint angles via V4 syntax)
             elif ch == '0':
                 if jogging:
                     r.send('MoveJog()')
                     jogging = None
-                status("Homing...")
+                status("Homing (joint angles)...")
                 r.send('SpeedFactor(10)')
                 resp = r.send('MovJ(joint={43.5,-13.9,-85.4,196.3,-90.0,43.5})')
                 code = resp.split(',')[0] if resp else '-1'
@@ -327,7 +351,7 @@ def main():
                     r.send(f'SpeedFactor({speed})')
                 else:
                     prev = r.get_angles()
-                    for _ in range(150):  # up to 30s
+                    for _ in range(150):
                         time.sleep(0.2)
                         cur = r.get_angles()
                         if prev and cur:
@@ -335,9 +359,9 @@ def main():
                                 break
                         prev = cur
                     r.send(f'SpeedFactor({speed})')
-                    angles = r.get_angles()
-                    if angles:
-                        val = ','.join(f'{v:.1f}' for v in angles)
+                    final = r.get_angles()
+                    if final:
+                        val = ','.join(f'{v:.1f}' for v in final)
                         status(f"Home done  Joints: {val}")
                     else:
                         status("Home done")
