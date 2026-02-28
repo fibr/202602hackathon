@@ -14,7 +14,7 @@ Each capture saves to data/rod_dataset/:
   {NNN}_depth_vis.png  -- colorized depth for quick browsing
 
 Usage:
-    ./run.sh scripts/collect_dataset.py [--hd] [--no-robot]
+    ./run.sh scripts/collect_dataset.py [--sd] [--no-robot]
 
 Controls:
     SPACE       Capture current frame
@@ -105,9 +105,9 @@ def compute_hover_pose(detection, transform):
 
 
 def main():
-    hd = '--hd' in sys.argv
+    sd = '--sd' in sys.argv
     no_robot = '--no-robot' in sys.argv
-    width, height = (1280, 720) if hd else (640, 480)
+    width, height = (640, 480) if sd else (1280, 720)
 
     os.makedirs(DATASET_DIR, exist_ok=True)
     next_idx = find_next_index(DATASET_DIR)

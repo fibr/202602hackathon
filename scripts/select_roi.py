@@ -5,7 +5,7 @@ Click 4 corners (or 2 for a rectangle) to define the region where
 the robot can reach and the rod might be. Saves to config/settings.yaml.
 
 Usage:
-    ./run.sh scripts/select_roi.py [--hd]
+    ./run.sh scripts/select_roi.py [--sd]
 
 Controls:
     Click       Add corner point
@@ -64,8 +64,8 @@ def draw_overlay(frame):
 
 def main():
     global points, current_frame
-    hd = '--hd' in sys.argv
-    width, height = (1280, 720) if hd else (640, 480)
+    sd = '--sd' in sys.argv
+    width, height = (640, 480) if sd else (1280, 720)
 
     print("=== Workspace ROI Selection ===")
     print(f"Resolution: {width}x{height}")

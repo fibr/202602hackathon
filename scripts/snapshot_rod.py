@@ -11,7 +11,7 @@ Saves numbered debug images to /tmp/rod_debug/ showing each pipeline stage:
   {timestamp}_info.txt          -- full detection log
 
 Usage:
-    ./run.sh scripts/snapshot_rod.py [--hd]
+    ./run.sh scripts/snapshot_rod.py [--sd]
 """
 
 import sys
@@ -135,8 +135,8 @@ def draw_candidates(image, detector, roi_mask):
 
 
 def main():
-    hd = '--hd' in sys.argv
-    width, height = (1280, 720) if hd else (640, 480)
+    sd = '--sd' in sys.argv
+    width, height = (640, 480) if sd else (1280, 720)
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
