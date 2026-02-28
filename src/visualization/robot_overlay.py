@@ -87,15 +87,22 @@ class RobotOverlay:
     camera intrinsics.
     """
 
-    def __init__(self, T_camera_to_base: np.ndarray, tool_length_mm: float = 100.0):
+    def __init__(self, T_camera_to_base: np.ndarray, tool_length_mm: float = 100.0,
+                 base_offset_mm: np.ndarray = None):
         """
         Args:
             T_camera_to_base: 4x4 homogeneous transform (meters)
             tool_length_mm: Gripper length in mm
+            base_offset_mm: Optional [dx, dy, dz] offset to the robot base in mm.
+                           Use this to correct calibration errors.
         """
         self.T_cam_to_base = T_camera_to_base.copy()
         self.T_base_to_cam = np.linalg.inv(T_camera_to_base)
         self.tool_offset = np.array([0, 0, -tool_length_mm / 1000.0])
+        # Base offset in meters (applied to all joint positions)
+        self.base_offset_m = np.zeros(3)
+        if base_offset_mm is not None:
+            self.base_offset_m = np.array(base_offset_mm, dtype=float) / 1000.0
 
     def compute_joint_positions(self, joint_angles_deg: np.ndarray) -> list[np.ndarray]:
         """Compute 3D positions of all joints in robot base frame (meters).
@@ -110,8 +117,9 @@ class RobotOverlay:
         q = np.radians(joint_angles_deg)
         positions = []
 
-        # Base origin (at 0,0,0 in base frame)
+        # Base origin (at 0,0,0 + offset in base frame)
         T_current = np.eye(4)
+        T_current[:3, 3] = self.base_offset_m
         positions.append(T_current[:3, 3].copy())
 
         for i, (name, xyz, *rest) in enumerate(_NOVA5_JOINTS):
@@ -134,8 +142,12 @@ class RobotOverlay:
         return positions
 
     def base_position_m(self) -> np.ndarray:
-        """Return the robot base origin in base frame (always [0,0,0])."""
-        return np.array([0.0, 0.0, 0.0])
+        """Return the robot base origin in base frame (with offset applied)."""
+        return self.base_offset_m.copy()
+
+    def nudge_base(self, dx_mm: float = 0, dy_mm: float = 0, dz_mm: float = 0):
+        """Nudge the base offset incrementally (for interactive adjustment)."""
+        self.base_offset_m += np.array([dx_mm, dy_mm, dz_mm]) / 1000.0
 
     def project_to_pixels(self, points_base_m: list[np.ndarray],
                           intrinsics) -> list[tuple[int, int] | None]:

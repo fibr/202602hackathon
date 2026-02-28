@@ -4,6 +4,7 @@ robot:
   ip: "192.168.5.1"
   dashboard_port: 29999       # All commands including MovJ/MovL (V4 syntax)
   speed_percent: 30           # Start slow for safety (1-100)
+  # base_offset_mm: [0, 0, 0]  # Optional XYZ offset to correct calibration (mm)
 
 camera:
   width: 640
@@ -20,7 +21,7 @@ rod:
   length_mm: 175.0             # Rod length
 
 gripper:
-  tool_length_mm: 100.0       # Flange to fingertip (measure and update)
+  tool_length_mm: 130.0       # Flange to fingertip (Nova5 standard end effector plate)
 
 kinematics:
   linear_step_mm: 5.0         # Interpolation step for linear moves

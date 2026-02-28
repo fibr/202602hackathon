@@ -21,6 +21,8 @@ Controls:
     d           Toggle detection overlay
     r           Toggle robot skeleton overlay (base always shown)
     g           Move robot to hover 200mm above detected rod
+    Arrows      Nudge base overlay position XY (10mm steps)
+    +/-         Nudge base overlay position Z (10mm steps)
     q / Esc     Quit
 """
 
@@ -216,9 +218,12 @@ def main():
 
     # Robot overlay for projecting joint positions into camera image
     gripper_cfg = config.get('gripper', {})
+    robot_cfg = config.get('robot', {})
+    base_offset = robot_cfg.get('base_offset_mm')
     robot_overlay = RobotOverlay(
         T_camera_to_base=transform.T_camera_to_base,
-        tool_length_mm=gripper_cfg.get('tool_length_mm', 100.0),
+        tool_length_mm=gripper_cfg.get('tool_length_mm', 130.0),
+        base_offset_mm=np.array(base_offset) if base_offset else None,
     )
 
     # Try robot connection (optional)
@@ -235,6 +240,7 @@ def main():
     print(f"Robot: {'connected' if robot else 'not connected'}")
     print()
     print("SPACE=capture  d=detect  r=robot overlay  g=goto rod  q=quit")
+    print("Arrow keys: nudge base overlay (10mm steps)  +/-: nudge base Z")
     print()
 
     camera = RealSenseCamera(width=width, height=height, fps=15)
@@ -308,7 +314,8 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
             cv2.imshow('Collect Dataset', vis)
-            key = cv2.waitKey(1) & 0xFF
+            key_raw = cv2.waitKeyEx(1)
+            key = key_raw & 0xFF
 
             if key == ord('q') or key == 27:
                 break
@@ -325,6 +332,27 @@ def main():
             if key == ord('r'):
                 show_robot_overlay = not show_robot_overlay
                 print(f"  Robot skeleton overlay: {'ON' if show_robot_overlay else 'OFF'}")
+
+            # Arrow keys to nudge base overlay position (10mm steps)
+            NUDGE_MM = 10.0
+            if key_raw == 65361:    # Left arrow -> base X-
+                robot_overlay.nudge_base(dx_mm=-NUDGE_MM)
+                print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
+            elif key_raw == 65363:  # Right arrow -> base X+
+                robot_overlay.nudge_base(dx_mm=NUDGE_MM)
+                print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
+            elif key_raw == 65362:  # Up arrow -> base Y-
+                robot_overlay.nudge_base(dy_mm=-NUDGE_MM)
+                print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
+            elif key_raw == 65364:  # Down arrow -> base Y+
+                robot_overlay.nudge_base(dy_mm=NUDGE_MM)
+                print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
+            elif key == ord('+') or key == ord('='):  # Z+
+                robot_overlay.nudge_base(dz_mm=NUDGE_MM)
+                print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
+            elif key == ord('-'):                      # Z-
+                robot_overlay.nudge_base(dz_mm=-NUDGE_MM)
+                print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
 
             if key == ord('g'):
                 if not show_detection:
