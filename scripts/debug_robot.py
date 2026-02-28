@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Query robot dashboard for diagnostic info."""
+"""Query robot dashboard for diagnostic info, then wiggle + gripper test.
+
+Uses only the dashboard port (29999). Motion via MoveJog, gripper via ToolDO.
+"""
 
 import sys
 import os
@@ -15,7 +18,6 @@ def dashboard_session(ip: str, port: int, timeout: float = 5.0):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     sock.connect((ip, port))
-    # Read welcome banner
     try:
         banner = sock.recv(1024).decode().strip()
         print(f"  Banner: {banner}")
@@ -34,6 +36,16 @@ def send(sock, cmd: str) -> str:
     return resp
 
 
+def parse_response(resp: str):
+    """Parse Dobot response 'code,{value},cmd;' -> (code, value)."""
+    try:
+        code = int(resp.split(",")[0])
+        inner = resp.split("{")[1].split("}")[0] if "{" in resp else ""
+        return code, inner
+    except (ValueError, IndexError):
+        return None, resp
+
+
 def main():
     config = load_config()
     robot_cfg = config.get('robot', {})
@@ -45,67 +57,84 @@ def main():
 
     sock = dashboard_session(ip, port)
 
+    # ── Status dump ──
     cmds = [
-        ("RobotMode()",       "Robot mode (1=init, 2=brake_open, 3=disabled, 4=enable, 5=backdrive, 6=running, 7=recording, 8=error, 9=pause, 10=jog)"),
-        ("GetErrorID()",      "Error IDs (0 = no error)"),
-        ("GetAngle()",        "Current joint angles"),
-        ("GetPose()",         "Current TCP pose [x,y,z,rx,ry,rz]"),
-        ("SpeedFactor()",     "Current speed factor"),
-        ("PayLoad()",         "Current payload setting"),
-        ("DI(1)",             "Digital input 1"),
-        ("DI(2)",             "Digital input 2"),
-        ("DO(1)",             "Digital output 1 (gripper)"),
-        ("DO(2)",             "Digital output 2"),
+        ("RobotMode()",  "Mode (1=init 2=brake 4=disabled 5=enabled 6=backdrive 7=running 9=error 10=pause 11=jog)"),
+        ("GetErrorID()", "Errors"),
+        ("GetAngle()",   "Joint angles (deg)"),
+        ("GetPose()",    "TCP pose [x,y,z,rx,ry,rz] mm/deg"),
     ]
-
     for cmd, desc in cmds:
         resp = send(sock, cmd)
-        print(f"  {cmd:<20s} -> {resp:<40s}  # {desc}")
+        code, val = parse_response(resp)
+        print(f"  {cmd:<20s} [{code:>6}] {val:<50s}  # {desc}")
 
+    # ── Enable ──
     print()
-    print("--- Trying to enable ---")
+    print("--- Enable ---")
     for cmd in ["ClearError()", "EnableRobot()"]:
         resp = send(sock, cmd)
-        print(f"  {cmd:<20s} -> {resp}")
+        code, val = parse_response(resp)
+        print(f"  {cmd:<20s} [{code:>6}]")
 
+    resp = send(sock, "RobotMode()")
+    code, val = parse_response(resp)
+    print(f"  RobotMode:  {val}")
+
+    # ── Gripper test (ToolDO) ──
+    print()
+    print("--- Gripper test (ToolDO) ---")
+    print("  Closing gripper (ToolDO 1,1)...")
+    resp = send(sock, "ToolDO(1,1)")
+    code, _ = parse_response(resp)
+    print(f"    Response code: {code}")
+    time.sleep(1)
+
+    print("  Opening gripper (ToolDO 2,1)...")
+    resp = send(sock, "ToolDO(2,1)")
+    code, _ = parse_response(resp)
+    print(f"    Response code: {code}")
+    time.sleep(1)
+
+    # ── Jog wiggle test ──
+    print()
+    print("--- Wiggle test (MoveJog) ---")
+    print("  Setting speed to 10%...")
+    send(sock, "SpeedFactor(10)")
+
+    print("  Jogging Z+ for 2s...")
+    send(sock, "MoveJog(z+)")
     time.sleep(2)
+    send(sock, "MoveJog()")
+    time.sleep(0.5)
 
+    print("  Pose after Z+:", send(sock, "GetPose()"))
+
+    print("  Jogging Z- for 2s...")
+    send(sock, "MoveJog(z-)")
+    time.sleep(2)
+    send(sock, "MoveJog()")
+    time.sleep(0.5)
+
+    print("  Pose after Z-:", send(sock, "GetPose()"))
+
+    print("  Jogging Z+ for 2s (return)...")
+    send(sock, "MoveJog(z+)")
+    time.sleep(1)
+    send(sock, "MoveJog()")
+    time.sleep(0.5)
+
+    print("  Final pose:   ", send(sock, "GetPose()"))
+
+    # ── Final state ──
     print()
-    print("--- State after enable ---")
-    for cmd in ["RobotMode()", "GetErrorID()"]:
-        resp = send(sock, cmd)
-        print(f"  {cmd:<20s} -> {resp}")
-
-    # Try a small move command on the motion port
-    motion_port = robot_cfg.get('motion_port', 30003)
-    print()
-    print(f"--- Testing motion port {motion_port} ---")
-    try:
-        msock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        msock.settimeout(5)
-        msock.connect((ip, motion_port))
-        try:
-            mbanner = msock.recv(1024).decode().strip()
-            print(f"  Motion banner: {mbanner}")
-        except socket.timeout:
-            print("  (no motion banner)")
-
-        # Read current pose, then send a tiny relative move
-        pose_resp = send(sock, "GetPose()")
-        print(f"  Current pose: {pose_resp}")
-
-        # Send Sync to see if motion port responds
-        msock.send(b"Sync()\n")
-        time.sleep(0.3)
-        try:
-            mresp = msock.recv(4096).decode().strip()
-            print(f"  Sync() -> {mresp}")
-        except socket.timeout:
-            print(f"  Sync() -> (timeout)")
-
-        msock.close()
-    except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        print(f"  Could not connect to motion port: {e}")
+    print("--- Final state ---")
+    resp = send(sock, "RobotMode()")
+    code, val = parse_response(resp)
+    print(f"  RobotMode: {val}")
+    resp = send(sock, "GetErrorID()")
+    code, val = parse_response(resp)
+    print(f"  Errors:    {val}")
 
     sock.close()
     print()

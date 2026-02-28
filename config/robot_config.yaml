@@ -2,11 +2,8 @@
 
 robot:
   ip: "192.168.5.1"
-  dashboard_port: 29999
-  motion_port: 30003
-  feedback_port: 30004
+  dashboard_port: 29999       # Only port needed (motion via MoveJog, gripper via ToolDO)
   speed_percent: 30           # Start slow for safety (1-100)
-  gripper_do_port: 1          # Digital output port for gripper control
 
 camera:
   width: 640

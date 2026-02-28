@@ -86,14 +86,9 @@ def main():
     robot = DobotNova5(
         ip=robot_cfg.get('ip', '192.168.5.1'),
         dashboard_port=robot_cfg.get('dashboard_port', 29999),
-        motion_port=robot_cfg.get('motion_port', 30003),
-        feedback_port=robot_cfg.get('feedback_port', 30004),
     )
 
-    gripper = Gripper(
-        robot=robot,
-        do_port=robot_cfg.get('gripper_do_port', 1),
-    )
+    gripper = Gripper(robot=robot)
 
     # === State Machine ===
     try:
