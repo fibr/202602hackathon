@@ -28,8 +28,10 @@ BTN_GAP = 6             # gap between buttons
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 # Cartesian step sizes
-CART_STEP_XY = 20.0     # mm per XY pad click
-CART_STEP_Z = 10.0      # mm per Z button click
+CART_STEP_XY_MIN = 5.0   # mm at edge of deadzone
+CART_STEP_XY_MAX = 40.0  # mm at edge of pad
+CART_STEP_Z = 10.0       # mm per Z button click
+CART_COOLDOWN = 0.3      # seconds between commands (prevent queue buildup)
 
 # Colors
 COL_PAD_BG = (50, 50, 50)
@@ -72,7 +74,7 @@ class RobotControlPanel:
         self.jog_axis = None  # current jog axis string e.g. 'J1+'
         self._mouse_down = False
         self._mouse_pos = None  # (x, y) relative to panel
-        self._moving = False  # True while a Cartesian step is executing
+        self._last_cmd_time = 0.0  # cooldown for Cartesian steps
 
         # Cached robot state (throttled queries)
         self._cached_pose = None
@@ -167,12 +169,21 @@ class RobotControlPanel:
         cv2.putText(canvas, "Y+", (cx - 8, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
         cv2.putText(canvas, "Y-", (cx - 8, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
 
-        # Current drag indicator
+        # Current drag indicator with step size
         if self._mouse_down and self._mouse_pos:
             mx, my = self._mouse_pos
             if self._in_rect(mx, my, self.pad_rect):
                 cv2.circle(canvas, (mx + px, my), 6, COL_PAD_DOT, -1)
                 cv2.line(canvas, (cx, cy), (mx + px, my), COL_PAD_DOT, 2)
+                # Show step size
+                pcx, pcy = self.pad_center
+                dist = ((mx - pcx) ** 2 + (my - pcy) ** 2) ** 0.5
+                if dist >= PAD_DEADZONE:
+                    max_dist = PAD_SIZE / 2.0
+                    t = min((dist - PAD_DEADZONE) / (max_dist - PAD_DEADZONE), 1.0)
+                    step = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
+                    cv2.putText(canvas, f"{step:.0f}mm",
+                                (mx + px + 8, my - 8), FONT, 0.35, COL_PAD_DOT, 1)
 
         # --- Z buttons ---
         self._draw_btn(canvas, self.z_up_rect, "Z +")
@@ -338,10 +349,11 @@ class RobotControlPanel:
             self._stop_jog()
 
     def _do_xy_step(self, x, y):
-        """Do a Cartesian XY step based on click position in the pad."""
-        if self._moving:
-            return
+        """Do a Cartesian XY step based on click position in the pad.
 
+        Distance from center scales the step size: deadzone edge = 5mm,
+        pad edge = 40mm. Only the dominant axis (X or Y) moves.
+        """
         cx, cy = self.pad_center
         dx = x - cx
         dy = y - cy
@@ -349,6 +361,11 @@ class RobotControlPanel:
 
         if dist < PAD_DEADZONE:
             return
+
+        # Scale step by distance from center
+        max_dist = PAD_SIZE / 2.0
+        t = min((dist - PAD_DEADZONE) / (max_dist - PAD_DEADZONE), 1.0)
+        step_mm = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
 
         # Determine dominant axis: X or Y
         # Pad layout: right = X+, left = X-, up = Y+, down = Y-
@@ -359,29 +376,31 @@ class RobotControlPanel:
             axis_idx = 1  # Y
             sign = +1 if dy < 0 else -1  # up on screen = Y+
 
-        self._do_cart_step(axis_idx, sign, CART_STEP_XY)
+        self._do_cart_step(axis_idx, sign, step_mm)
 
     def _do_cart_step(self, axis_idx, sign, step_mm):
-        """Execute a Cartesian step: read pose, offset one axis, MovL.
+        """Fire-and-forget Cartesian step: read pose, offset, send MovL.
+
+        Non-blocking — does not wait for motion completion. A cooldown
+        prevents rapid-fire commands from queuing up on the robot.
 
         Args:
             axis_idx: 0=X, 1=Y, 2=Z
             sign: +1 or -1
             step_mm: step size in mm
         """
-        if self._moving:
-            return
-        self._moving = True
+        now = time.time()
+        if now - self._last_cmd_time < CART_COOLDOWN:
+            return  # too soon, skip
+        self._last_cmd_time = now
 
         labels = {0: 'X', 1: 'Y', 2: 'Z'}
         axis_name = labels[axis_idx]
         dir_ch = '+' if sign > 0 else '-'
-        self.status_msg = f"{axis_name}{dir_ch} {step_mm:.0f}mm..."
 
         pose = self.robot.get_pose()
         if not pose or len(pose) < 6:
             self.status_msg = "ERROR: can't read pose"
-            self._moving = False
             return
 
         target = list(pose)
@@ -394,27 +413,9 @@ class RobotControlPanel:
         code = resp.split(',')[0] if resp else '-1'
         if code != '0':
             self.status_msg = f"MovL error: {resp}"
-            self._moving = False
             return
 
-        # Wait for motion to complete (poll joint stability)
-        time.sleep(0.3)
-        prev = self.robot.get_angles()
-        for _ in range(50):
-            time.sleep(0.1)
-            cur = self.robot.get_angles()
-            if prev and cur and len(prev) >= 6 and len(cur) >= 6:
-                if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
-                    break
-            prev = cur
-
-        new_pose = self.robot.get_pose()
-        if new_pose and len(new_pose) >= 3:
-            self.status_msg = (f"{axis_name}{dir_ch} done  "
-                               f"[{new_pose[0]:.1f},{new_pose[1]:.1f},{new_pose[2]:.1f}]")
-        else:
-            self.status_msg = f"{axis_name}{dir_ch} done"
-        self._moving = False
+        self.status_msg = f"{axis_name}{dir_ch} {step_mm:.0f}mm"
 
     def _stop_jog(self):
         """Stop any active joint jog."""
