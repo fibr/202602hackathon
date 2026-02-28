@@ -71,6 +71,8 @@ class RealSenseCamera:
         Returns:
             np.ndarray: [x, y, z] in meters in camera coordinate frame
         """
+        x = max(0, min(x, self.width - 1))
+        y = max(0, min(y, self.height - 1))
         depth_m = depth_frame.get_distance(x, y)
         point = rs.rs2_deproject_pixel_to_point(self.intrinsics, [x, y], depth_m)
         return np.array(point)
