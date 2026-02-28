@@ -14,6 +14,7 @@ import select
 import tty
 import termios
 import numpy as np
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from config_loader import load_config
@@ -117,7 +118,7 @@ HELP = """\x1b[2J\x1b[H\
  SPEED                       STATUS
  [/]  -/+ 10%                p  Pose       s  E-stop    /  Raw command
  {/}  cart step -/+ 5mm      j  Angles     h  Help      q  Quit
-                              m  Mode       0  Home
+                              m  Mode       0  Home      l  Log position
 """
 
 
@@ -147,6 +148,14 @@ def main():
     r.send(f'SpeedFactor({speed})')
     cart_step = CART_STEP_MM
 
+    # Position log file
+    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    pos_log_path = os.path.join(log_dir, f'positions_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+    with open(pos_log_path, 'w') as f:
+        f.write('timestamp,x,y,z,rx,ry,rz,j1,j2,j3,j4,j5,j6,label\n')
+    pos_log_count = 0
+
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
 
@@ -160,6 +169,7 @@ def main():
             sys.stdin.read(1)
 
     sys.stdout.write(HELP)
+    print(f"  Position log: {os.path.relpath(pos_log_path)}")
     status(f"Ready. Speed:{speed}%  Step:{cart_step}mm")
 
     jogging = None
@@ -320,6 +330,26 @@ def main():
                 ev = err.split('{')[1].split('}')[0] if '{' in err else err
                 status(f"Mode:{mv}  Errors:{ev}")
 
+            # Log position
+            elif ch == 'l':
+                pose = r.get_pose()
+                angles = r.get_angles()
+                if pose and angles:
+                    # Prompt for optional label
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    sys.stdout.write("\r\n")
+                    label = input("  Label (enter to skip)> ").strip()
+                    tty.setcbreak(fd)
+                    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    row = ','.join(f'{v:.3f}' for v in pose + angles)
+                    with open(pos_log_path, 'a') as f:
+                        f.write(f'{ts},{row},{label}\n')
+                    pos_log_count += 1
+                    pv = ','.join(f'{v:.1f}' for v in pose)
+                    status(f"Logged #{pos_log_count}: [{pv}] {label}")
+                else:
+                    status("Log failed: can't read pose/joints")
+
             # Setup
             elif ch == 'e':
                 status("Enabling...")
@@ -390,6 +420,8 @@ def main():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         print("\r\n  Closing...")
         r.close()
+        if pos_log_count:
+            print(f"  Saved {pos_log_count} positions to {os.path.relpath(pos_log_path)}")
         print("  Done.")
 
 
