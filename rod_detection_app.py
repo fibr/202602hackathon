@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Rod Detection GUI App
 
-Connects to a RealSense D435i depth camera, segments non-flat objects
-from the depth image, and fits oriented bounding rectangles (x, y, angle)
-to each detected object. Includes a demo/simulation mode when no camera
-is connected.
+Connects to a RealSense depth camera (D405 or D435i auto-detected),
+segments non-flat objects from the depth image, and fits oriented
+bounding rectangles (x, y, angle) to each detected object.
+Includes a demo/simulation mode when no camera is connected.
+
+Camera support:
+  D405   — short-range (70–500 mm), 848×480 @ 30 fps, no IMU
+  D435i  — mid-range  (200–1200 mm), 640×480 @ 15 fps, has IMU
+  other  — falls back to 848×480 @ 30 fps with wide depth range
 
 Usage:
-    python3 rod_detection_app.py [--demo]
+    python3 rod_detection_app.py           # auto-detect camera
+    python3 rod_detection_app.py --demo    # synthetic demo, no camera needed
 """
 
 import sys
@@ -31,6 +37,75 @@ try:
 except ImportError:
     rs = None
     REALSENSE_AVAILABLE = False
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Camera profiles
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Each profile has stream settings and sensible segmenter defaults.
+# Keys are matched against the uppercase camera name string from the SDK.
+CAMERA_PROFILES = {
+    # Intel RealSense D405 — global-shutter short-range stereo
+    "D405": {
+        "width": 848, "height": 480, "fps": 30,
+        "depth_min_mm": 70,  "depth_max_mm": 450,
+        "table_tolerance_mm": 8,
+        "min_area_px": 150,
+    },
+    # Intel RealSense D435 / D435i — rolling-shutter mid-range
+    "D435": {
+        "width": 640, "height": 480, "fps": 15,
+        "depth_min_mm": 200, "depth_max_mm": 1200,
+        "table_tolerance_mm": 15,
+        "min_area_px": 300,
+    },
+    # Fallback for any other RealSense model
+    "_default": {
+        "width": 848, "height": 480, "fps": 30,
+        "depth_min_mm": 70,  "depth_max_mm": 1500,
+        "table_tolerance_mm": 15,
+        "min_area_px": 300,
+    },
+}
+
+# Segmenter keys that live in a profile (subset used for slider sync)
+_PROFILE_SEGMENTER_KEYS = ("depth_min_mm", "depth_max_mm",
+                            "table_tolerance_mm", "min_area_px")
+
+
+def get_camera_profile(camera_name: str) -> dict:
+    """Return the best-matching profile for a camera name string.
+
+    Matches the first profile key found (case-insensitive) inside the
+    camera_name reported by the RealSense SDK, e.g.
+    "Intel RealSense D405" → CAMERA_PROFILES["D405"]
+    """
+    upper = camera_name.upper()
+    for key, profile in CAMERA_PROFILES.items():
+        if key != "_default" and key in upper:
+            return profile
+    return CAMERA_PROFILES["_default"]
+
+
+def detect_first_camera() -> tuple[str, str]:
+    """Return (name, serial) of the first connected RealSense device.
+
+    Returns ("", "") when no camera is found or pyrealsense2 is missing.
+    Example return: ("Intel RealSense D405", "123456789012")
+    """
+    if not REALSENSE_AVAILABLE:
+        return "", ""
+    try:
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        if len(devices) == 0:
+            return "", ""
+        dev = devices[0]
+        name   = dev.get_info(rs.camera_info.name)
+        serial = dev.get_info(rs.camera_info.serial_number)
+        return name, serial
+    except Exception:
+        return "", ""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Detection logic (standalone, no camera dependency)
@@ -339,6 +414,8 @@ class CameraThread(threading.Thread):
         self._fps: float = 0.0
         self._error: str | None = None
         self._running: bool = False
+        self._camera_name: str = "DEMO" if demo_mode else ""
+        self._camera_serial: str = ""
 
         self.segmenter = DepthSegmenter()
 
@@ -357,7 +434,7 @@ class CameraThread(threading.Thread):
                     setattr(self.segmenter, k, v)
 
     def get_latest(self):
-        """Return (color_bgr, depth_mm, objects, table_depth_mm, fps, error, running)."""
+        """Return (color_bgr, depth_mm, objects, table_depth_mm, fps, error, running, camera_name)."""
         with self._lock:
             return (
                 self._color_image,
@@ -367,6 +444,7 @@ class CameraThread(threading.Thread):
                 self._fps,
                 self._error,
                 self._running,
+                self._camera_name,
             )
 
     def stop(self):
@@ -408,10 +486,34 @@ class CameraThread(threading.Thread):
         if not REALSENSE_AVAILABLE:
             raise RuntimeError("pyrealsense2 is not installed")
 
+        # ── Detect camera model and choose streaming profile ──────────────
+        camera_name, camera_serial = detect_first_camera()
+        if not camera_name:
+            raise RuntimeError(
+                "No RealSense camera detected. "
+                "Check USB connection and try again, or use --demo."
+            )
+        profile = get_camera_profile(camera_name)
+        width, height, fps = profile["width"], profile["height"], profile["fps"]
+
+        print(f"[Camera] Detected: {camera_name}  serial={camera_serial}")
+        print(f"[Camera] Profile:  {width}x{height} @ {fps}fps  "
+              f"depth {profile['depth_min_mm']}–{profile['depth_max_mm']} mm")
+
+        # Store camera identity (GUI reads this to update the mode badge)
+        with self._lock:
+            self._camera_name   = camera_name
+            self._camera_serial = camera_serial
+            # Apply camera-tuned segmenter defaults (overrides generic init values)
+            for key in _PROFILE_SEGMENTER_KEYS:
+                if key in profile:
+                    setattr(self.segmenter, key, profile[key])
+
+        # ── Configure and start RealSense pipeline ────────────────────────
         pipeline = rs.pipeline()
         config = rs.config()
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
+        config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
 
         try:
             pipeline.start(config)
@@ -434,7 +536,7 @@ class CameraThread(threading.Thread):
 
                 objects, _, table_depth = self.segmenter.find_objects(depth)
                 t_now = time.time()
-                fps = 1.0 / max(t_now - t_prev, 0.001)
+                fps_actual = 1.0 / max(t_now - t_prev, 0.001)
                 t_prev = t_now
 
                 with self._lock:
@@ -442,7 +544,7 @@ class CameraThread(threading.Thread):
                     self._depth_image = depth
                     self._objects = objects
                     self._table_depth_mm = table_depth
-                    self._fps = fps
+                    self._fps = fps_actual
         finally:
             pipeline.stop()
             with self._lock:
@@ -652,12 +754,33 @@ class RodDetectionApp:
         kwargs = {k: dt(v.get()) for k, (v, dt) in self._param_vars.items()}
         self.camera_thread.configure_segmenter(**kwargs)
 
+    def _apply_profile_to_sliders(self, profile: dict):
+        """Set slider values from a camera profile (does not push to segmenter yet)."""
+        for key in _PROFILE_SEGMENTER_KEYS:
+            if key in profile and key in self._param_vars:
+                var, _ = self._param_vars[key]
+                var.set(float(profile[key]))
+
     def _on_start(self):
         """Start camera capture thread."""
         if self.camera_thread and self.camera_thread.is_alive():
             return
+
+        # For live mode: pre-detect camera, update sliders and mode badge
+        if not self.demo_mode and REALSENSE_AVAILABLE:
+            cam_name, cam_serial = detect_first_camera()
+            if cam_name:
+                profile = get_camera_profile(cam_name)
+                self._apply_profile_to_sliders(profile)
+                short = cam_name.replace("Intel RealSense ", "")
+                self.lbl_mode.configure(text=short, bg="#89b4fa")
+                self.lbl_status.configure(text=f"Detected: {short}  s/n {cam_serial}")
+            else:
+                self.lbl_status.configure(text="No camera found — check USB")
+                return
+
         self.camera_thread = CameraThread(demo_mode=self.demo_mode)
-        # Apply current slider values
+        # Seed segmenter from current (possibly just-updated) slider values
         kwargs = {k: dt(v.get()) for k, (v, dt) in self._param_vars.items()}
         self.camera_thread.segmenter.__dict__.update(kwargs)
         self.camera_thread.start()
@@ -682,7 +805,7 @@ class RodDetectionApp:
         """Save current frame to disk."""
         if self.camera_thread is None:
             return
-        color, depth, objects, table_depth, fps, error, running = \
+        color, depth, objects, table_depth, fps, error, running, _cam = \
             self.camera_thread.get_latest()
         if color is None:
             messagebox.showinfo("Snapshot", "No frame available yet.")
@@ -707,7 +830,7 @@ class RodDetectionApp:
         if self.camera_thread is None:
             return
 
-        color, depth, objects, table_depth, fps, error, running = \
+        color, depth, objects, table_depth, fps, error, running, camera_name = \
             self.camera_thread.get_latest()
 
         # Handle errors
@@ -715,6 +838,12 @@ class RodDetectionApp:
             self.lbl_status.configure(text=f"Error: {error}")
             self._on_stop()
             return
+
+        # Keep mode badge in sync with what the thread detected
+        if camera_name and not self.demo_mode:
+            short = camera_name.replace("Intel RealSense ", "")
+            if self.lbl_mode.cget("text") != short:
+                self.lbl_mode.configure(text=short, bg="#89b4fa")
 
         if running:
             self.lbl_status.configure(text="Running...")
