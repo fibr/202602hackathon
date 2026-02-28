@@ -376,52 +376,44 @@ def main():
     print("Calibration: touch TCP to board, click on it, Enter solve, u undo, n clear, Esc quit")
     print()
 
-    # Connect to robot
+    # Connect to robot (optional — camera-only mode if unavailable)
+    robot = None
     print(f"Connecting to robot at {ip}:{port}...")
-    robot = RobotConnection(ip, port)
     try:
+        robot = RobotConnection(ip, port)
         robot.connect()
-    except ConnectionRefusedError:
-        print(f"  ERROR: Connection refused at {ip}:{port}")
-        print(f"  - Is the robot powered on and booted? (takes ~60s after power cycle)")
-        print(f"  - Is another dashboard session already connected? (only one allowed)")
-        sys.exit(1)
-    except socket.timeout:
-        print(f"  ERROR: Connection timed out to {ip}:{port}")
-        print(f"  - Is the robot on the network? Try: ping {ip}")
-        print(f"  - Check cable connection and IP configuration")
-        sys.exit(1)
-    except OSError as e:
-        print(f"  ERROR: Cannot connect to robot: {e}")
-        print(f"  - Verify robot IP in config/robot_config.yaml")
-        sys.exit(1)
-    print(f"  Connected.")
+        print(f"  Connected.")
 
-    # Enable robot
-    robot.send('DisableRobot()')
-    time.sleep(1)
-    robot.send('ClearError()')
-    robot.send('EnableRobot()')
-    time.sleep(1)
+        robot.send('DisableRobot()')
+        time.sleep(1)
+        robot.send('ClearError()')
+        robot.send('EnableRobot()')
+        time.sleep(1)
 
-    speed = 30
-    robot.send(f'SpeedFactor({speed})')
+        speed = 30
+        robot.send(f'SpeedFactor({speed})')
 
-    pose = robot.get_pose()
-    if pose:
-        print(f"  Robot pose: {', '.join(f'{v:.1f}' for v in pose)}")
-    else:
-        print("  WARNING: couldn't read robot pose")
+        pose = robot.get_pose()
+        if pose:
+            print(f"  Robot pose: {', '.join(f'{v:.1f}' for v in pose)}")
+        else:
+            print("  WARNING: couldn't read robot pose")
+    except (ConnectionRefusedError, socket.timeout, OSError) as e:
+        print(f"  WARNING: Cannot connect to robot: {e}")
+        print(f"  Continuing in camera-only mode (no arm control)")
+        robot = None
 
     # Start camera
     camera = RealSenseCamera(width=width, height=height, fps=15)
     camera.start()
     print("Camera started.\n")
 
-    # GUI panel
-    panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
-    panel.speed = speed
-    panel.status_msg = "Touch TCP to board, then click on it"
+    # GUI panel (only if robot connected)
+    panel = None
+    if robot:
+        panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
+        panel.speed = speed
+        panel.status_msg = "Touch TCP to board, then click on it"
 
     # State
     pairs = []  # list of (p_cam_3d_meters, p_robot_3d_meters, corner_2d_px)
@@ -432,7 +424,7 @@ def main():
     def on_mouse(event, x, y, flags, param):
         nonlocal click_point
         # Route to panel if in panel area
-        if x >= width:
+        if panel and x >= width:
             panel.handle_mouse(event, x, y, flags)
             return
         # Camera area: record calibration click
@@ -451,8 +443,9 @@ def main():
             gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
             found, corners = detect_corners(gray)
 
-            # Create expanded canvas with panel area on the right
-            canvas = np.zeros((height, width + PANEL_WIDTH, 3), dtype=np.uint8)
+            # Create canvas (expanded with panel area if robot connected)
+            canvas_w = width + PANEL_WIDTH if panel else width
+            canvas = np.zeros((height, canvas_w, 3), dtype=np.uint8)
             display = color_image.copy()
 
             if found:
@@ -480,26 +473,37 @@ def main():
                 click_point = None
 
                 if current_T_board is None:
-                    panel.status_msg = "No board detected - need board for ray-plane intersection"
-                    print(f"  {panel.status_msg}")
+                    msg = "No board detected - need board for ray-plane intersection"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+                elif not robot:
+                    msg = "No robot connected - can't record calibration point"
+                    print(f"  {msg}")
                 else:
                     p_cam = ray_plane_intersect((cx, cy), camera.intrinsics, current_T_board)
                     if p_cam is None:
-                        panel.status_msg = "Ray parallel to board plane - try different angle"
-                        print(f"  {panel.status_msg}")
+                        msg = "Ray parallel to board plane - try different angle"
+                        if panel:
+                            panel.status_msg = msg
+                        print(f"  {msg}")
                     else:
                         pose = robot.get_pose()
                         if pose is None:
-                            panel.status_msg = "ERROR: can't read robot pose"
-                            print(f"  {panel.status_msg}")
+                            msg = "ERROR: can't read robot pose"
+                            if panel:
+                                panel.status_msg = msg
+                            print(f"  {msg}")
                         else:
                             p_robot_m = np.array(pose[:3]) / 1000.0
                             pairs.append((p_cam, p_robot_m, (cx, cy)))
 
-                            panel.status_msg = (f"Pt {len(pairs)}: "
-                                                f"cam=[{p_cam[0]:.3f},{p_cam[1]:.3f},{p_cam[2]:.3f}] "
-                                                f"robot=[{pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}]")
-                            print(f"  {panel.status_msg}")
+                            msg = (f"Pt {len(pairs)}: "
+                                   f"cam=[{p_cam[0]:.3f},{p_cam[1]:.3f},{p_cam[2]:.3f}] "
+                                   f"robot=[{pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}]")
+                            if panel:
+                                panel.status_msg = msg
+                            print(f"  {msg}")
 
             # Draw recorded points
             for i, (_, _, px) in enumerate(pairs):
@@ -509,17 +513,21 @@ def main():
 
             # Status bar on camera image
             board_status = "Board OK" if found else "No board"
-            jog_str = " JOG" if panel.jogging else ""
-            bar_text = f"{len(pairs)} pts | Spd:{panel.speed}%{jog_str} | {board_status}"
+            if panel:
+                jog_str = " JOG" if panel.jogging else ""
+                bar_text = f"{len(pairs)} pts | Spd:{panel.speed}%{jog_str} | {board_status}"
+            else:
+                bar_text = f"{len(pairs)} pts | {board_status} | No robot"
             cv2.putText(display, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
             cv2.putText(display, "Enter solve | u undo | n clear | p pose | Esc quit",
                         (10, height - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
 
-            # Compose canvas: camera on left, panel on right
+            # Compose canvas: camera on left, panel on right (if robot)
             canvas[0:height, 0:width] = display
-            panel.draw(canvas)
+            if panel:
+                panel.draw(canvas)
 
             cv2.imshow('Calibration', canvas)
             key = cv2.waitKey(30) & 0xFF
@@ -530,34 +538,41 @@ def main():
                 break
 
             # --- Arm control via shared panel keyboard handler ---
-            if key != 255 and panel.handle_key(key):
+            if key != 255 and panel and panel.handle_key(key):
                 pass  # consumed by panel
 
             # Print pose (keep as keyboard shortcut)
-            elif key == ord('p'):
+            elif key == ord('p') and robot:
                 pose = robot.get_pose()
                 angles = robot.get_angles()
                 if pose and angles:
                     print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
-                    panel.status_msg = "Pose printed to console"
+                    if panel:
+                        panel.status_msg = "Pose printed to console"
 
             # --- Calibration controls ---
 
             elif key == ord('u') and pairs:
                 pairs.pop()
-                panel.status_msg = f"Undid -> {len(pairs)} pts remain"
-                print(f"  {panel.status_msg}")
+                msg = f"Undid -> {len(pairs)} pts remain"
+                if panel:
+                    panel.status_msg = msg
+                print(f"  {msg}")
 
             elif key == ord('n'):
                 pairs.clear()
-                panel.status_msg = "Cleared all points"
-                print(f"  {panel.status_msg}")
+                msg = "Cleared all points"
+                if panel:
+                    panel.status_msg = msg
+                print(f"  {msg}")
 
             elif key == 13:  # Enter
                 if len(pairs) < 3:
-                    panel.status_msg = f"Need 3+ points (have {len(pairs)})"
-                    print(f"  {panel.status_msg}")
+                    msg = f"Need 3+ points (have {len(pairs)})"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
                     continue
 
                 pts_cam = [p[0] for p in pairs]
@@ -596,14 +611,18 @@ def main():
                 out_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
                 ct.save(out_path)
                 print(f"Saved to {out_path}")
-                panel.status_msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
+                msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
+                if panel:
+                    panel.status_msg = msg
 
     except KeyboardInterrupt:
         pass
     finally:
-        robot.send('MoveJog()')  # stop any jog
+        if robot:
+            robot.send('MoveJog()')  # stop any jog
         camera.stop()
-        robot.close()
+        if robot:
+            robot.close()
         cv2.destroyAllWindows()
         print("\nDone.")
 
