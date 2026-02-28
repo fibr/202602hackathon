@@ -34,15 +34,17 @@ if [ ! -f .env ] && [ -f .env.example ]; then
     echo "Created .env from .env.example"
 fi
 
-# Start ROS2 driver container
-if ! command -v docker &>/dev/null; then
-    echo "WARNING: Docker not found. MovJ/MovL will not work (jog fallback only)."
-    echo "  Install Docker: https://docs.docker.com/engine/install/"
-elif ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dobot-driver$'; then
-    echo "Starting ROS2 driver (docker compose --profile dobot up -d)..."
-    if ! docker compose --profile dobot up -d 2>&1; then
-        echo "WARNING: Failed to start ROS2 driver. MovJ/MovL will not work (jog fallback only)."
-        echo "  Try: docker compose --profile dobot build"
+# Start ROS2 driver container (only for main pipeline, not test/debug scripts)
+if [[ "$1" == *"main.py"* ]]; then
+    if ! command -v docker &>/dev/null; then
+        echo "WARNING: Docker not found. MovJ/MovL will not work (jog fallback only)."
+        echo "  Install Docker: https://docs.docker.com/engine/install/"
+    elif ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dobot-driver$'; then
+        echo "Starting ROS2 driver (docker compose --profile dobot up -d)..."
+        if ! docker compose --profile dobot up -d 2>&1; then
+            echo "WARNING: Failed to start ROS2 driver. MovJ/MovL will not work (jog fallback only)."
+            echo "  Try: docker compose --profile dobot build"
+        fi
     fi
 fi
 

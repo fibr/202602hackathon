@@ -42,17 +42,26 @@ class FastRobot:
             pass
 
     def send(self, cmd):
-        try:
-            self.sock.send(f"{cmd}\n".encode())
-        except (BrokenPipeError, OSError):
-            print("\r\n  Connection lost, reconnecting...")
-            self._connect()
-            self.sock.send(f"{cmd}\n".encode())
-        time.sleep(0.05)
-        try:
-            return self.sock.recv(4096).decode().strip()
-        except socket.timeout:
-            return ""
+        for attempt in range(3):
+            try:
+                self.sock.send(f"{cmd}\n".encode())
+                time.sleep(0.05)
+                try:
+                    return self.sock.recv(4096).decode().strip()
+                except socket.timeout:
+                    return ""
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                if attempt < 2:
+                    print(f"\r\n  Connection lost, reconnecting ({attempt+2}/3)...")
+                    time.sleep(1)
+                    try:
+                        self._connect()
+                    except (ConnectionRefusedError, socket.timeout, OSError):
+                        continue
+                else:
+                    print("\r\n  ERROR: Cannot reach robot after 3 attempts.")
+                    print("  Check: is another dashboard session open? (only one allowed)")
+                    raise
 
     def parse_vals(self, resp):
         """Extract comma-separated floats from '{...}' in response."""
