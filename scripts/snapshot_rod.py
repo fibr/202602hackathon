@@ -147,7 +147,7 @@ def main():
     cam_cfg = config.get('camera', {})
 
     detector = RodDetector(
-        min_aspect_ratio=cam_cfg.get('min_aspect_ratio', 3.0),
+        min_aspect_ratio=cam_cfg.get('min_aspect_ratio', 2.2),
         min_area=cam_cfg.get('min_area', 500),
         depth_min_mm=cam_cfg.get('depth_min_mm', 6000),
         depth_max_mm=cam_cfg.get('depth_max_mm', 19000),

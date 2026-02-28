@@ -55,7 +55,6 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
                 log.error(f"IK failed for waypoint {wp.label}")
                 raise RuntimeError(f"IK failed at {wp.label}: "
                                    f"pos={target_pos}, rpy={target_rpy}")
-            robot.set_speed(robot._speed_percent if hasattr(robot, '_speed_percent') else 30)
             ok = robot.movj_joints(*joints)
             if not ok:
                 log.error(f"movj_joints failed at {wp.label}")
@@ -74,7 +73,6 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
                 log.error(f"Linear interpolation failed for {wp.label}")
                 raise RuntimeError(f"Linear IK failed at {wp.label}")
 
-            robot.set_speed(robot._speed_percent if hasattr(robot, '_speed_percent') else 30)
             for step_joints in joint_path:
                 ok = robot.movj_joints(*step_joints)
                 if not ok:
@@ -129,10 +127,12 @@ def main():
     )
 
     detector = RodDetector(
-        min_aspect_ratio=camera_cfg.get('min_aspect_ratio', 3.0),
+        min_aspect_ratio=camera_cfg.get('min_aspect_ratio', 2.2),
         min_area=camera_cfg.get('min_area', 500),
         depth_min_mm=camera_cfg.get('depth_min_mm', 6000),
         depth_max_mm=camera_cfg.get('depth_max_mm', 19000),
+        max_brightness=camera_cfg.get('max_brightness', 120),
+        max_brightness_std=camera_cfg.get('max_brightness_std', 40.0),
         min_convexity=camera_cfg.get('min_convexity', 0.85),
         workspace_roi=camera_cfg.get('workspace_roi'),
     )
