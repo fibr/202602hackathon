@@ -28,4 +28,18 @@ elif [ requirements.txt -nt .venv/.deps_installed ]; then
     echo "Dependencies updated."
 fi
 
+# Ensure .env exists for docker compose
+if [ ! -f .env ] && [ -f .env.example ]; then
+    cp .env.example .env
+    echo "Created .env from .env.example"
+fi
+
+# Start ROS2 driver if docker is available and not already running
+if command -v docker &>/dev/null && [ -f docker-compose.yml ]; then
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dobot-driver$'; then
+        echo "Starting ROS2 driver (docker compose --profile dobot up -d)..."
+        docker compose --profile dobot up -d 2>/dev/null || true
+    fi
+fi
+
 exec .venv/bin/python "$@"
