@@ -65,8 +65,11 @@ def main():
 
     detector = RodDetector(
         min_aspect_ratio=camera_cfg.get('min_aspect_ratio', 3.0),
-        depth_min_mm=camera_cfg.get('depth_min_mm', 100),
-        depth_max_mm=camera_cfg.get('depth_max_mm', 1000),
+        min_area=camera_cfg.get('min_area', 500),
+        depth_min_mm=camera_cfg.get('depth_min_mm', 6000),
+        depth_max_mm=camera_cfg.get('depth_max_mm', 19000),
+        min_convexity=camera_cfg.get('min_convexity', 0.85),
+        workspace_roi=camera_cfg.get('workspace_roi'),
     )
 
     transform = CoordinateTransform()
