@@ -644,6 +644,45 @@ def main():
         save_plane,
         color=(0, 100, 100))
 
+    # Hand-eye solve callback (GUI button)
+    def solve_handeye():
+        if len(pairs) < 3:
+            panel.status_msg = f"Need 3+ points (have {len(pairs)})"
+            print(f"  {panel.status_msg}")
+            return
+        pts_cam = [p[0] for p in pairs]
+        pts_robot = [p[1] for p in pairs]
+        T_cam2base, inlier_mask = solve_robust_transform(pts_cam, pts_robot)
+        n_inliers = inlier_mask.sum()
+        n_outliers = len(pairs) - n_inliers
+        print(f"\n=== Calibration Result ({len(pairs)} pts, {n_inliers} inliers, {n_outliers} outliers) ===")
+        print("T_camera_to_base:")
+        print(T_cam2base)
+        cam_pos = T_cam2base[:3, 3] * 1000
+        print(f"\nCamera in robot frame: [{cam_pos[0]:.1f}, {cam_pos[1]:.1f}, {cam_pos[2]:.1f}] mm")
+        print("\nPer-point errors:")
+        errors = []
+        for i, (p_cam, p_robot, _) in enumerate(pairs):
+            p_hom = np.append(p_cam, 1.0)
+            p_est = (T_cam2base @ p_hom)[:3]
+            err_mm = np.linalg.norm(p_est - p_robot) * 1000
+            errors.append(err_mm)
+            tag = "  " if inlier_mask[i] else "* "
+            print(f"  {tag}Point {i+1}: {err_mm:.1f} mm{'  <-- OUTLIER' if not inlier_mask[i] else ''}")
+        inlier_errors = [e for e, m in zip(errors, inlier_mask) if m]
+        print(f"\nInlier mean: {np.mean(inlier_errors):.1f} mm, max: {np.max(inlier_errors):.1f} mm")
+        ct = CoordinateTransform()
+        ct.T_camera_to_base = T_cam2base
+        out_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
+        ct.save(out_path)
+        print(f"Saved to {out_path}")
+        panel.status_msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
+
+    panel.add_button(
+        lambda: f"Solve HandEye ({len(pairs)})",
+        solve_handeye,
+        color=(0, 100, 0))
+
     # Robot overlay (load calibration if available)
     robot_overlay = None
     calibration_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
@@ -910,50 +949,8 @@ def main():
                     panel.status_msg = msg
                     print(f"  {msg}  normal=[{normal[0]:.4f},{normal[1]:.4f},{normal[2]:.4f}]")
 
-            elif key == 13:  # Enter
-                if len(pairs) < 3:
-                    msg = f"Need 3+ points (have {len(pairs)})"
-                    panel.status_msg = msg
-                    print(f"  {msg}")
-                    continue
-
-                pts_cam = [p[0] for p in pairs]
-                pts_robot = [p[1] for p in pairs]
-
-                T_cam2base, inlier_mask = solve_robust_transform(pts_cam, pts_robot)
-
-                n_inliers = inlier_mask.sum()
-                n_outliers = len(pairs) - n_inliers
-
-                print(f"\n=== Calibration Result ({len(pairs)} pts, {n_inliers} inliers, {n_outliers} outliers) ===")
-                print("T_camera_to_base:")
-                print(T_cam2base)
-
-                cam_pos = T_cam2base[:3, 3] * 1000
-                print(f"\nCamera in robot frame: [{cam_pos[0]:.1f}, {cam_pos[1]:.1f}, {cam_pos[2]:.1f}] mm")
-
-                # Per-point errors
-                print("\nPer-point errors:")
-                errors = []
-                for i, (p_cam, p_robot, _) in enumerate(pairs):
-                    p_hom = np.append(p_cam, 1.0)
-                    p_est = (T_cam2base @ p_hom)[:3]
-                    err_mm = np.linalg.norm(p_est - p_robot) * 1000
-                    errors.append(err_mm)
-                    tag = "  " if inlier_mask[i] else "* "
-                    print(f"  {tag}Point {i+1}: {err_mm:.1f} mm{'  <-- OUTLIER' if not inlier_mask[i] else ''}")
-
-                inlier_errors = [e for e, m in zip(errors, inlier_mask) if m]
-                print(f"\nInlier mean: {np.mean(inlier_errors):.1f} mm, max: {np.max(inlier_errors):.1f} mm")
-
-                # Save
-                ct = CoordinateTransform()
-                ct.T_camera_to_base = T_cam2base
-                out_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
-                ct.save(out_path)
-                print(f"Saved to {out_path}")
-                msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
-                panel.status_msg = msg
+            elif key == 13:  # Enter — solve hand-eye (same as button)
+                solve_handeye()
 
     except KeyboardInterrupt:
         pass
