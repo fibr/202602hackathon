@@ -1,20 +1,17 @@
-"""TCP/IP driver for Dobot Nova5 robot arm (firmware 4.6.2).
+"""TCP/IP driver for Dobot Nova5 robot arm (firmware V4, e.g. 4.6.2).
 
-Supports three motion modes (auto-detected on connect):
-  1. "dashboard" — MovJ/MovL work on dashboard port 29999 (ROS2 driver running)
-  2. "motion_port" — MovJ/MovL via separate motion port 30003
-  3. "jog" — fallback to MoveJog pulses + InverseKin (no ROS2 driver)
+All commands go through dashboard port 29999 using V4 named-parameter syntax.
+No ROS2 driver or additional ports needed.
 
-Dashboard port (29999) is always used for state queries, gripper, enable/disable.
-Motion commands are routed to the best available port.
+V4 motion command syntax (different from V3!):
+  MovJ(pose={x,y,z,rx,ry,rz})        — joint-space move to Cartesian pose
+  MovL(pose={x,y,z,rx,ry,rz})        — linear move to Cartesian pose
+  MovJ(joint={j1,j2,j3,j4,j5,j6})   — joint-space move to joint angles
 
-Tested protocol behavior on Nova5 4.6.2:
-  - MoveJog(J1+) .. MoveJog(J6-): joint jog, uppercase only
-  - MoveJog(): stop jog
-  - MovJ/MovL: return -30001 without ROS2 driver, work with it
-  - ToolDOInstant(index, status): works for electric gripper
-  - InverseKin / PositiveKin: work on dashboard
-  - Response format: "code,{value},CommandName();"
+Motion commands are fire-and-forget: they return immediately, completion
+is detected by polling joint stability.
+
+Reference: https://github.com/Dobot-Arm/TCP-IP-Python-V4
 """
 
 import socket
@@ -43,96 +40,58 @@ class RobotState:
 class DobotNova5:
     """Driver for Dobot Nova5 6-axis robot arm over TCP/IP.
 
-    Uses dashboard port 29999 for all commands. When the ROS2 driver is
-    running (docker compose --profile dobot up), real MovJ/MovL become
-    available for precise coordinated motion. Without it, falls back to
-    jog-based motion.
+    Uses dashboard port 29999 with V4 command syntax for all operations
+    including MovJ/MovL motion commands.
     """
 
-    # Valid jog axis names (must be uppercase)
     JOG_AXES = ["J1", "J2", "J3", "J4", "J5", "J6"]
 
     def __init__(self, ip: str = "192.168.5.1",
-                 dashboard_port: int = 29999,
-                 motion_port: int = 30003):
+                 dashboard_port: int = 29999):
         self.ip = ip
         self.dashboard_port = dashboard_port
-        self.motion_port = motion_port
         self._sock = None
-        self._motion_sock = None
-        self._motion_mode = "jog"  # "dashboard", "motion_port", or "jog"
+        self._has_movl = False  # Set True after successful MovJ/MovL probe
         self.state = RobotState()
 
     @property
     def motion_mode(self) -> str:
-        """Current motion mode: 'dashboard', 'motion_port', or 'jog'."""
-        return self._motion_mode
+        """Current motion mode: 'movl' or 'jog'."""
+        return "movl" if self._has_movl else "jog"
 
     def connect(self):
-        """Connect to dashboard port and probe for motion support."""
+        """Connect to dashboard port and probe for V4 motion support."""
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.settimeout(5.0)
         self._sock.connect((self.ip, self.dashboard_port))
-        # Read welcome banner
         try:
             self._sock.recv(1024)
         except socket.timeout:
             pass
-        self._probe_motion_support()
 
-    def _probe_motion_support(self):
-        """Test whether MovJ/MovL are available and set motion mode."""
-        # Strategy 1: Try MovJ on dashboard with current joint angles (no-op move)
+    def probe_motion(self):
+        """Test V4 MovJ syntax. Call after enable().
+
+        Sends a no-op MovJ to current joint angles to check if
+        V4 named-parameter syntax works on this firmware.
+        """
         current = self.get_joint_angles()
         if current is not None and not np.allclose(current, 0):
             j = current
-            resp = self._send(
-                f"MovJ({j[0]:.2f},{j[1]:.2f},{j[2]:.2f},"
-                f"{j[3]:.2f},{j[4]:.2f},{j[5]:.2f})")
+            cmd = (f"MovJ(joint={{{j[0]:.2f},{j[1]:.2f},{j[2]:.2f},"
+                   f"{j[3]:.2f},{j[4]:.2f},{j[5]:.2f}}})")
+            resp = self._send(cmd)
             code, _ = self._parse_response(resp)
-            if code == RC_OK:
-                self._motion_mode = "dashboard"
-                return
-
-        # Strategy 2: Try connecting to motion port directly
-        try:
-            self._motion_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._motion_sock.settimeout(2.0)
-            self._motion_sock.connect((self.ip, self.motion_port))
-            try:
-                self._motion_sock.recv(1024)  # Read banner
-            except socket.timeout:
-                pass
-            self._motion_mode = "motion_port"
-            return
-        except (ConnectionRefusedError, socket.timeout, OSError):
-            if self._motion_sock:
-                self._motion_sock.close()
-                self._motion_sock = None
-
-        # Fallback: jog-based motion
-        self._motion_mode = "jog"
+            self._has_movl = (code == RC_OK)
 
     def _send(self, cmd: str) -> str:
-        """Send a command on the dashboard port and return raw response."""
+        """Send a command and return raw response string."""
         self._sock.send(f"{cmd}\n".encode())
         time.sleep(0.1)
         try:
             return self._sock.recv(4096).decode().strip()
         except socket.timeout:
             return ""
-
-    def _send_motion(self, cmd: str) -> str:
-        """Send a motion command to the best available port."""
-        if self._motion_mode == "motion_port" and self._motion_sock:
-            self._motion_sock.send(f"{cmd}\n".encode())
-            time.sleep(0.1)
-            try:
-                return self._motion_sock.recv(4096).decode().strip()
-            except socket.timeout:
-                return ""
-        else:
-            return self._send(cmd)
 
     def _parse_response(self, resp: str) -> tuple[int, str]:
         """Parse 'code,{value},cmd;' -> (code, value_string)."""
@@ -162,6 +121,7 @@ class DobotNova5:
         time.sleep(1)
         code, _ = self._parse_response(resp)
         self.state.enabled = (code == RC_OK)
+        self.probe_motion()
         return code == RC_OK
 
     def disable(self):
@@ -308,7 +268,8 @@ class DobotNova5:
         """Move to target joint angles by jogging each joint.
 
         Jogs each joint individually toward the target. Not a coordinated
-        move — joints move one at a time.
+        move — joints move one at a time. Used as fallback when MovJ is
+        not available.
 
         Args:
             target: Array of 6 target joint angles in degrees
@@ -330,8 +291,7 @@ class DobotNova5:
                     break
 
                 direction = "+" if error > 0 else "-"
-                # Short jog pulses for precision
-                jog_time = min(0.5, abs(error) / 20.0)  # scale with distance
+                jog_time = min(0.5, abs(error) / 20.0)
                 jog_time = max(0.1, jog_time)
 
                 self.jog_start(f"J{joint_num}{direction}")
@@ -341,19 +301,24 @@ class DobotNova5:
 
         return self.get_joint_angles()
 
-    # --- Cartesian motion ---
+    # --- Cartesian motion (V4 syntax) ---
 
     def movl(self, x: float, y: float, z: float,
              rx: float, ry: float, rz: float,
-             timeout: float = 30.0) -> bool:
-        """Cartesian linear move via firmware MovL.
+             speed: int = -1, timeout: float = 30.0) -> bool:
+        """Cartesian linear move via V4 MovL.
 
-        Requires ROS2 driver. Returns False if unavailable or command fails.
-        Units: mm for xyz, degrees for rx/ry/rz.
+        Args:
+            x, y, z: Target position in mm
+            rx, ry, rz: Target orientation in degrees
+            speed: Speed percentage (optional, uses SpeedFactor if -1)
+            timeout: Max wait for completion
+
+        Returns:
+            True if motion completed, False on failure.
         """
-        if self._motion_mode == "jog":
-            return False
-        resp = self._send_motion(f"MovL({x},{y},{z},{rx},{ry},{rz})")
+        cmd = f"MovL(pose={{{x},{y},{z},{rx},{ry},{rz}}})"
+        resp = self._send(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
             return False
@@ -361,15 +326,39 @@ class DobotNova5:
 
     def movj(self, x: float, y: float, z: float,
              rx: float, ry: float, rz: float,
-             timeout: float = 30.0) -> bool:
-        """Joint-space move to Cartesian pose via firmware MovJ.
+             speed: int = -1, timeout: float = 30.0) -> bool:
+        """Joint-space move to Cartesian pose via V4 MovJ.
 
-        Requires ROS2 driver. Returns False if unavailable or command fails.
-        Units: mm for xyz, degrees for rx/ry/rz.
+        Args:
+            x, y, z: Target position in mm
+            rx, ry, rz: Target orientation in degrees
+            speed: Speed percentage (optional, uses SpeedFactor if -1)
+            timeout: Max wait for completion
+
+        Returns:
+            True if motion completed, False on failure.
         """
-        if self._motion_mode == "jog":
+        cmd = f"MovJ(pose={{{x},{y},{z},{rx},{ry},{rz}}})"
+        resp = self._send(cmd)
+        code, _ = self._parse_response(resp)
+        if code != RC_OK:
             return False
-        resp = self._send_motion(f"MovJ({x},{y},{z},{rx},{ry},{rz})")
+        return self._wait_motion_complete(timeout)
+
+    def movj_joints(self, j1: float, j2: float, j3: float,
+                    j4: float, j5: float, j6: float,
+                    timeout: float = 30.0) -> bool:
+        """Joint-space move to joint angles via V4 MovJ.
+
+        Args:
+            j1..j6: Target joint angles in degrees
+            timeout: Max wait for completion
+
+        Returns:
+            True if motion completed, False on failure.
+        """
+        cmd = f"MovJ(joint={{{j1},{j2},{j3},{j4},{j5},{j6}}})"
+        resp = self._send(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
             return False
@@ -382,14 +371,13 @@ class DobotNova5:
                     timeout: float = 30.0) -> bool:
         """Move TCP in a straight line to a Cartesian pose.
 
-        Uses MovL if ROS2 driver is running, otherwise falls back to
-        InverseKin + jog-based motion.
+        Uses V4 MovL if available, otherwise falls back to IK + jog.
 
         Args:
             x, y, z: Target position in mm
             rx, ry, rz: Target orientation in degrees
-            speed_percent: Jog speed (1-100)
-            tolerance_deg: Acceptable joint error in degrees
+            speed_percent: Speed (1-100)
+            tolerance_deg: Acceptable joint error for jog fallback
             timeout: Max time for the move
 
         Returns:
@@ -397,9 +385,8 @@ class DobotNova5:
         """
         self.set_speed(speed_percent)
 
-        # Try real MovL first
-        if self._motion_mode != "jog":
-            if self.movl(x, y, z, rx, ry, rz, timeout):
+        if self._has_movl:
+            if self.movl(x, y, z, rx, ry, rz, timeout=timeout):
                 return True
 
         # Fallback: IK + jog
@@ -416,14 +403,13 @@ class DobotNova5:
                    timeout: float = 30.0) -> bool:
         """Move to a Cartesian pose via joint-space motion.
 
-        Uses MovJ if ROS2 driver is running, otherwise falls back to
-        InverseKin + jog-based motion.
+        Uses V4 MovJ if available, otherwise falls back to IK + jog.
 
         Args:
             x, y, z: Target position in mm
             rx, ry, rz: Target orientation in degrees
-            speed_percent: Jog speed (1-100)
-            tolerance_deg: Acceptable joint error in degrees
+            speed_percent: Speed (1-100)
+            tolerance_deg: Acceptable joint error for jog fallback
             timeout: Max time for the move
 
         Returns:
@@ -431,9 +417,8 @@ class DobotNova5:
         """
         self.set_speed(speed_percent)
 
-        # Try real MovJ first
-        if self._motion_mode != "jog":
-            if self.movj(x, y, z, rx, ry, rz, timeout):
+        if self._has_movl:
+            if self.movj(x, y, z, rx, ry, rz, timeout=timeout):
                 return True
 
         # Fallback: IK + jog
@@ -471,15 +456,13 @@ class DobotNova5:
     # --- Connection lifecycle ---
 
     def disconnect(self):
-        """Close all connections."""
-        for sock in [self._sock, self._motion_sock]:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-        self._sock = None
-        self._motion_sock = None
+        """Close the dashboard connection."""
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
 
     def __enter__(self):
         self.connect()

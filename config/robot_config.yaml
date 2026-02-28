@@ -2,8 +2,7 @@
 
 robot:
   ip: "192.168.5.1"
-  dashboard_port: 29999       # State queries, gripper, enable/disable
-  motion_port: 30003          # MovJ/MovL (requires ROS2 driver: docker compose --profile dobot up)
+  dashboard_port: 29999       # All commands including MovJ/MovL (V4 syntax)
   speed_percent: 30           # Start slow for safety (1-100)
 
 camera:
