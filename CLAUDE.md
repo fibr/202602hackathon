@@ -16,10 +16,10 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ### Test and debug scripts
 ```bash
 ./run.sh scripts/test_robot.py           # Ping, connect, enable, jog wiggle + gripper
-./run.sh scripts/control_panel.py        # Interactive keyboard control
+./run.sh scripts/control_panel.py        # Camera + GUI control panel (OpenCV)
 ./run.sh scripts/debug_robot.py          # Dashboard diagnostics dump
 ./run.sh scripts/test_camera.py [--hd]   # RealSense stream (press 'd' for detection)
-./run.sh scripts/detect_checkerboard.py [--hd]  # Interactive calibration (arm control + click corners)
+./run.sh scripts/detect_checkerboard.py [--hd]  # Interactive calibration (GUI panel + click corners)
 ./run.sh scripts/calibrate.py            # Manual hand-eye calibration
 ```
 
@@ -46,6 +46,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 
 - `src/main.py` — State machine orchestrator (INIT → DETECT → PLAN → EXECUTE → DONE)
 - `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge)
+- `src/gui/` — Shared OpenCV GUI panel for robot arm control (XY jog pad, Z, gripper, speed, enable/home, status)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
 - `src/planner/` — Generates ordered waypoints (approach, grasp, lift, reorient, place, release)

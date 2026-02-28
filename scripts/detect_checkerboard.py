@@ -11,26 +11,16 @@ Workflow:
   2. Click on the TCP tip in the camera image
   3. Script intersects click ray with board plane for camera-frame 3D
   4. Repeat for 4+ positions spread across the board
-  5. Press 's' to solve with RANSAC + least-squares refinement and save
+  5. Press Enter to solve with RANSAC + least-squares refinement and save
 
 Usage:
     ./run.sh scripts/detect_checkerboard.py [--hd]
 
     --sd   Use 640x480 resolution (default: 1280x720 HD)
 
-Arm control (OpenCV window must be focused):
-    1-6        Jog J1+..J6+ (hold key, press space to stop)
-    !@#$%^     Jog J1-..J6- (shift + 1-6)
-    space      Stop jog
-    W/S        Y+ / Y-  forward/back (20mm step)
-    A/D        X- / X+  left/right   (20mm step)
-    Q/E        Z+ / Z-  up/down      (10mm step)
-    r/R t/T    Rx/Ry +/- (5 deg step)
-    y/Y        Rz+ / Rz-
-    [/]        Speed -/+ 10%
-    c/o        Gripper close/open
-    v          Enable robot
-    p          Print pose
+Arm control: GUI panel on the right side of the window (XY pad, Z, gripper,
+    speed, enable/home). Keyboard shortcuts: 1-6/!@#$%^ jog, space stop,
+    c/o gripper, [/] speed, v enable, p print pose.
 
 Calibration:
     click      Record correspondence (ray-plane intersection with board)
@@ -53,6 +43,7 @@ from scipy.optimize import least_squares
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from vision import RealSenseCamera
 from config_loader import load_config
+from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 
 # Checkerboard parameters
 BOARD_COLS = 7   # inner corners (8 squares - 1)
@@ -60,26 +51,6 @@ BOARD_ROWS = 9   # inner corners (10 squares - 1)
 SQUARE_SIZE_M = 0.02  # 2cm squares
 
 SNAP_RADIUS_PX = 30  # max pixel distance to snap click to a corner
-
-# Arm control parameters
-CART_STEP_MM = 10.0      # vertical (Q/E) step
-CART_STEP_MM_XY = 20.0   # horizontal (WASD) step
-CART_STEP_DEG = 5.0
-CART_KEYS = {
-    ord('w'): (1, +1), ord('s'): (1, -1),   # Y+ / Y- (forward/back)
-    ord('a'): (0, -1), ord('d'): (0, +1),   # X- / X+ (left/right)
-    ord('q'): (2, +1), ord('e'): (2, -1),   # Z+ / Z- (up/down)
-    ord('r'): (3, +1), ord('R'): (3, -1),   # Rx+ / Rx-
-    ord('t'): (4, +1), ord('T'): (4, -1),   # Ry+ / Ry-
-    ord('y'): (5, +1), ord('Y'): (5, -1),   # Rz+ / Rz-
-}
-CART_LABELS = {0: 'X', 1: 'Y', 2: 'Z', 3: 'Rx', 4: 'Ry', 5: 'Rz'}
-
-JOG_POS = {ord('1'): 'J1+', ord('2'): 'J2+', ord('3'): 'J3+',
-            ord('4'): 'J4+', ord('5'): 'J5+', ord('6'): 'J6+'}
-JOG_NEG = {ord('!'): 'J1-', ord('@'): 'J2-', ord('#'): 'J3-',
-            ord('$'): 'J4-', ord('%'): 'J5-', ord('^'): 'J6-'}
-ALL_JOG = {**JOG_POS, **JOG_NEG}
 
 # RANSAC parameters
 RANSAC_ITERATIONS = 500
@@ -387,53 +358,6 @@ def solve_robust_transform(pts_cam, pts_robot):
     return T_final, best_inliers
 
 
-def do_cart_step(robot, axis_idx, sign):
-    """Step in Cartesian space: read pose, offset, MovL to target.
-
-    Returns:
-        status message string
-    """
-    pose = robot.get_pose()
-    if not pose or len(pose) < 6:
-        return "ERROR: can't read pose"
-
-    if axis_idx < 2:       # X, Y (horizontal)
-        step = CART_STEP_MM_XY
-    elif axis_idx == 2:    # Z (vertical)
-        step = CART_STEP_MM
-    else:                  # rotations
-        step = CART_STEP_DEG
-    target = list(pose)
-    target[axis_idx] += sign * step
-
-    axis_name = CART_LABELS[axis_idx]
-    dir_ch = '+' if sign > 0 else '-'
-
-    tp = target
-    cmd = f'MovL(pose={{{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f}}})'
-    resp = robot.send(cmd)
-    code = resp.split(',')[0] if resp else '-1'
-    if code != '0':
-        return f"ERROR: {cmd} -> {resp}"
-
-    # Wait for motion to complete
-    time.sleep(0.3)
-    prev = robot.get_angles()
-    for _ in range(50):
-        time.sleep(0.1)
-        cur = robot.get_angles()
-        if prev and cur and len(prev) >= 6 and len(cur) >= 6:
-            if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
-                break
-        prev = cur
-
-    new_pose = robot.get_pose()
-    if new_pose:
-        val = ','.join(f'{v:.1f}' for v in new_pose)
-        return f"{axis_name}{dir_ch} done  Pose: [{val}]"
-    return f"{axis_name}{dir_ch} done"
-
-
 def main():
     sd = '--sd' in sys.argv
     width, height = (640, 480) if sd else (1280, 720)
@@ -447,8 +371,8 @@ def main():
     print(f"Board: {BOARD_COLS+1}x{BOARD_ROWS+1} squares, {SQUARE_SIZE_M*100:.0f}cm")
     print(f"Resolution: {width}x{height}")
     print()
-    print("Arm control: WASD move, Q/E up/down, 1-6/!@#$%^ jog, space stop")
-    print("             c/o gripper, [/] speed, v enable, p pose")
+    print("Arm control: GUI panel on right (XY pad, Z, gripper, speed, enable/home)")
+    print("             Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed, v enable")
     print("Calibration: touch TCP to board, click on it, Enter solve, u undo, n clear, Esc quit")
     print()
 
@@ -494,18 +418,24 @@ def main():
     camera.start()
     print("Camera started.\n")
 
+    # GUI panel
+    panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
+    panel.speed = speed
+    panel.status_msg = "Touch TCP to board, then click on it"
+
     # State
     pairs = []  # list of (p_cam_3d_meters, p_robot_3d_meters, corner_2d_px)
     current_corners = None
     current_T_board = None
     click_point = None
-    status_msg = "Touch TCP to board, then click on it"
-    jogging = False
-    last_pose_time = 0.0
-    cached_pose = None
 
     def on_mouse(event, x, y, flags, param):
         nonlocal click_point
+        # Route to panel if in panel area
+        if x >= width:
+            panel.handle_mouse(event, x, y, flags)
+            return
+        # Camera area: record calibration click
         if event == cv2.EVENT_LBUTTONDOWN:
             click_point = (x, y)
 
@@ -521,6 +451,8 @@ def main():
             gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
             found, corners = detect_corners(gray)
 
+            # Create expanded canvas with panel area on the right
+            canvas = np.zeros((height, width + PANEL_WIDTH, 3), dtype=np.uint8)
             display = color_image.copy()
 
             if found:
@@ -548,26 +480,26 @@ def main():
                 click_point = None
 
                 if current_T_board is None:
-                    status_msg = "No board detected - need board for ray-plane intersection"
-                    print(f"  {status_msg}")
+                    panel.status_msg = "No board detected - need board for ray-plane intersection"
+                    print(f"  {panel.status_msg}")
                 else:
                     p_cam = ray_plane_intersect((cx, cy), camera.intrinsics, current_T_board)
                     if p_cam is None:
-                        status_msg = "Ray parallel to board plane - try different angle"
-                        print(f"  {status_msg}")
+                        panel.status_msg = "Ray parallel to board plane - try different angle"
+                        print(f"  {panel.status_msg}")
                     else:
                         pose = robot.get_pose()
                         if pose is None:
-                            status_msg = "ERROR: can't read robot pose"
-                            print(f"  {status_msg}")
+                            panel.status_msg = "ERROR: can't read robot pose"
+                            print(f"  {panel.status_msg}")
                         else:
                             p_robot_m = np.array(pose[:3]) / 1000.0
                             pairs.append((p_cam, p_robot_m, (cx, cy)))
 
-                            status_msg = (f"Pt {len(pairs)}: "
-                                          f"cam=[{p_cam[0]:.3f},{p_cam[1]:.3f},{p_cam[2]:.3f}] "
-                                          f"robot=[{pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}]")
-                            print(f"  {status_msg}")
+                            panel.status_msg = (f"Pt {len(pairs)}: "
+                                                f"cam=[{p_cam[0]:.3f},{p_cam[1]:.3f},{p_cam[2]:.3f}] "
+                                                f"robot=[{pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}]")
+                            print(f"  {panel.status_msg}")
 
             # Draw recorded points
             for i, (_, _, px) in enumerate(pairs):
@@ -575,111 +507,57 @@ def main():
                 cv2.putText(display, str(i + 1), (px[0] + 10, px[1] - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-            # Robot pose overlay (top-right, throttled to avoid lag)
-            now = time.time()
-            if now - last_pose_time > 0.5:
-                last_pose_time = now
-                cached_pose = robot.get_pose()
-            if cached_pose:
-                pose_str = f"TCP: {cached_pose[0]:.1f},{cached_pose[1]:.1f},{cached_pose[2]:.1f}"
-                cv2.putText(display, pose_str, (width - 300, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
-
-            # Status bar
+            # Status bar on camera image
             board_status = "Board OK" if found else "No board"
-            jog_str = " JOG" if jogging else ""
-            bar_text = f"{len(pairs)} pts | Spd:{speed}%{jog_str} | {board_status} | {status_msg}"
+            jog_str = " JOG" if panel.jogging else ""
+            bar_text = f"{len(pairs)} pts | Spd:{panel.speed}%{jog_str} | {board_status}"
             cv2.putText(display, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-            cv2.putText(display, "WASD move | QE up/dn | 1-6 jog | co grip | Enter solve | u undo | n clear | Esc quit",
+            cv2.putText(display, "Enter solve | u undo | n clear | p pose | Esc quit",
                         (10, height - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
 
-            cv2.imshow('Calibration', display)
+            # Compose canvas: camera on left, panel on right
+            canvas[0:height, 0:width] = display
+            panel.draw(canvas)
+
+            cv2.imshow('Calibration', canvas)
             key = cv2.waitKey(30) & 0xFF
 
-            if key == 27:  # Esc only (q is Z+ now)
+            if key == 27:  # Esc
                 break
             if cv2.getWindowProperty('Calibration', cv2.WND_PROP_VISIBLE) < 1:
                 break
 
-            # --- Arm control ---
+            # --- Arm control via shared panel keyboard handler ---
+            if key != 255 and panel.handle_key(key):
+                pass  # consumed by panel
 
-            # Joint jog
-            if key in ALL_JOG:
-                axis = ALL_JOG[key]
-                robot.send(f'MoveJog({axis})')
-                jogging = True
-                status_msg = f"JOG {axis}"
-
-            # Stop jog
-            elif key == ord(' '):
-                robot.send('MoveJog()')
-                jogging = False
-                status_msg = "Stopped"
-
-            # Cartesian step
-            elif key in CART_KEYS:
-                if jogging:
-                    robot.send('MoveJog()')
-                    jogging = False
-                axis_idx, sign = CART_KEYS[key]
-                status_msg = do_cart_step(robot, axis_idx, sign)
-
-            # Gripper
-            elif key == ord('c'):
-                robot.send('ToolDOInstant(2,0)')
-                robot.send('ToolDOInstant(1,1)')
-                status_msg = "Gripper CLOSED"
-            elif key == ord('o'):
-                robot.send('ToolDOInstant(1,0)')
-                robot.send('ToolDOInstant(2,1)')
-                status_msg = "Gripper OPEN"
-
-            # Speed
-            elif key == ord('['):
-                speed = max(1, speed - 10)
-                robot.send(f'SpeedFactor({speed})')
-                status_msg = f"Speed: {speed}%"
-            elif key == ord(']'):
-                speed = min(100, speed + 10)
-                robot.send(f'SpeedFactor({speed})')
-                status_msg = f"Speed: {speed}%"
-
-            # Enable
-            elif key == ord('v'):
-                robot.send('DisableRobot()')
-                time.sleep(1)
-                robot.send('ClearError()')
-                robot.send('EnableRobot()')
-                time.sleep(1)
-                status_msg = "Robot enabled"
-
-            # Print pose
+            # Print pose (keep as keyboard shortcut)
             elif key == ord('p'):
                 pose = robot.get_pose()
                 angles = robot.get_angles()
                 if pose and angles:
                     print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
-                    status_msg = f"Pose printed to console"
+                    panel.status_msg = "Pose printed to console"
 
             # --- Calibration controls ---
 
             elif key == ord('u') and pairs:
                 pairs.pop()
-                status_msg = f"Undid -> {len(pairs)} pts remain"
-                print(f"  {status_msg}")
+                panel.status_msg = f"Undid -> {len(pairs)} pts remain"
+                print(f"  {panel.status_msg}")
 
             elif key == ord('n'):
                 pairs.clear()
-                status_msg = "Cleared all points"
-                print(f"  {status_msg}")
+                panel.status_msg = "Cleared all points"
+                print(f"  {panel.status_msg}")
 
             elif key == 13:  # Enter
                 if len(pairs) < 3:
-                    status_msg = f"Need 3+ points (have {len(pairs)})"
-                    print(f"  {status_msg}")
+                    panel.status_msg = f"Need 3+ points (have {len(pairs)})"
+                    print(f"  {panel.status_msg}")
                     continue
 
                 pts_cam = [p[0] for p in pairs]
@@ -718,7 +596,7 @@ def main():
                 out_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
                 ct.save(out_path)
                 print(f"Saved to {out_path}")
-                status_msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
+                panel.status_msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
 
     except KeyboardInterrupt:
         pass
