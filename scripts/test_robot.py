@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Test Dobot Nova5 connection, jog motion, and gripper.
+"""Test Dobot Nova5 connection, diagnostics, jog motion, and gripper.
 
 SAFETY: This script moves the robot! Ensure the workspace is clear.
+
+Usage:
+    ./run.sh scripts/test_robot.py           # Full test (connect + wiggle + gripper)
+    ./run.sh scripts/test_robot.py --diag    # Dashboard diagnostics only (no motion)
 """
 
 import sys
@@ -33,7 +37,53 @@ def check_port(ip: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
+def dashboard_diagnostics(ip, port):
+    """Raw dashboard diagnostic dump (from former debug_robot.py)."""
+    print(f"=== Dashboard Diagnostics: {ip}:{port} ===")
+    print()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    sock.connect((ip, port))
+    try:
+        banner = sock.recv(1024).decode().strip()
+        print(f"  Banner: {banner}")
+    except socket.timeout:
+        print("  (no banner)")
+
+    def send(cmd):
+        sock.send(f"{cmd}\n".encode())
+        time.sleep(0.3)
+        try:
+            return sock.recv(4096).decode().strip()
+        except socket.timeout:
+            return "(timeout)"
+
+    def parse(resp):
+        try:
+            code = int(resp.split(",")[0])
+            inner = resp.split("{")[1].split("}")[0] if "{" in resp else ""
+            return code, inner
+        except (ValueError, IndexError):
+            return None, resp
+
+    cmds = [
+        ("RobotMode()",  "Mode (1=init 2=brake 4=disabled 5=enabled 7=running 9=error 11=jog)"),
+        ("GetErrorID()", "Errors"),
+        ("GetAngle()",   "Joint angles (deg)"),
+        ("GetPose()",    "TCP pose [x,y,z,rx,ry,rz] mm/deg"),
+    ]
+    for cmd, desc in cmds:
+        resp = send(cmd)
+        code, val = parse(resp)
+        print(f"  {cmd:<20s} [{code:>6}] {val:<50s}  # {desc}")
+
+    sock.close()
+    print()
+
+
 def main():
+    diag_only = '--diag' in sys.argv
     config = load_config()
     robot_cfg = config.get('robot', {})
 
@@ -46,7 +96,7 @@ def main():
     print()
 
     # Step 1: Ping
-    print(f"[1/4] Pinging {ip}...")
+    print(f"[1] Pinging {ip}...")
     if ping_host(ip):
         print(f"  OK - {ip} is reachable")
     else:
@@ -54,14 +104,23 @@ def main():
         return
 
     # Step 2: Dashboard port
-    print(f"[2/4] Checking dashboard port {dashboard_port}...")
+    print(f"[2] Checking dashboard port {dashboard_port}...")
     if not check_port(ip, dashboard_port):
         print(f"  FAIL - port {dashboard_port} is closed")
         return
     print(f"  OK - port {dashboard_port} is open")
+    print()
 
-    # Step 3: Connect and enable
-    print(f"[3/4] Connecting and enabling robot...")
+    # Step 3: Dashboard diagnostics
+    print(f"[3] Dashboard diagnostics...")
+    dashboard_diagnostics(ip, dashboard_port)
+
+    if diag_only:
+        print("=== Diagnostics complete (--diag mode) ===")
+        return
+
+    # Step 4: Connect and enable
+    print(f"[4] Connecting and enabling robot...")
     from robot import DobotNova5, Gripper
 
     robot = DobotNova5(ip=ip, dashboard_port=dashboard_port)
@@ -85,11 +144,10 @@ def main():
         print("  Current pose:  ", robot.get_pose())
         print("  Current joints:", robot.get_joint_angles())
 
-        # Step 4: Wiggle and gripper
+        # Step 5: Wiggle and gripper
         print()
-        print(f"[4/4] Wiggle test (J1 ±10deg) + gripper...")
+        print(f"[5] Wiggle test (J1 jog) + gripper...")
 
-        start_angles = robot.get_joint_angles()
         gripper = Gripper(robot)
 
         print("  Opening gripper...")
