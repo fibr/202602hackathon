@@ -31,13 +31,11 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list):
         if wp.gripper == GripperAction.OPEN:
             gripper.open()
 
-        # Execute motion
+        # Execute motion (both use IK + jog, blocks until complete)
         if wp.motion == MotionType.JOINT:
             robot.move_joint(wp.x, wp.y, wp.z, wp.rx, wp.ry, wp.rz)
         else:
             robot.move_linear(wp.x, wp.y, wp.z, wp.rx, wp.ry, wp.rz)
-
-        robot.wait_motion_done()
 
         # Execute gripper action after motion if closing
         if wp.gripper == GripperAction.CLOSE:
@@ -86,6 +84,7 @@ def main():
     robot = DobotNova5(
         ip=robot_cfg.get('ip', '192.168.5.1'),
         dashboard_port=robot_cfg.get('dashboard_port', 29999),
+        motion_port=robot_cfg.get('motion_port', 30003),
     )
 
     gripper = Gripper(robot=robot)
@@ -95,6 +94,7 @@ def main():
         # INIT
         print("[INIT] Connecting to robot...")
         robot.connect()
+        print(f"[INIT] Motion mode: {robot.motion_mode}")
         robot.clear_error()
         robot.enable()
         robot.set_speed(robot_cfg.get('speed_percent', 30))

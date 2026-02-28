@@ -1,0 +1,12 @@
+services:
+  dobot-driver:
+    profiles: [dobot]
+    build: ./assets/dobot-driver
+    container_name: dobot-driver
+    network_mode: host
+    ipc: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    env_file: .env
+    command: bash scripts/start_driver.sh
+    restart: unless-stopped
