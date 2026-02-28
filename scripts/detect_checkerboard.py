@@ -552,7 +552,7 @@ def main():
     print("Arm control: GUI panel on right (XY pad, Z, gripper, speed, enable/home)")
     print("             Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed, v enable")
     print("Intrinsics:  i capture frame | I calibrate & save (need 10+ frames)")
-    print("Plane:       g capture sample | G average & save (multiple g then G)")
+    print("Plane:       g capture sample | 'Save Plane' button to average & save")
     print("Hand-eye:    click record point | Enter solve | u undo | n clear")
     print("             Esc quit | p print pose")
     print()
@@ -589,20 +589,19 @@ def main():
     camera.start()
     print("Camera started.\n")
 
-    # GUI panel (only if robot connected)
-    panel = None
+    # GUI panel (always shown; robot=None disables arm controls)
+    panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
     if robot:
-        panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
         panel.speed = speed
         panel.status_msg = "Touch TCP to board, then click on it"
+    else:
+        panel.status_msg = "Camera-only mode"
 
-    # Plane save callback (used by GUI button and 'g' key fallback)
+    # Plane save callback (GUI button)
     def save_plane():
         if len(plane_samples) < 1:
-            msg = "No plane samples — press 'g' to capture"
-            if panel:
-                panel.status_msg = msg
-            print(f"  {msg}")
+            panel.status_msg = "No plane samples — press 'g' to capture"
+            print(f"  {panel.status_msg}")
             return
         normals = np.array([s[0] for s in plane_samples])
         distances = np.array([s[1] for s in plane_samples])
@@ -637,16 +636,13 @@ def main():
         print(f"  Distance: {avg_d*1000:.1f} mm (std: {std_d*1000:.1f} mm)")
         print(f"  Max angular deviation: {max_angle:.2f} deg")
         print(f"  Saved to {plane_path}")
-        msg = f"Plane saved: {len(plane_samples)}x, d={avg_d*1000:.1f}mm std={std_d*1000:.1f}mm"
-        if panel:
-            panel.status_msg = msg
+        panel.status_msg = f"Plane saved: {len(plane_samples)}x, d={avg_d*1000:.1f}mm std={std_d*1000:.1f}mm"
         plane_samples.clear()
 
-    if panel:
-        panel.add_button(
-            lambda: f"Save Plane ({len(plane_samples)})",
-            save_plane,
-            color=(0, 100, 100))
+    panel.add_button(
+        lambda: f"Save Plane ({len(plane_samples)})",
+        save_plane,
+        color=(0, 100, 100))
 
     # Robot overlay (load calibration if available)
     robot_overlay = None
@@ -679,7 +675,7 @@ def main():
     def on_mouse(event, x, y, flags, param):
         nonlocal click_point
         # Route to panel if in panel area
-        if panel and x >= width:
+        if x >= width:
             panel.handle_mouse(event, x, y, flags)
             return
         # Camera area: record calibration click
@@ -698,8 +694,8 @@ def main():
             gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
             found, corners = detect_corners(gray)
 
-            # Create canvas (expanded with panel area if robot connected)
-            canvas_w = width + PANEL_WIDTH if panel else width
+            # Create canvas (camera + panel)
+            canvas_w = width + PANEL_WIDTH
             canvas = np.zeros((height, canvas_w, 3), dtype=np.uint8)
             display = color_image.copy()
 
@@ -730,8 +726,7 @@ def main():
 
                 if current_T_board is None:
                     msg = "No board detected - need board for ray-plane intersection"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}")
                 elif not robot:
                     msg = "No robot connected - can't record calibration point"
@@ -740,15 +735,13 @@ def main():
                     p_cam = ray_plane_intersect((cx, cy), camera.intrinsics, current_T_board)
                     if p_cam is None:
                         msg = "Ray parallel to board plane - try different angle"
-                        if panel:
-                            panel.status_msg = msg
+                        panel.status_msg = msg
                         print(f"  {msg}")
                     else:
                         pose = robot.get_pose()
                         if pose is None:
                             msg = "ERROR: can't read robot pose"
-                            if panel:
-                                panel.status_msg = msg
+                            panel.status_msg = msg
                             print(f"  {msg}")
                         else:
                             p_robot_m = np.array(pose[:3]) / 1000.0
@@ -757,8 +750,7 @@ def main():
                             msg = (f"Pt {len(pairs)}: "
                                    f"cam=[{p_cam[0]:.3f},{p_cam[1]:.3f},{p_cam[2]:.3f}] "
                                    f"robot=[{pose[0]:.1f},{pose[1]:.1f},{pose[2]:.1f}]")
-                            if panel:
-                                panel.status_msg = msg
+                            panel.status_msg = msg
                             print(f"  {msg}")
 
             # Draw recorded points
@@ -785,21 +777,17 @@ def main():
             board_status = f"Board OK reproj:{reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
             intr_str = f"Intr:{len(intr_frames)}" if intr_frames else ""
             plane_str = f"Plane:{len(plane_samples)}" if plane_samples else ""
-            if panel:
-                jog_str = " JOG" if panel.jogging else ""
-                bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
-            else:
-                bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | {board_status} | No robot"
+            jog_str = " JOG" if panel.jogging else ""
+            bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
             cv2.putText(display, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
             cv2.putText(display, "i/I intrinsics | g/G plane | click+Enter hand-eye | u undo | Esc quit",
                         (10, height - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
-            # Compose canvas: camera on left, panel on right (if robot)
+            # Compose canvas: camera on left, panel on right
             canvas[0:height, 0:width] = display
-            if panel:
-                panel.draw(canvas)
+            panel.draw(canvas)
 
             cv2.imshow('Calibration', canvas)
             key = cv2.waitKey(30) & 0xFF
@@ -823,23 +811,20 @@ def main():
                 if pose and angles:
                     print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
-                    if panel:
-                        panel.status_msg = "Pose printed to console"
+                    panel.status_msg = "Pose printed to console"
 
             # --- Calibration controls ---
 
             elif key == ord('u') and pairs:
                 pairs.pop()
                 msg = f"Undid -> {len(pairs)} pts remain"
-                if panel:
-                    panel.status_msg = msg
+                panel.status_msg = msg
                 print(f"  {msg}")
 
             elif key == ord('n'):
                 pairs.clear()
                 msg = "Cleared all points"
-                if panel:
-                    panel.status_msg = msg
+                panel.status_msg = msg
                 print(f"  {msg}")
 
             # --- Intrinsics calibration ---
@@ -848,8 +833,7 @@ def main():
                 # Capture frame for intrinsics calibration
                 if not found or current_corners is None:
                     msg = "No board detected — can't capture for intrinsics"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}")
                 else:
                     n = len(current_corners)
@@ -864,8 +848,7 @@ def main():
                                 break
                         else:
                             msg = f"Unexpected corner count {n}, skipping"
-                            if panel:
-                                panel.status_msg = msg
+                            panel.status_msg = msg
                             print(f"  {msg}")
                             continue
                     obj_pts = np.zeros((i_rows * i_cols, 3), dtype=np.float32)
@@ -875,16 +858,14 @@ def main():
                                 cc * SQUARE_SIZE_M, rr * SQUARE_SIZE_M, 0]
                     intr_frames.append((obj_pts, current_corners.copy()))
                     msg = f"Intrinsics frame {len(intr_frames)} captured"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}")
 
             elif key == ord('I'):
                 # Run intrinsics calibration
                 if len(intr_frames) < 5:
                     msg = f"Need 5+ frames for intrinsics (have {len(intr_frames)})"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}")
                 else:
                     obj_points = [f[0] for f in intr_frames]
@@ -909,39 +890,30 @@ def main():
                     # Apply immediately
                     camera.intrinsics = calib_intr
                     msg = f"Intrinsics saved! reproj={ret:.3f}px"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}")
 
             # --- Ground plane calibration ---
             # g = capture sample (board visible) or save via button/fallback
 
             elif key == ord('g'):
-                if current_T_board is not None:
-                    # Board visible: capture a sample
+                # Capture ground plane sample (board must be visible)
+                if current_T_board is None:
+                    panel.status_msg = "No board — can't capture plane sample"
+                else:
                     R_board = current_T_board[:3, :3]
                     t_board = current_T_board[:3, 3]
                     normal = R_board[:, 2]  # board Z axis in camera frame
                     d = np.dot(normal, t_board)
                     plane_samples.append((normal, d))
                     msg = f"Plane sample {len(plane_samples)}: d={d*1000:.1f}mm"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}  normal=[{normal[0]:.4f},{normal[1]:.4f},{normal[2]:.4f}]")
-                elif len(plane_samples) > 0:
-                    # Board not visible: save (fallback for no-panel mode)
-                    save_plane()
-                else:
-                    msg = "Show board and press g to capture plane samples"
-                    if panel:
-                        panel.status_msg = msg
-                    print(f"  {msg}")
 
             elif key == 13:  # Enter
                 if len(pairs) < 3:
                     msg = f"Need 3+ points (have {len(pairs)})"
-                    if panel:
-                        panel.status_msg = msg
+                    panel.status_msg = msg
                     print(f"  {msg}")
                     continue
 
@@ -981,8 +953,7 @@ def main():
                 ct.save(out_path)
                 print(f"Saved to {out_path}")
                 msg = f"Saved! {n_inliers}/{len(pairs)} inliers, mean {np.mean(inlier_errors):.1f}mm"
-                if panel:
-                    panel.status_msg = msg
+                panel.status_msg = msg
 
     except KeyboardInterrupt:
         pass

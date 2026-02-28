@@ -254,7 +254,9 @@ class RobotControlPanel:
             cv2.putText(canvas, text, (px + 10, y + yoff), FONT, 0.38, col, 1)
             y += line_h
 
-        if self._cached_pose is not None:
+        if self.robot is None:
+            put("NO ROBOT", COL_RED)
+        elif self._cached_pose is not None:
             p = self._cached_pose
             put(f"TCP: {p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}", COL_VALUE)
             put(f"     {p[3]:.1f}, {p[4]:.1f}, {p[5]:.1f}", COL_VALUE)
@@ -262,19 +264,19 @@ class RobotControlPanel:
             put("TCP: ---", COL_LABEL)
             y += line_h
 
-        if self._cached_angles is not None:
+        if self.robot is not None and self._cached_angles is not None:
             a = self._cached_angles
             put(f"J: {a[0]:.1f},{a[1]:.1f},{a[2]:.1f}", COL_VALUE)
             put(f"   {a[3]:.1f},{a[4]:.1f},{a[5]:.1f}", COL_VALUE)
-        else:
+        elif self.robot is not None:
             put("J: ---", COL_LABEL)
             y += line_h
 
-        if self._cached_mode is not None:
+        if self.robot is not None and self._cached_mode is not None:
             name = MODE_NAMES.get(self._cached_mode, '?')
             col = COL_GREEN if self._cached_mode == 5 else COL_RED
             put(f"Mode: {self._cached_mode} ({name})", col)
-        else:
+        elif self.robot is not None:
             put("Mode: ---", COL_LABEL)
 
         if self.jogging:
@@ -290,6 +292,8 @@ class RobotControlPanel:
 
     def _update_status_cache(self):
         """Throttled robot state queries."""
+        if self.robot is None:
+            return
         now = time.time()
         if now - self._last_query < self._query_interval:
             return
@@ -398,11 +402,9 @@ class RobotControlPanel:
             self._stop_jog()
 
     def _do_xy_step(self, x, y):
-        """Do a Cartesian XY step based on click position in the pad.
-
-        Distance from center scales the step size: deadzone edge = 5mm,
-        pad edge = 40mm. Only the dominant axis (X or Y) moves.
-        """
+        """Do a Cartesian XY step based on click position in the pad."""
+        if self.robot is None:
+            return
         cx, cy = self.pad_center
         dx = x - cx
         dy = y - cy
@@ -428,16 +430,9 @@ class RobotControlPanel:
         self._do_cart_step(axis_idx, sign, step_mm)
 
     def _do_cart_step(self, axis_idx, sign, step_mm):
-        """Fire-and-forget Cartesian step: read pose, offset, send MovL.
-
-        Non-blocking — does not wait for motion completion. A cooldown
-        prevents rapid-fire commands from queuing up on the robot.
-
-        Args:
-            axis_idx: 0=X, 1=Y, 2=Z
-            sign: +1 or -1
-            step_mm: step size in mm
-        """
+        """Fire-and-forget Cartesian step: read pose, offset, send MovL."""
+        if self.robot is None:
+            return
         now = time.time()
         if now - self._last_cmd_time < CART_COOLDOWN:
             return  # too soon, skip
@@ -468,27 +463,36 @@ class RobotControlPanel:
 
     def _stop_jog(self):
         """Stop any active joint jog."""
+        if self.robot is None:
+            return
         self.robot.send('MoveJog()')
         self.jogging = False
         self.jog_axis = None
         self.status_msg = "Stopped"
 
     def _gripper_open(self):
+        if self.robot is None:
+            return
         self.robot.send('ToolDOInstant(1,0)')
         self.robot.send('ToolDOInstant(2,1)')
         self.status_msg = "Gripper OPEN"
 
     def _gripper_close(self):
+        if self.robot is None:
+            return
         self.robot.send('ToolDOInstant(2,0)')
         self.robot.send('ToolDOInstant(1,1)')
         self.status_msg = "Gripper CLOSED"
 
     def _speed_change(self, delta):
         self.speed = max(1, min(100, self.speed + delta))
-        self.robot.send(f'SpeedFactor({self.speed})')
+        if self.robot is not None:
+            self.robot.send(f'SpeedFactor({self.speed})')
         self.status_msg = f"Speed: {self.speed}%"
 
     def _do_enable(self):
+        if self.robot is None:
+            return
         self.status_msg = "Enabling..."
         self.robot.send('DisableRobot()')
         time.sleep(1)
@@ -498,11 +502,9 @@ class RobotControlPanel:
         self.status_msg = "Robot enabled"
 
     def _do_j1_rotate(self, step_deg=30.0):
-        """Rotate J1 by step_deg, keeping all other joints the same.
-
-        Uses MovJ(joint={...}) for joint-space motion. Waits for motion
-        completion so the user can click after the arm settles.
-        """
+        """Rotate J1 by step_deg, keeping all other joints the same."""
+        if self.robot is None:
+            return
         angles = self.robot.get_angles()
         if not angles or len(angles) < 6:
             self.status_msg = "ERROR: can't read angles"
@@ -537,6 +539,8 @@ class RobotControlPanel:
             self.status_msg = "J1 rotate done"
 
     def _do_home(self):
+        if self.robot is None:
+            return
         if self.jogging:
             self._stop_jog()
         self.status_msg = "Homing..."
@@ -572,6 +576,8 @@ class RobotControlPanel:
         all_jog = {**jog_pos, **jog_neg}
 
         if key in all_jog:
+            if self.robot is None:
+                return True
             axis = all_jog[key]
             self.robot.send(f'MoveJog({axis})')
             self.jogging = True
