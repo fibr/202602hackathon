@@ -58,6 +58,9 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 - **Enable sequence**: `DisableRobot()` → sleep 1s → `ClearError()` → `EnableRobot()` → sleep 1s
 - **State queries**: `GetPose()`, `GetAngle()`, `RobotMode()`, `GetErrorID()`
 - **Speed**: `SpeedFactor(1-100)`
+- **Inverse kinematics**: `InverseKin(x,y,z,rx,ry,rz)` → returns joint angles in `{j1,j2,...,j6}`
+- **Forward kinematics**: `PositiveKin(j1,j2,j3,j4,j5,j6)` → returns pose in `{x,y,z,rx,ry,rz}`
+- **Cartesian control**: Read pose → offset → InverseKin → jog joints to IK solution (see control_panel.py)
 
 ### What doesn't work
 - `MovJ` / `MovL` → error -30001 (need port 30003 which requires ROS2 driver)

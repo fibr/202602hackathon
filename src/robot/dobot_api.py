@@ -153,6 +153,35 @@ class DobotNova5:
             self.state.joints = angles[:6]
         return self.state.joints if self.state.joints is not None else np.zeros(6)
 
+    # --- Kinematics ---
+
+    def inverse_kin(self, x: float, y: float, z: float,
+                    rx: float, ry: float, rz: float) -> np.ndarray:
+        """Inverse kinematics: Cartesian pose -> joint angles.
+
+        Args:
+            x, y, z: Position in mm
+            rx, ry, rz: Orientation in degrees
+
+        Returns:
+            Array of 6 joint angles in degrees, or zeros on failure.
+        """
+        resp = self._send(f"InverseKin({x},{y},{z},{rx},{ry},{rz})")
+        return self._parse_numbers(resp)
+
+    def forward_kin(self, j1: float, j2: float, j3: float,
+                    j4: float, j5: float, j6: float) -> np.ndarray:
+        """Forward kinematics: joint angles -> Cartesian pose.
+
+        Args:
+            j1..j6: Joint angles in degrees
+
+        Returns:
+            Array [x, y, z, rx, ry, rz] in mm/degrees, or zeros on failure.
+        """
+        resp = self._send(f"PositiveKin({j1},{j2},{j3},{j4},{j5},{j6})")
+        return self._parse_numbers(resp)
+
     # --- Jog motion ---
 
     def jog_start(self, axis: str):
