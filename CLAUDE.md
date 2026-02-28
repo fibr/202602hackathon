@@ -78,6 +78,10 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 ### Robot modes
 `RobotMode()` returns: 1=init, 2=brake_open, 4=disabled, **5=enabled (idle)**, 6=backdrive, 7=running, 9=error, 10=pause, 11=jog
 
+## Git
+
+- Never add `Co-Authored-By` lines to commit messages
+
 ## Code Conventions
 
 - Dataclasses for structured data (`RodDetection`, `Waypoint`, `RobotState`)
