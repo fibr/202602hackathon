@@ -1,167 +1,212 @@
 #!/usr/bin/env python3
 """Interactive control panel for Dobot Nova5.
 
-Keyboard-driven: press a key to send a command. Uses the working command set
-discovered on firmware 4.6.2:
-  - MoveJog(J1+..J6-) for joint motion (uppercase only)
-  - ToolDOInstant for gripper (dual-channel: close=ch1, open=ch2)
+Hold jog keys for continuous motion, release to stop.
+Gripper and other commands are instant.
 """
 
 import sys
 import os
+import socket
 import time
 import select
+import tty
+import termios
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from robot import DobotNova5, Gripper
 from config_loader import load_config
 
 
-MENU = """
+class FastRobot:
+    """Minimal low-latency dashboard connection."""
+
+    def __init__(self, ip, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(2)
+        self.sock.connect((ip, port))
+        try:
+            self.sock.recv(1024)
+        except socket.timeout:
+            pass
+
+    def send(self, cmd):
+        self.sock.send(f"{cmd}\n".encode())
+        time.sleep(0.05)
+        try:
+            return self.sock.recv(4096).decode().strip()
+        except socket.timeout:
+            return ""
+
+    def close(self):
+        self.sock.close()
+
+
+JOG_POS = {'1': 'J1+', '2': 'J2+', '3': 'J3+', '4': 'J4+', '5': 'J5+', '6': 'J6+'}
+JOG_NEG = {'!': 'J1-', '@': 'J2-', '#': 'J3-', '$': 'J4-', '%': 'J5-', '^': 'J6-'}
+ALL_JOG = {**JOG_POS, **JOG_NEG}
+
+HELP = """\x1b[2J\x1b[H\
 === Dobot Nova5 Control Panel ===
 
- SETUP                     JOG JOINTS                 GRIPPER
- e  Enable (full cycle)    1/! J1+ / J1-              c  Close gripper
- d  Disable                2/@ J2+ / J2-              o  Open gripper
- x  ClearError             3/# J3+ / J3-
-                            4/$ J4+ / J4-
- SPEED                     5/% J5+ / J5-             STATUS
- [  Speed down (-10)       6/^ J6+ / J6-              p  GetPose
- ]  Speed up (+10)                                     a  GetAngle
-                            s  Stop jog                m  RobotMode
- CUSTOM                                                r  GetErrorID
- /  Type raw command
-
- h  Show this help          q  Quit
+ JOG (hold to move)           GRIPPER        SETUP
+ 1/! .. 6/^  J1-J6 +/-        c  Close       e  Enable
+ s  Emergency stop             o  Open        d  Disable
+                                              x  ClearError
+ SPEED                        STATUS
+ [/]  -/+ 10%                  p  Pose        /  Raw command
+                               a  Angles      h  Help
+                               m  Mode        q  Quit
 """
 
 
 def main():
     config = load_config()
-    robot_cfg = config.get('robot', {})
-    ip = robot_cfg.get('ip', '192.168.5.1')
-    dashboard_port = robot_cfg.get('dashboard_port', 29999)
+    rc = config.get('robot', {})
+    ip = rc.get('ip', '192.168.5.1')
+    port = rc.get('dashboard_port', 29999)
 
-    print(f"Connecting to {ip}:{dashboard_port}...")
-    robot = DobotNova5(ip=ip, dashboard_port=dashboard_port)
-    robot.connect()
-    gripper = Gripper(robot, actuate_delay=0.5)
-    print("Connected!")
+    print(f"Connecting to {ip}:{port}...")
+    r = FastRobot(ip, port)
+
+    # Enable
+    r.send('DisableRobot()')
+    time.sleep(1)
+    r.send('ClearError()')
+    r.send('EnableRobot()')
+    time.sleep(1)
 
     speed = 30
-
-    jog_pos = {'1': 'J1+', '2': 'J2+', '3': 'J3+', '4': 'J4+', '5': 'J5+', '6': 'J6+'}
-    jog_neg = {'!': 'J1-', '@': 'J2-', '#': 'J3-', '$': 'J4-', '%': 'J5-', '^': 'J6-'}
-
-    import tty
-    import termios
+    r.send(f'SpeedFactor({speed})')
 
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    old = termios.tcgetattr(fd)
 
-    print(MENU)
-    print(f"  Speed: {speed}%")
-    print()
-
-    def output(text):
-        sys.stdout.write(f"\r\n  {text}\r\n")
+    # Status line helper
+    def status(msg):
+        # Clear current line, print status, stay on same line
+        sys.stdout.write(f"\r\x1b[K  {msg}")
         sys.stdout.flush()
 
+    def status_line():
+        status(f"Speed:{speed}%  Mode:{r.send('RobotMode()').split('{')[1].split('}')[0] if '{' in r.send('RobotMode()') else '?'}")
+
+    sys.stdout.write(HELP)
+    status(f"Ready. Speed:{speed}%")
+
+    jogging = None  # Currently active jog axis, or None
+
     try:
-        tty.setraw(fd)
+        tty.setcbreak(fd)  # cbreak instead of raw — allows Ctrl+C
 
         while True:
-            if select.select([sys.stdin], [], [], 0.05)[0]:
-                ch = sys.stdin.read(1)
-            else:
+            # Short poll — 30ms for responsive jog stop
+            ready = select.select([sys.stdin], [], [], 0.03)[0]
+
+            if not ready:
+                # No key pressed — stop jog if active
+                if jogging:
+                    r.send('MoveJog()')
+                    jogging = None
+                    status(f"Speed:{speed}%")
                 continue
+
+            ch = sys.stdin.read(1)
 
             # Quit
             if ch == 'q':
                 break
 
-            # Setup
-            elif ch == 'e':
-                output("Enabling (disable/clear/enable)...")
-                robot.enable()
-                output(f"Mode: {robot.get_mode()}")
-            elif ch == 'd':
-                resp = robot.disable()
-                output(f"Disable: {resp}")
-            elif ch == 'x':
-                resp = robot.clear_error()
-                output(f"ClearError: {resp}")
+            # Jog — start/continue on keypress, stops on release (no key in 30ms)
+            elif ch in ALL_JOG:
+                axis = ALL_JOG[ch]
+                if jogging != axis:
+                    r.send(f'MoveJog({axis})')
+                    jogging = axis
+                    status(f"JOG {axis}  Speed:{speed}%")
+
+            elif ch == 's':
+                r.send('MoveJog()')
+                jogging = None
+                status("STOPPED")
+
+            # Gripper
+            elif ch == 'c':
+                status("Gripper closing...")
+                r.send('ToolDOInstant(2,0)')
+                r.send('ToolDOInstant(1,1)')
+                status("Gripper CLOSED")
+            elif ch == 'o':
+                status("Gripper opening...")
+                r.send('ToolDOInstant(1,0)')
+                r.send('ToolDOInstant(2,1)')
+                status("Gripper OPEN")
 
             # Speed
             elif ch == '[':
                 speed = max(1, speed - 10)
-                robot.set_speed(speed)
-                output(f"Speed: {speed}%")
+                r.send(f'SpeedFactor({speed})')
+                status(f"Speed:{speed}%")
             elif ch == ']':
                 speed = min(100, speed + 10)
-                robot.set_speed(speed)
-                output(f"Speed: {speed}%")
+                r.send(f'SpeedFactor({speed})')
+                status(f"Speed:{speed}%")
 
-            # Status
+            # Status queries
             elif ch == 'p':
-                output(f"Pose: {robot.get_pose()}")
+                resp = r.send('GetPose()')
+                val = resp.split('{')[1].split('}')[0] if '{' in resp else resp
+                status(f"Pose: {val}")
             elif ch == 'a':
-                output(f"Joints: {robot.get_joint_angles()}")
+                resp = r.send('GetAngle()')
+                val = resp.split('{')[1].split('}')[0] if '{' in resp else resp
+                status(f"Joints: {val}")
             elif ch == 'm':
-                output(f"Mode: {robot.get_mode()}  Errors: {robot.get_errors()}")
-            elif ch == 'r':
-                output(f"Errors: {robot.get_errors()}")
+                mode = r.send('RobotMode()')
+                err = r.send('GetErrorID()')
+                mv = mode.split('{')[1].split('}')[0] if '{' in mode else mode
+                ev = err.split('{')[1].split('}')[0] if '{' in err else err
+                status(f"Mode:{mv}  Errors:{ev}")
 
-            # Jog — runs for 0.5s per keypress, then auto-stops
-            elif ch in jog_pos:
-                axis = jog_pos[ch]
-                robot.jog_start(axis)
-                output(f"Jog {axis}")
-                time.sleep(0.5)
-                robot.jog_stop()
-            elif ch in jog_neg:
-                axis = jog_neg[ch]
-                robot.jog_start(axis)
-                output(f"Jog {axis}")
-                time.sleep(0.5)
-                robot.jog_stop()
-            elif ch == 's':
-                robot.jog_stop()
-                output("Jog STOP")
+            # Setup
+            elif ch == 'e':
+                status("Enabling...")
+                r.send('DisableRobot()')
+                time.sleep(1)
+                r.send('ClearError()')
+                r.send('EnableRobot()')
+                time.sleep(1)
+                status("Enabled")
+            elif ch == 'd':
+                r.send('DisableRobot()')
+                status("Disabled")
+            elif ch == 'x':
+                r.send('ClearError()')
+                status("Errors cleared")
 
-            # Gripper
-            elif ch == 'c':
-                gripper.close()
-                output("Gripper CLOSED")
-            elif ch == 'o':
-                gripper.open()
-                output("Gripper OPENED")
-
-            # Custom command
+            # Raw command
             elif ch == '/':
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                cmd = input("\r\n  Command> ")
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                sys.stdout.write("\r\n")
+                cmd = input("  Command> ")
                 if cmd.strip():
-                    resp = robot._send(cmd)
+                    resp = r.send(cmd)
                     print(f"  -> {resp}")
-                tty.setraw(fd)
+                tty.setcbreak(fd)
+                status(f"Speed:{speed}%")
 
             # Help
             elif ch == 'h' or ch == '?':
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                print(MENU)
-                print(f"  Speed: {speed}%")
-                tty.setraw(fd)
+                sys.stdout.write(HELP)
+                status(f"Speed:{speed}%")
 
     except KeyboardInterrupt:
         pass
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        print()
-        print("Closing...")
-        robot.jog_stop()
-        robot.disconnect()
-        print("Done.")
+        r.send('MoveJog()')
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        print("\r\n  Closing...")
+        r.close()
+        print("  Done.")
 
 
 if __name__ == "__main__":
