@@ -112,15 +112,19 @@ def main():
             elif ch == 'r':
                 output(f"Errors: {robot.get_errors()}")
 
-            # Jog
+            # Jog — runs for 0.5s per keypress, then auto-stops
             elif ch in jog_pos:
                 axis = jog_pos[ch]
                 robot.jog_start(axis)
                 output(f"Jog {axis}")
+                time.sleep(0.5)
+                robot.jog_stop()
             elif ch in jog_neg:
                 axis = jog_neg[ch]
                 robot.jog_start(axis)
                 output(f"Jog {axis}")
+                time.sleep(0.5)
+                robot.jog_stop()
             elif ch == 's':
                 robot.jog_stop()
                 output("Jog STOP")
