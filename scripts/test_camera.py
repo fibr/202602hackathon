@@ -11,8 +11,11 @@ from vision import RealSenseCamera, RodDetector
 
 
 def main():
-    print("Starting RealSense camera test...")
-    camera = RealSenseCamera(width=640, height=480, fps=15)
+    hd = '--hd' in sys.argv
+    width, height = (1280, 720) if hd else (640, 480)
+    print(f"Starting RealSense camera test... ({width}x{height})"
+          + (" (use --hd for 1280x720)" if not hd else ""))
+    camera = RealSenseCamera(width=width, height=height, fps=15)
     detector = RodDetector()
 
     try:
