@@ -19,7 +19,7 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh scripts/control_panel.py        # Interactive keyboard control
 ./run.sh scripts/debug_robot.py          # Dashboard diagnostics dump
 ./run.sh scripts/test_camera.py [--hd]   # RealSense stream (press 'd' for detection)
-./run.sh scripts/detect_checkerboard.py [--hd]  # Checkerboard calibration
+./run.sh scripts/detect_checkerboard.py [--hd]  # Interactive calibration (arm control + click corners)
 ./run.sh scripts/calibrate.py            # Manual hand-eye calibration
 ```
 
