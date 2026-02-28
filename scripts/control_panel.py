@@ -158,50 +158,38 @@ def main():
     JOG_GRACE = 0.15
 
     def do_cart_step(axis_idx, sign):
-        """Step in Cartesian space: read pose, offset, IK, jog to target."""
+        """Step in Cartesian space: read pose, offset, MovL to target."""
         pose = r.get_pose()
         if not pose or len(pose) < 6:
             status("ERROR: can't read pose")
             return
 
-        # Apply offset
         step = cart_step if axis_idx < 3 else CART_STEP_DEG
         target_pose = list(pose)
         target_pose[axis_idx] += sign * step
 
         axis_name = CART_LABELS[axis_idx]
         dir_ch = '+' if sign > 0 else '-'
-        status(f"{axis_name}{dir_ch} -> IK solving...")
+        status(f"{axis_name}{dir_ch} MovL...")
 
-        # Solve IK
-        target_joints = r.inverse_kin(*target_pose)
-        if not target_joints or len(target_joints) < 6:
-            status(f"ERROR: IK failed for {axis_name}{dir_ch}")
+        tp = target_pose
+        resp = r.send(f'MovL(pose={{{tp[0]},{tp[1]},{tp[2]},{tp[3]},{tp[4]},{tp[5]}}})')
+        code = resp.split(',')[0] if resp else '-1'
+        if code != '0':
+            status(f"ERROR: MovL returned {code}")
             return
 
-        # Find the joint that needs to move most
-        current_joints = r.get_angles()
-        if not current_joints:
-            status("ERROR: can't read joints")
-            return
-
-        # Jog each joint that needs to move (largest error first)
-        errors = [(abs(target_joints[i] - current_joints[i]), i) for i in range(6)]
-        errors.sort(reverse=True)
-
-        for err, ji in errors:
-            if err < 0.5:  # skip joints within 0.5 deg
-                continue
-            direction = '+' if target_joints[ji] > current_joints[ji] else '-'
-            jog_time = min(1.0, err / 15.0)  # rough scaling
-            jog_time = max(0.08, jog_time)
-
-            r.send(f'MoveJog(J{ji+1}{direction})')
-            time.sleep(jog_time)
-            r.send('MoveJog()')
+        # Wait for motion to complete (poll joint stability)
+        time.sleep(0.3)
+        prev = r.get_angles()
+        for _ in range(50):  # up to 5s
             time.sleep(0.1)
+            cur = r.get_angles()
+            if prev and cur:
+                if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
+                    break
+            prev = cur
 
-        # Report result
         new_pose = r.get_pose()
         if new_pose:
             val = ','.join(f'{v:.1f}' for v in new_pose)
