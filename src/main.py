@@ -159,7 +159,7 @@ def main():
     gripper = Gripper(robot=robot)
 
     ik_solver = IKSolver(
-        tool_length_mm=gripper_cfg.get('tool_length_mm', 100.0),
+        tool_length_mm=gripper_cfg.get('tool_length_mm', 120.0),
     )
 
     # === State Machine ===

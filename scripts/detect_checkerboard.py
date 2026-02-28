@@ -568,7 +568,7 @@ def main():
         gripper_cfg = config.get('gripper', {})
         robot_overlay = RobotOverlay(
             T_camera_to_base=transform.T_camera_to_base,
-            tool_length_mm=gripper_cfg.get('tool_length_mm', 200.0),
+            tool_length_mm=gripper_cfg.get('tool_length_mm', 120.0),
             base_offset_mm=transform.base_offset_mm,
             base_rpy_deg=transform.base_rpy_deg,
         )

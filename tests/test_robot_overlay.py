@@ -43,21 +43,24 @@ class TestJointPositions:
         # Base should be at origin
         np.testing.assert_array_almost_equal(positions[0], [0, 0, 0])
 
-    def test_zero_config_has_8_positions(self, overlay):
+    def test_zero_config_has_9_positions(self, overlay):
         positions = overlay.compute_joint_positions(np.zeros(6))
-        assert len(positions) == 8  # base + 6 joints + TCP
+        assert len(positions) == 9  # base + 6 joints + flange + TCP
 
     def test_j1_above_base(self, overlay):
         """Joint 1 should be above base (positive Z)."""
         positions = overlay.compute_joint_positions(np.zeros(6))
         assert positions[1][2] > 0.2, f"J1 should be ~0.24m above base, got {positions[1][2]}"
 
-    def test_tcp_below_j6(self, overlay):
-        """TCP should extend beyond J6 (tool offset)."""
+    def test_flange_and_tcp_below_j6(self, overlay):
+        """Flange and TCP should extend beyond J6."""
         positions = overlay.compute_joint_positions(np.zeros(6))
-        # TCP and J6 should differ by roughly the tool length direction
-        diff = np.linalg.norm(positions[7] - positions[6])
-        assert 0.08 < diff < 0.12, f"TCP-J6 distance should be ~0.1m, got {diff:.3f}"
+        # Flange (idx 7) is 100mm from J6 (idx 6)
+        flange_dist = np.linalg.norm(positions[7] - positions[6])
+        assert 0.08 < flange_dist < 0.12, f"Flange-J6 distance should be ~0.1m, got {flange_dist:.3f}"
+        # TCP (idx 8) is tool_length_mm from J6 (default 100mm in test fixture)
+        tcp_dist = np.linalg.norm(positions[8] - positions[6])
+        assert 0.08 < tcp_dist < 0.12, f"TCP-J6 distance should be ~0.1m, got {tcp_dist:.3f}"
 
     def test_j1_rotation_moves_positions(self, overlay):
         """Rotating J1 should move all downstream joints."""
@@ -66,13 +69,13 @@ class TestJointPositions:
         # Base shouldn't move
         np.testing.assert_array_almost_equal(pos_zero[0], pos_rotated[0])
         # TCP should have moved
-        diff = np.linalg.norm(pos_zero[7] - pos_rotated[7])
+        diff = np.linalg.norm(pos_zero[8] - pos_rotated[8])
         assert diff > 0.1, f"90deg J1 rotation should move TCP significantly, got {diff:.3f}"
 
     def test_reasonable_reach(self, overlay):
         """At zero config, TCP should be within the robot's reach (~1m)."""
         positions = overlay.compute_joint_positions(np.zeros(6))
-        tcp_dist = np.linalg.norm(positions[7])
+        tcp_dist = np.linalg.norm(positions[8])
         assert tcp_dist < 1.5, f"TCP at zero should be within 1.5m, got {tcp_dist:.3f}"
         assert tcp_dist > 0.3, f"TCP at zero should be at least 0.3m, got {tcp_dist:.3f}"
 

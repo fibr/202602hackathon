@@ -56,11 +56,9 @@ _NOVA5_JOINTS = [
     ('joint6', [0, 0.088328, 0], [-1.5708, 0, 0]),
 ]
 
-# Tool joint: Link6 -> tool_tip (fixed)
-_TOOL_OFFSET = [0, 0, -0.100]
-
 # Joint labels for display
-_JOINT_LABELS = ['base', 'J1', 'J2', 'J3', 'J4', 'J5', 'J6', 'TCP']
+# Positions: base, J1..J6, flange (= J6 end / bolt face), TCP (gripper tip)
+_JOINT_LABELS = ['base', 'J1', 'J2', 'J3', 'J4', 'J5', 'J6', 'flange', 'TCP']
 
 # Colors for each joint (BGR)
 _JOINT_COLORS = [
@@ -71,12 +69,18 @@ _JOINT_COLORS = [
     (0, 255, 0),      # J4 - green
     (0, 255, 0),      # J5 - green
     (0, 255, 0),      # J6 - green
+    (255, 160, 0),    # flange - blue-ish
     (0, 0, 255),      # TCP - red
 ]
 
 _BASE_COLOR = (0, 200, 255)   # gold/yellow for base marker
 _LINK_COLOR = (200, 200, 200) # gray for links
+_FLANGE_COLOR = (255, 160, 0) # blue for flange marker
 _TCP_COLOR = (0, 0, 255)      # red for TCP
+
+# URDF flange offset: Link6 origin to the bolt face / end-effector plate.
+# The Nova5 URDF tool_joint is at z=-0.100 (100mm) from Link6.
+_URDF_FLANGE_OFFSET_M = 0.100
 
 
 class RobotOverlay:
@@ -87,12 +91,14 @@ class RobotOverlay:
     camera intrinsics.
     """
 
-    def __init__(self, T_camera_to_base: np.ndarray, tool_length_mm: float = 100.0,
+    def __init__(self, T_camera_to_base: np.ndarray, tool_length_mm: float = 120.0,
                  base_offset_mm: np.ndarray = None, base_rpy_deg: np.ndarray = None):
         """
         Args:
             T_camera_to_base: 4x4 homogeneous transform (meters)
-            tool_length_mm: Gripper length in mm
+            tool_length_mm: Distance from flange to gripper fingertip in mm.
+                           The overlay shows both the URDF flange (100mm from J6)
+                           and the TCP (tool_length_mm from J6).
             base_offset_mm: Optional [dx, dy, dz] offset to the robot base in mm.
                            Use this to correct calibration errors.
             base_rpy_deg: Optional [roll, pitch, yaw] rotation correction in degrees.
@@ -100,6 +106,9 @@ class RobotOverlay:
         """
         self.T_cam_to_base = T_camera_to_base.copy()
         self.T_base_to_cam = np.linalg.inv(T_camera_to_base)
+        # Flange: URDF end-effector plate (100mm from J6 along local -Z)
+        self.flange_offset = np.array([0, 0, -_URDF_FLANGE_OFFSET_M])
+        # TCP: gripper fingertip (tool_length_mm from J6 along local -Z)
         self.tool_offset = np.array([0, 0, -tool_length_mm / 1000.0])
         # Base offset in meters (applied to all joint positions)
         self.base_offset_m = np.zeros(3)
@@ -117,7 +126,7 @@ class RobotOverlay:
             joint_angles_deg: 6 joint angles in degrees
 
         Returns:
-            List of 8 positions: [base_origin, J1, J2, J3, J4, J5, J6, TCP]
+            List of 9 positions: [base, J1, J2, J3, J4, J5, J6, flange, TCP]
             Each is [x, y, z] in meters in the robot base frame.
         """
         q = np.radians(joint_angles_deg)
@@ -141,7 +150,13 @@ class RobotOverlay:
             T_current = T_current @ T_rot
             positions.append(T_current[:3, 3].copy())
 
-        # Tool tip
+        # Flange: URDF end-effector plate (100mm from J6)
+        T_flange = np.eye(4)
+        T_flange[:3, 3] = self.flange_offset
+        T_flange_pos = T_current @ T_flange
+        positions.append(T_flange_pos[:3, 3].copy())
+
+        # TCP: gripper fingertip (tool_length_mm from J6)
         T_tool = np.eye(4)
         T_tool[:3, 3] = self.tool_offset
         T_current = T_current @ T_tool
@@ -263,6 +278,13 @@ class RobotOverlay:
                 ], dtype=np.int32)
                 cv2.fillPoly(vis, [pts], color)
                 cv2.polylines(vis, [pts], True, (0, 0, 0), 2)
+            elif i == len(pixels) - 2:
+                # Flange: small square marker
+                sz = 5
+                cv2.rectangle(vis, (u - sz, v - sz), (u + sz, v + sz),
+                              _FLANGE_COLOR, -1)
+                cv2.rectangle(vis, (u - sz, v - sz), (u + sz, v + sz),
+                              (0, 0, 0), 1)
             elif i == len(pixels) - 1:
                 # TCP: larger circle with crosshair
                 cv2.circle(vis, (u, v), 8, _TCP_COLOR, -1)

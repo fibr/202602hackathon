@@ -20,7 +20,7 @@ rod:
   length_mm: 175.0             # Rod length
 
 gripper:
-  tool_length_mm: 200.0       # Flange to fingertip (Nova5 + gripper assembly)
+  tool_length_mm: 120.0       # Flange to gripper fingertip (mm)
 
 kinematics:
   linear_step_mm: 5.0         # Interpolation step for linear moves
