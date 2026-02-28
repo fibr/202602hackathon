@@ -19,6 +19,7 @@ Usage:
 Controls:
     SPACE       Capture current frame
     d           Toggle detection overlay
+    r           Toggle robot skeleton overlay (base always shown)
     g           Move robot to hover 200mm above detected rod
     q / Esc     Quit
 """
@@ -34,6 +35,7 @@ from vision import RealSenseCamera
 from vision.rod_detector import RodDetector
 from calibration import CoordinateTransform
 from config_loader import load_config
+from visualization import RobotOverlay
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'rod_dataset')
 HOVER_HEIGHT_MM = 200.0    # Height above rod centroid
@@ -212,6 +214,13 @@ def main():
     else:
         print("WARNING: No calibration file — robot goto will use identity transform")
 
+    # Robot overlay for projecting joint positions into camera image
+    gripper_cfg = config.get('gripper', {})
+    robot_overlay = RobotOverlay(
+        T_camera_to_base=transform.T_camera_to_base,
+        tool_length_mm=gripper_cfg.get('tool_length_mm', 100.0),
+    )
+
     # Try robot connection (optional)
     robot = None
     if not no_robot:
@@ -225,7 +234,7 @@ def main():
     print(f"Next index: {next_idx}")
     print(f"Robot: {'connected' if robot else 'not connected'}")
     print()
-    print("SPACE=capture  d=detect  g=goto rod  q=quit")
+    print("SPACE=capture  d=detect  r=robot overlay  g=goto rod  q=quit")
     print()
 
     camera = RealSenseCamera(width=width, height=height, fps=15)
@@ -238,6 +247,7 @@ def main():
         camera.get_frames()
 
     show_detection = False
+    show_robot_overlay = True  # Always show by default
     count = 0
     last_detection = None
 
@@ -275,11 +285,24 @@ def main():
                                                    cv2.CHAIN_APPROX_SIMPLE)
                     cv2.drawContours(vis, contours, -1, (0, 255, 255), 1)
 
+            # Robot overlay: always show base marker, show joints if connected
+            if show_robot_overlay and camera.intrinsics is not None:
+                if robot:
+                    try:
+                        joint_angles = robot.get_joint_angles()
+                        vis = robot_overlay.draw_joints(vis, joint_angles,
+                                                        camera.intrinsics)
+                    except Exception:
+                        vis = robot_overlay.draw_base_marker(vis, camera.intrinsics)
+                else:
+                    vis = robot_overlay.draw_base_marker(vis, camera.intrinsics)
+
             # Status bar
             h_img = vis.shape[0]
             robot_str = "robot:ON" if robot else "robot:OFF"
             det_str = "det:ON" if show_detection else "det:OFF"
-            status = f"#{next_idx}  |  {count} captured  |  {det_str}  |  {robot_str}  |  SPACE=capture  d=detect  g=goto  q=quit"
+            overlay_str = "skel:ON" if show_robot_overlay else "skel:OFF"
+            status = f"#{next_idx}  |  {count} captured  |  {det_str}  |  {overlay_str}  |  {robot_str}  |  SPACE=capture  d=detect  r=skel  g=goto  q=quit"
             cv2.rectangle(vis, (0, h_img - 30), (vis.shape[1], h_img), (0, 0, 0), -1)
             cv2.putText(vis, status, (10, h_img - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
@@ -298,6 +321,10 @@ def main():
             if key == ord('d'):
                 show_detection = not show_detection
                 print(f"  Detection overlay: {'ON' if show_detection else 'OFF'}")
+
+            if key == ord('r'):
+                show_robot_overlay = not show_robot_overlay
+                print(f"  Robot skeleton overlay: {'ON' if show_robot_overlay else 'OFF'}")
 
             if key == ord('g'):
                 if not show_detection:

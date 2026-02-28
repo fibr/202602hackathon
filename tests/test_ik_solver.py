@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from kinematics import IKSolver
+
+try:
+    from kinematics import IKSolver
+    HAS_PINOCCHIO = True
+except ImportError:
+    HAS_PINOCCHIO = False
+
+pytestmark = pytest.mark.skipif(not HAS_PINOCCHIO, reason="pinocchio not installed")
 
 
 @pytest.fixture
