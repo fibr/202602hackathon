@@ -2,7 +2,8 @@
 """Test calibration by moving the arm 5cm above each checkerboard corner.
 
 Detects the checkerboard, transforms the 4 outer corners to robot base frame
-using the saved calibration, then jogs the arm to 5cm above each corner.
+using the saved calibration, then moves the arm to 5cm above each corner.
+Uses the DobotNova5 driver (MovJ with ROS2 driver, jog fallback without).
 
 Usage:
     ./run.sh scripts/test_calibration.py [--dry-run] [--hd]
@@ -13,14 +14,13 @@ Usage:
 
 import sys
 import os
-import time
-import socket
 import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from vision import RealSenseCamera
 from calibration.transform import CoordinateTransform
+from robot.dobot_api import DobotNova5
 
 # Checkerboard parameters (must match detect_checkerboard.py)
 BOARD_COLS = 7   # inner corners
@@ -30,63 +30,7 @@ SQUARE_SIZE_M = 0.02  # 2cm
 # Height above each corner to move to (meters)
 HOVER_HEIGHT_M = 0.05  # 5cm
 
-# Robot jog parameters
-SPEED_PERCENT = 20       # slow for safety
-ANGLE_TOLERANCE = 0.8    # degrees - close enough to stop jogging
-MAX_JOG_ITERS = 30       # max jog iterations per target
-JOG_SETTLE_TIME = 0.15   # seconds to wait after stopping a jog
-
-
-class RobotConnection:
-    """Minimal dashboard connection for jog-based motion."""
-
-    def __init__(self, ip, port=29999):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(3)
-        self.sock.connect((ip, port))
-        try:
-            self.sock.recv(1024)
-        except socket.timeout:
-            pass
-
-    def send(self, cmd):
-        self.sock.send(f"{cmd}\n".encode())
-        time.sleep(0.05)
-        try:
-            return self.sock.recv(4096).decode().strip()
-        except socket.timeout:
-            return ""
-
-    def parse_vals(self, resp):
-        try:
-            inner = resp.split('{')[1].split('}')[0]
-            return [float(x) for x in inner.split(',')]
-        except (IndexError, ValueError):
-            return None
-
-    def get_pose(self):
-        return self.parse_vals(self.send('GetPose()'))
-
-    def get_angles(self):
-        return self.parse_vals(self.send('GetAngle()'))
-
-    def inverse_kin(self, x, y, z, rx, ry, rz):
-        resp = self.send(f'InverseKin({x},{y},{z},{rx},{ry},{rz})')
-        return self.parse_vals(resp)
-
-    def enable(self):
-        print("  Enabling robot...")
-        self.send('DisableRobot()')
-        time.sleep(1)
-        self.send('ClearError()')
-        self.send('EnableRobot()')
-        time.sleep(1)
-        mode = self.send('RobotMode()')
-        print(f"  RobotMode: {mode}")
-
-    def close(self):
-        self.send('MoveJog()')
-        self.sock.close()
+SPEED_PERCENT = 20  # slow for safety
 
 
 def detect_checkerboard(camera):
@@ -165,8 +109,6 @@ def get_board_outer_corners_cam(T_board_in_cam):
     These are the actual board corners (not inner corners), i.e. offset
     by half a square from the first/last inner corners.
     """
-    # Inner corner grid spans (BOARD_COLS-1)*SQUARE_SIZE in X, (BOARD_ROWS-1)*SQUARE_SIZE in Y
-    # Outer board corners are 1 square beyond the inner corners in each direction
     half = SQUARE_SIZE_M / 2.0
     max_x = (BOARD_COLS - 1) * SQUARE_SIZE_M
     max_y = (BOARD_ROWS - 1) * SQUARE_SIZE_M
@@ -186,37 +128,6 @@ def get_board_outer_corners_cam(T_board_in_cam):
         corners_cam.append(p_cam)
 
     return corners_cam, labels
-
-
-def jog_to_angles(robot, target_angles, label=""):
-    """Jog each joint toward target angles iteratively."""
-    for iteration in range(MAX_JOG_ITERS):
-        current = robot.get_angles()
-        if not current:
-            print(f"    ERROR: can't read joint angles")
-            return False
-
-        errors = [(abs(target_angles[i] - current[i]), i) for i in range(6)]
-        max_err = max(e for e, _ in errors)
-
-        if max_err < ANGLE_TOLERANCE:
-            print(f"    Reached target ({iteration} iterations, max err {max_err:.2f} deg)")
-            return True
-
-        # Jog the joint with largest error
-        errors.sort(reverse=True)
-        err, ji = errors[0]
-        direction = '+' if target_angles[ji] > current[ji] else '-'
-        jog_time = min(0.8, err / 20.0)
-        jog_time = max(0.05, jog_time)
-
-        robot.send(f'MoveJog(J{ji+1}{direction})')
-        time.sleep(jog_time)
-        robot.send('MoveJog()')
-        time.sleep(JOG_SETTLE_TIME)
-
-    print(f"    WARNING: did not converge after {MAX_JOG_ITERS} iterations")
-    return False
 
 
 def main():
@@ -273,23 +184,21 @@ def main():
         print("\n[DRY RUN] Would move to above targets. Exiting.")
         return
 
-    # Connect to robot
+    # Connect to robot using the driver
     print("\n=== Connecting to robot ===")
-    robot = RobotConnection('192.168.5.1')
+    robot = DobotNova5()
+    robot.connect()
+    print(f"  Motion mode: {robot.motion_mode}")
+
     robot.enable()
-    robot.send(f'SpeedFactor({SPEED_PERCENT})')
+    robot.set_speed(SPEED_PERCENT)
 
     # Get current pose for orientation reference
-    current_pose = robot.get_pose()
-    if not current_pose:
-        print("ERROR: can't read robot pose")
-        robot.close()
-        return
-
-    print(f"  Current pose: {', '.join(f'{v:.1f}' for v in current_pose)}")
+    pose = robot.get_pose()
+    print(f"  Current pose: {', '.join(f'{v:.1f}' for v in pose)}")
 
     # Use current orientation (rx, ry, rz) for all targets
-    rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
+    rx, ry, rz = pose[3], pose[4], pose[5]
     print(f"  Using orientation: rx={rx:.1f}, ry={ry:.1f}, rz={rz:.1f}")
 
     input("\nPress Enter to start moving to corners (Ctrl+C to abort)...")
@@ -299,25 +208,19 @@ def main():
             print(f"\n--- Moving to corner {i} ({label}) ---")
             print(f"  Target: [{target_mm[0]:.1f}, {target_mm[1]:.1f}, {target_mm[2]:.1f}] mm")
 
-            # Solve IK for hover position
-            target_joints = robot.inverse_kin(
-                target_mm[0], target_mm[1], target_mm[2], rx, ry, rz)
+            ok = robot.move_joint(
+                target_mm[0], target_mm[1], target_mm[2], rx, ry, rz,
+                speed_percent=SPEED_PERCENT)
 
-            if not target_joints:
-                print(f"  ERROR: IK failed for corner {i}, skipping")
+            if not ok:
+                print(f"  ERROR: move failed for corner {i}, skipping")
                 continue
-
-            print(f"  IK solution: {', '.join(f'{v:.1f}' for v in target_joints)}")
-
-            # Jog to target
-            success = jog_to_angles(robot, target_joints, label)
 
             # Report actual pose
             actual = robot.get_pose()
-            if actual:
-                print(f"  Actual pose:  {', '.join(f'{v:.1f}' for v in actual)}")
-                err = np.sqrt(sum((actual[j] - target_mm[j])**2 for j in range(3)))
-                print(f"  Position error: {err:.1f} mm")
+            print(f"  Actual pose:  {', '.join(f'{v:.1f}' for v in actual)}")
+            err = np.linalg.norm(actual[:3] - target_mm)
+            print(f"  Position error: {err:.1f} mm")
 
             if i < len(targets_base) - 1:
                 input("  Press Enter for next corner...")
@@ -326,10 +229,10 @@ def main():
 
     except KeyboardInterrupt:
         print("\n\nAborted by user.")
-        robot.send('MoveJog()')
+        robot.jog_stop()
 
     finally:
-        robot.close()
+        robot.disconnect()
         print("Robot disconnected.")
 
 
