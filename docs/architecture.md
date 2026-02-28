@@ -16,7 +16,7 @@ with a gripper picks it up and stands it upright.
 │   D435i     │          │                                              │
 └─────────────┘          │  ┌────────────┐  ┌────────────┐  ┌────────┐ │   TCP/IP    ┌───────────┐
                          │  │  Vision    │─>│ Planner /  │─>│ Robot  │─│────────────>│ Dobot     │
-                         │  │  Module    │  │ Orchestr.  │  │ Driver │ │ 192.168.1.5 │ Nova5     │
+                         │  │  Module    │  │ Orchestr.  │  │ Driver │ │ 192.168.5.1 │ Nova5     │
                          │  └────────────┘  └────────────┘  └────────┘ │             │ + Gripper │
                          └──────────────────────────────────────────────┘             └───────────┘
 ```
@@ -37,14 +37,14 @@ with a gripper picks it up and stands it upright.
 | Component | Model | Interface | Notes |
 |-----------|-------|-----------|-------|
 | Camera | Intel RealSense D435i | USB 3.0 | Fixed mount, known extrinsics after calibration |
-| Robot Arm | Dobot Nova5 (6-axis) | Ethernet TCP/IP | IP: `192.168.1.5`, 5 kg payload, 850 mm reach |
+| Robot Arm | Dobot Nova5 (6-axis) | Ethernet TCP/IP | IP: `192.168.5.1`, 5 kg payload, 850 mm reach |
 | Gripper | TBD (attached to Nova5) | Digital I/O via Nova5 | Parallel jaw or pneumatic, controlled via DO ports |
 | Host PC | Linux x86_64 | USB + Ethernet | Runs all software |
 
 ### Network Configuration
 
-- Host PC Ethernet: `192.168.1.X` (same subnet as robot)
-- Robot IP: `192.168.1.5`
+- Host PC Ethernet: `192.168.5.X` (same subnet as robot)
+- Robot IP: `192.168.5.1`
 - Dobot TCP ports: `29999` (dashboard/control), `30003` (motion), `30004` (feedback)
 
 ---
