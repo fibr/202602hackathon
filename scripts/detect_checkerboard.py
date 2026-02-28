@@ -35,15 +35,56 @@ SQUARE_SIZE_M = 0.02  # 2cm squares
 
 
 def detect_corners(gray):
-    """Find checkerboard corners with subpixel refinement."""
+    """Find checkerboard corners using multiple strategies.
+
+    Tries (in order):
+    1. SectorBased detector (OpenCV 4+, most robust)
+    2. Classic detector with CLAHE preprocessing
+    3. Classic detector with aggressive adaptive threshold
+    """
+    # Strategy 1: SectorBased detector (best for small/distant boards)
+    try:
+        found, corners = cv2.findChessboardCornersSB(
+            gray, (BOARD_COLS, BOARD_ROWS),
+            cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY)
+        if found:
+            return found, corners
+    except cv2.error:
+        pass  # older OpenCV without SB support
+
+    # Strategy 2: CLAHE contrast enhancement + classic detector
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
     flags = (cv2.CALIB_CB_ADAPTIVE_THRESH |
-             cv2.CALIB_CB_NORMALIZE_IMAGE |
-             cv2.CALIB_CB_FAST_CHECK)
-    found, corners = cv2.findChessboardCorners(gray, (BOARD_COLS, BOARD_ROWS), flags)
+             cv2.CALIB_CB_NORMALIZE_IMAGE)
+    found, corners = cv2.findChessboardCorners(enhanced, (BOARD_COLS, BOARD_ROWS), flags)
     if found:
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
         corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
-    return found, corners
+        return found, corners
+
+    # Strategy 3: sharpen + classic detector
+    blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+    sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+    flags = (cv2.CALIB_CB_ADAPTIVE_THRESH |
+             cv2.CALIB_CB_NORMALIZE_IMAGE |
+             cv2.CALIB_CB_FILTER_QUADS)
+    found, corners = cv2.findChessboardCorners(sharpened, (BOARD_COLS, BOARD_ROWS), flags)
+    if found:
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
+        return found, corners
+
+    # Also try smaller board sizes in case edges are cut off
+    for cols, rows in [(BOARD_COLS, BOARD_ROWS - 2), (BOARD_COLS - 2, BOARD_ROWS),
+                       (BOARD_COLS - 2, BOARD_ROWS - 2)]:
+        found, corners = cv2.findChessboardCornersSB(
+            gray, (cols, rows), cv2.CALIB_CB_EXHAUSTIVE)
+        if found:
+            print(f"  (detected {cols}x{rows} subset of board)")
+            return found, corners
+
+    return False, None
 
 
 def get_corners_3d(corners, depth_frame, camera):
@@ -58,17 +99,31 @@ def get_corners_3d(corners, depth_frame, camera):
     return np.array(points_3d)
 
 
-def compute_board_pose(corners_2d, intrinsics):
+def compute_board_pose(corners_2d, intrinsics, n_corners=None):
     """Use solvePnP to get checkerboard pose in camera frame.
 
     Returns (rvec, tvec, obj_points) where tvec is the board origin
     in camera coordinates (meters).
     """
+    # Figure out detected grid size from corner count
+    n = len(corners_2d) if n_corners is None else n_corners
+    if n == BOARD_ROWS * BOARD_COLS:
+        cols, rows = BOARD_COLS, BOARD_ROWS
+    else:
+        # Find matching smaller grid
+        for c, r in [(BOARD_COLS, BOARD_ROWS - 2), (BOARD_COLS - 2, BOARD_ROWS),
+                     (BOARD_COLS - 2, BOARD_ROWS - 2)]:
+            if c * r == n:
+                cols, rows = c, r
+                break
+        else:
+            cols, rows = BOARD_COLS, BOARD_ROWS  # fallback
+
     # Object points: 3D coordinates of inner corners in board frame
-    obj_points = np.zeros((BOARD_ROWS * BOARD_COLS, 3), dtype=np.float32)
-    for r in range(BOARD_ROWS):
-        for c in range(BOARD_COLS):
-            obj_points[r * BOARD_COLS + c] = [c * SQUARE_SIZE_M, r * SQUARE_SIZE_M, 0]
+    obj_points = np.zeros((rows * cols, 3), dtype=np.float32)
+    for r in range(rows):
+        for c in range(cols):
+            obj_points[r * cols + c] = [c * SQUARE_SIZE_M, r * SQUARE_SIZE_M, 0]
 
     # Camera matrix from RealSense intrinsics
     camera_matrix = np.array([
@@ -123,19 +178,25 @@ def main():
                 found, corners = detect_corners(gray)
 
                 display = color_image.copy()
+
+                # Build debug view: CLAHE enhanced grayscale
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                debug_gray = clahe.apply(gray)
+                debug_view = cv2.cvtColor(debug_gray, cv2.COLOR_GRAY2BGR)
+
                 if found:
+                    n_corners = len(corners)
                     cv2.drawChessboardCorners(display, (BOARD_COLS, BOARD_ROWS), corners, found)
-                    # Show corner count
-                    cv2.putText(display, f"Corners: {len(corners)} - press 'c' to capture",
+                    cv2.drawChessboardCorners(debug_view, (BOARD_COLS, BOARD_ROWS), corners, found)
+                    cv2.putText(display, f"Corners: {n_corners} - press 'c' to capture",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 else:
                     cv2.putText(display, "No checkerboard found",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.putText(debug_view, "CLAHE enhanced",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-                # Also show depth
-                depth_colormap = cv2.applyColorMap(
-                    cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
-                display = np.hstack([display, depth_colormap])
+                display = np.hstack([display, debug_view])
             else:
                 display = captured_image
 
