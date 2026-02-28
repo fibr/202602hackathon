@@ -1,17 +1,17 @@
-"""TCP/IP driver for Dobot Nova5 robot arm (firmware V4, e.g. 4.6.2).
+"""TCP/IP driver for Dobot Nova5 robot arm (firmware 4.6.2).
 
-All commands go through dashboard port 29999 using V4 named-parameter syntax.
-No ROS2 driver or additional ports needed.
+Dual-port architecture:
+  - Port 29999 (dashboard): state queries, enable/disable, jog, IK/FK, gripper
+  - Port 30003 (motion):    MovJ, MovL coordinated motion commands
 
-V4 motion command syntax (different from V3!):
-  MovJ(pose={x,y,z,rx,ry,rz})        — joint-space move to Cartesian pose
-  MovL(pose={x,y,z,rx,ry,rz})        — linear move to Cartesian pose
-  MovJ(joint={j1,j2,j3,j4,j5,j6})   — joint-space move to joint angles
+Port 30003 requires the ROS2 driver to be running:
+    docker compose --profile dobot up -d
+
+MovJ/MovL on port 29999 return error -7. This is a firmware limitation,
+not a syntax issue — neither V3 nor V4 command syntax works on dashboard.
 
 Motion commands are fire-and-forget: they return immediately, completion
-is detected by polling joint stability.
-
-Reference: https://github.com/Dobot-Arm/TCP-IP-Python-V4
+is detected by polling joint stability via dashboard.
 """
 
 import socket
@@ -23,9 +23,9 @@ from dataclasses import dataclass
 # Response code meanings (observed on 4.6.2)
 RC_OK = 0
 RC_UNKNOWN_CMD = -10000
-RC_NO_MOTION_PORT = -30001
 RC_INVALID_PARAM = -20000
 RC_JOG_INVALID = -6
+RC_NOT_ON_DASHBOARD = -7     # MovJ/MovL sent to port 29999 instead of 30003
 
 
 @dataclass
@@ -40,35 +40,71 @@ class RobotState:
 class DobotNova5:
     """Driver for Dobot Nova5 6-axis robot arm over TCP/IP.
 
-    Uses dashboard port 29999 with V4 command syntax for all operations
-    including MovJ/MovL motion commands.
+    Dashboard port 29999 handles state queries, enable/disable, jog, IK/FK.
+    Motion port 30003 handles MovJ/MovL (requires ROS2 driver).
     """
 
     JOG_AXES = ["J1", "J2", "J3", "J4", "J5", "J6"]
 
     def __init__(self, ip: str = "192.168.5.1",
-                 dashboard_port: int = 29999):
+                 dashboard_port: int = 29999,
+                 motion_port: int = 30003):
         self.ip = ip
         self.dashboard_port = dashboard_port
-        self._sock = None
+        self.motion_port = motion_port
+        self._dash_sock = None
+        self._motion_sock = None
         self.state = RobotState()
 
     def connect(self):
-        """Connect to the dashboard port."""
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(5.0)
-        self._sock.connect((self.ip, self.dashboard_port))
+        """Connect to dashboard and motion ports.
+
+        Raises ConnectionError if the motion port (30003) is not available.
+        The ROS2 driver must be running: docker compose --profile dobot up -d
+        """
+        # Dashboard port (always available)
+        self._dash_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._dash_sock.settimeout(5.0)
+        self._dash_sock.connect((self.ip, self.dashboard_port))
         try:
-            self._sock.recv(1024)
+            self._dash_sock.recv(1024)
         except socket.timeout:
             pass
 
-    def _send(self, cmd: str) -> str:
-        """Send a command and return raw response string."""
-        self._sock.send(f"{cmd}\n".encode())
+        # Motion port (requires ROS2 driver)
+        try:
+            self._motion_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._motion_sock.settimeout(5.0)
+            self._motion_sock.connect((self.ip, self.motion_port))
+            try:
+                self._motion_sock.recv(1024)
+            except socket.timeout:
+                pass
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            if self._motion_sock:
+                self._motion_sock.close()
+                self._motion_sock = None
+            raise ConnectionError(
+                f"Cannot connect to motion port {self.motion_port}. "
+                f"Is the ROS2 driver running? "
+                f"Start it with: docker compose --profile dobot up -d"
+            ) from e
+
+    def _send_dash(self, cmd: str) -> str:
+        """Send a command on the dashboard port and return raw response."""
+        self._dash_sock.send(f"{cmd}\n".encode())
         time.sleep(0.1)
         try:
-            return self._sock.recv(4096).decode().strip()
+            return self._dash_sock.recv(4096).decode().strip()
+        except socket.timeout:
+            return ""
+
+    def _send_motion(self, cmd: str) -> str:
+        """Send a command on the motion port and return raw response."""
+        self._motion_sock.send(f"{cmd}\n".encode())
+        time.sleep(0.1)
+        try:
+            return self._motion_sock.recv(4096).decode().strip()
         except socket.timeout:
             return ""
 
@@ -93,10 +129,10 @@ class DobotNova5:
 
     def enable(self):
         """Enable the robot. Includes disable/enable cycle for reliable startup."""
-        self._send("DisableRobot()")
+        self._send_dash("DisableRobot()")
         time.sleep(1)
-        self._send("ClearError()")
-        resp = self._send("EnableRobot()")
+        self._send_dash("ClearError()")
+        resp = self._send_dash("EnableRobot()")
         time.sleep(1)
         code, _ = self._parse_response(resp)
         self.state.enabled = (code == RC_OK)
@@ -104,17 +140,17 @@ class DobotNova5:
 
     def disable(self):
         """Disable the robot."""
-        resp = self._send("DisableRobot()")
+        resp = self._send_dash("DisableRobot()")
         self.state.enabled = False
         return resp
 
     def clear_error(self):
         """Clear any alarm/error state."""
-        return self._send("ClearError()")
+        return self._send_dash("ClearError()")
 
     def get_mode(self) -> int:
         """Get robot mode. 5=enabled, 6=backdrive, 9=error, etc."""
-        resp = self._send("RobotMode()")
+        resp = self._send_dash("RobotMode()")
         _, val = self._parse_response(resp)
         try:
             self.state.mode = int(val)
@@ -124,19 +160,19 @@ class DobotNova5:
 
     def get_errors(self) -> str:
         """Get active error IDs."""
-        resp = self._send("GetErrorID()")
+        resp = self._send_dash("GetErrorID()")
         _, val = self._parse_response(resp)
         return val
 
     def set_speed(self, speed_percent: int):
         """Set robot speed as percentage (1-100)."""
-        return self._send(f"SpeedFactor({speed_percent})")
+        return self._send_dash(f"SpeedFactor({speed_percent})")
 
     # --- State queries ---
 
     def get_pose(self) -> np.ndarray:
         """Get current TCP pose [x, y, z, rx, ry, rz] in mm/degrees."""
-        resp = self._send("GetPose()")
+        resp = self._send_dash("GetPose()")
         pose = self._parse_numbers(resp)
         if len(pose) >= 6:
             self.state.tcp_pose = pose[:6]
@@ -144,7 +180,7 @@ class DobotNova5:
 
     def get_joint_angles(self) -> np.ndarray:
         """Get current joint angles [j1..j6] in degrees."""
-        resp = self._send("GetAngle()")
+        resp = self._send_dash("GetAngle()")
         angles = self._parse_numbers(resp)
         if len(angles) >= 6:
             self.state.joints = angles[:6]
@@ -163,7 +199,7 @@ class DobotNova5:
         Returns:
             Array of 6 joint angles in degrees, or zeros on failure.
         """
-        resp = self._send(f"InverseKin({x},{y},{z},{rx},{ry},{rz})")
+        resp = self._send_dash(f"InverseKin({x},{y},{z},{rx},{ry},{rz})")
         return self._parse_numbers(resp)
 
     def forward_kin(self, j1: float, j2: float, j3: float,
@@ -176,7 +212,7 @@ class DobotNova5:
         Returns:
             Array [x, y, z, rx, ry, rz] in mm/degrees, or zeros on failure.
         """
-        resp = self._send(f"PositiveKin({j1},{j2},{j3},{j4},{j5},{j6})")
+        resp = self._send_dash(f"PositiveKin({j1},{j2},{j3},{j4},{j5},{j6})")
         return self._parse_numbers(resp)
 
     # --- Motion completion ---
@@ -214,18 +250,18 @@ class DobotNova5:
 
         return False
 
-    # --- Jog motion ---
+    # --- Jog motion (dashboard port) ---
 
     def jog_start(self, axis: str):
         """Start jogging an axis. axis must be e.g. 'J1+', 'J3-' (uppercase).
 
         Valid axes: J1+, J1-, J2+, J2-, ..., J6+, J6-
         """
-        return self._send(f"MoveJog({axis})")
+        return self._send_dash(f"MoveJog({axis})")
 
     def jog_stop(self):
         """Stop any active jog motion."""
-        return self._send("MoveJog()")
+        return self._send_dash("MoveJog()")
 
     def jog_joint(self, joint: int, direction: str, duration: float):
         """Jog a single joint for a given duration.
@@ -241,24 +277,23 @@ class DobotNova5:
         self.jog_stop()
         time.sleep(0.3)  # settling time
 
-    # --- Cartesian motion (V4 syntax) ---
+    # --- Coordinated motion (motion port 30003) ---
 
     def movl(self, x: float, y: float, z: float,
              rx: float, ry: float, rz: float,
-             speed: int = -1, timeout: float = 30.0) -> bool:
-        """Cartesian linear move via V4 MovL.
+             timeout: float = 30.0) -> bool:
+        """Cartesian linear move.
 
         Args:
             x, y, z: Target position in mm
             rx, ry, rz: Target orientation in degrees
-            speed: Speed percentage (optional, uses SpeedFactor if -1)
             timeout: Max wait for completion
 
         Returns:
             True if motion completed, False on failure.
         """
-        cmd = f"MovL(pose={{{x},{y},{z},{rx},{ry},{rz}}})"
-        resp = self._send(cmd)
+        cmd = f"MovL({x},{y},{z},{rx},{ry},{rz})"
+        resp = self._send_motion(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
             return False
@@ -266,20 +301,19 @@ class DobotNova5:
 
     def movj(self, x: float, y: float, z: float,
              rx: float, ry: float, rz: float,
-             speed: int = -1, timeout: float = 30.0) -> bool:
-        """Joint-space move to Cartesian pose via V4 MovJ.
+             timeout: float = 30.0) -> bool:
+        """Joint-space move to Cartesian pose.
 
         Args:
             x, y, z: Target position in mm
             rx, ry, rz: Target orientation in degrees
-            speed: Speed percentage (optional, uses SpeedFactor if -1)
             timeout: Max wait for completion
 
         Returns:
             True if motion completed, False on failure.
         """
-        cmd = f"MovJ(pose={{{x},{y},{z},{rx},{ry},{rz}}})"
-        resp = self._send(cmd)
+        cmd = f"MovJ({x},{y},{z},{rx},{ry},{rz})"
+        resp = self._send_motion(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
             return False
@@ -288,7 +322,7 @@ class DobotNova5:
     def movj_joints(self, j1: float, j2: float, j3: float,
                     j4: float, j5: float, j6: float,
                     timeout: float = 30.0) -> bool:
-        """Joint-space move to joint angles via V4 MovJ.
+        """Joint-space move to joint angles.
 
         Args:
             j1..j6: Target joint angles in degrees
@@ -297,8 +331,8 @@ class DobotNova5:
         Returns:
             True if motion completed, False on failure.
         """
-        cmd = f"MovJ(joint={{{j1},{j2},{j3},{j4},{j5},{j6}}})"
-        resp = self._send(cmd)
+        cmd = f"MovJ({j1},{j2},{j3},{j4},{j5},{j6})"
+        resp = self._send_motion(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
             return False
@@ -340,11 +374,11 @@ class DobotNova5:
         self.set_speed(speed_percent)
         return self.movj(x, y, z, rx, ry, rz, timeout=timeout)
 
-    # --- ToolDO (gripper) ---
+    # --- ToolDO (gripper, dashboard port) ---
 
     def tool_do(self, index: int, status: int):
         """Set a tool digital output (ToolDO). May require running mode."""
-        resp = self._send(f"ToolDO({index},{status})")
+        resp = self._send_dash(f"ToolDO({index},{status})")
         code, _ = self._parse_response(resp)
         return code == RC_OK
 
@@ -361,20 +395,22 @@ class DobotNova5:
             index: ToolDO index (1 or 2)
             status: 0 or 1
         """
-        resp = self._send(f"ToolDOInstant({index},{status})")
+        resp = self._send_dash(f"ToolDOInstant({index},{status})")
         code, _ = self._parse_response(resp)
         return code == RC_OK
 
     # --- Connection lifecycle ---
 
     def disconnect(self):
-        """Close the dashboard connection."""
-        if self._sock:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
-            self._sock = None
+        """Close all connections."""
+        for sock in [self._dash_sock, self._motion_sock]:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        self._dash_sock = None
+        self._motion_sock = None
 
     def __enter__(self):
         self.connect()

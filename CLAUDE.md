@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435i camera and Dobot Nova5 6-axis arm to detect a metal hollow black rod, pick it up, and stand it upright. Pure Python, no ROS.
+Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435i camera and Dobot Nova5 6-axis arm to detect a metal hollow black rod, pick it up, and stand it upright. Pure Python, ROS2 driver in Docker for motion commands.
 
 ## Setup & Run
 
@@ -36,7 +36,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
 - `src/planner/` — Generates ordered waypoints (approach, grasp, lift, reorient, place, release)
-- `src/robot/dobot_api.py` — TCP/IP driver using V4 command syntax (MovL/MovJ with jog fallback)
+- `src/robot/dobot_api.py` — Dual-port TCP/IP driver (dashboard 29999 + motion 30003)
 - `src/robot/gripper.py` — Electric gripper via ToolDOInstant dual-channel control
 - `config/robot_config.yaml` — Shared config (robot IP, speeds, camera, detection thresholds)
 - `config/settings.yaml` — Local overrides, gitignored (create to override any config value)
@@ -46,19 +46,22 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 
 ## Robot Protocol (Nova5 firmware 4.6.2)
 
-All commands go through **dashboard port 29999** using V4 named-parameter syntax. No ROS2 driver or extra ports needed.
+Dual-port architecture. The ROS2 driver must be running for motion commands.
+
+```bash
+docker compose --profile dobot up -d   # Start ROS2 driver (required for MovJ/MovL)
+```
 
 Response format: `code,{value},CommandName();` where code 0 = success.
 
-### V4 motion commands (probed on enable)
-- `MovJ(pose={x,y,z,rx,ry,rz})` — joint-space move to Cartesian pose
-- `MovL(pose={x,y,z,rx,ry,rz})` — linear move to Cartesian pose
-- `MovJ(joint={j1,j2,j3,j4,j5,j6})` — joint-space move to joint angles
-- **Important**: V3 syntax `MovJ(x,y,z,rx,ry,rz)` returns -30001 — must use V4 named params with braces
-- Driver auto-probes on `enable()`, falls back to IK + jog if V4 commands fail
-- Motion is fire-and-forget; completion detected by polling joint stability
+### Port 30003 — motion commands (requires ROS2 driver)
+- `MovJ(x,y,z,rx,ry,rz)` — joint-space move to Cartesian pose
+- `MovL(x,y,z,rx,ry,rz)` — linear move to Cartesian pose
+- Motion is fire-and-forget; completion detected by polling joint stability via dashboard
+- **Error -7**: returned if MovJ/MovL sent to dashboard port 29999 instead of motion port 30003
+- V4 `pose={...}` syntax also returns -7 on dashboard — it's a port issue, not syntax
 
-### Other dashboard commands
+### Port 29999 — dashboard commands
 - **Joint jog**: `MoveJog(J1+)` through `MoveJog(J6-)` — **uppercase only**, lowercase silently ignored
 - **Jog stop**: `MoveJog()`
 - **Gripper close**: `ToolDOInstant(2,0)` then `ToolDOInstant(1,1)` — must turn off opposing channel first
@@ -70,6 +73,7 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 - **Forward kinematics**: `PositiveKin(j1,j2,j3,j4,j5,j6)` → returns pose
 
 ### What doesn't work
+- `MovJ`/`MovL` on port 29999 → error **-7** (must use port 30003)
 - Cartesian jog `MoveJog(z+)` → silently ignored; `MoveJog(Z+)` → error -6
 - `DO(port, val)` → error -1 (use ToolDOInstant instead)
 - `ToolDO(index, status)` → error -1 in idle mode (use ToolDOInstant)
@@ -94,5 +98,5 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 ## Hardware
 
 - **Camera**: RealSense D435i at USB 3.0 (640×480 @ 15fps, fixed mount, eye-to-hand)
-- **Robot**: Dobot Nova5 (firmware 4.6.2) at `192.168.5.1`, dashboard port 29999
+- **Robot**: Dobot Nova5 (firmware 4.6.2) at `192.168.5.1`, dashboard 29999 + motion 30003
 - **Gripper**: Electric motor, dual-channel ToolDOInstant control (ch1=close, ch2=open)

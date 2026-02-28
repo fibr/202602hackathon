@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Test MovL commands: go home, then step in each Cartesian axis and report.
 
-Verifies that MovL(pose={...}) moves the TCP as expected.
+Verifies that MovL(x,y,z,rx,ry,rz) on motion port 30003 moves the TCP as expected.
+Requires ROS2 driver: docker compose --profile dobot up -d
 """
 
 import sys
@@ -38,14 +39,11 @@ def main():
     print(f"  Pose:   [{fmt(pose0)}]  (x, y, z, rx, ry, rz) mm/deg")
     print(f"  Joints: [{fmt(joints0)}] deg")
 
-    # Move to a safe home-ish position using MovJ to current pose (no-op)
+    # Move to current pose (no-op test)
     print(f"\n=== MovJ to current pose (no-op test) ===")
     p = pose0
-    cmd = f"MovJ(pose={{{p[0]:.2f},{p[1]:.2f},{p[2]:.2f},{p[3]:.2f},{p[4]:.2f},{p[5]:.2f}}})"
-    print(f"  Sending: {cmd}")
-    resp = robot._send(cmd)
-    print(f"  Response: {resp}")
-    time.sleep(2)
+    ok = robot.movj(p[0], p[1], p[2], p[3], p[4], p[5], timeout=5)
+    print(f"  Result: {'OK' if ok else 'FAILED'}")
 
     pose_after_noop = robot.get_pose()
     print(f"  Pose after: [{fmt(pose_after_noop)}]")
@@ -73,25 +71,13 @@ def main():
         print(f"  Before: [{fmt(pose_before)}]")
         print(f"  Target: [{fmt(target)}]")
 
-        cmd = f"MovL(pose={{{target[0]:.2f},{target[1]:.2f},{target[2]:.2f},{target[3]:.2f},{target[4]:.2f},{target[5]:.2f}}})"
-        print(f"  Sending: {cmd}")
-        resp = robot._send(cmd)
-        code = resp.split(',')[0] if resp else '-1'
-        print(f"  Response: {resp}  (code={code})")
+        ok = robot.movl(target[0], target[1], target[2],
+                        target[3], target[4], target[5])
+        print(f"  MovL result: {'OK' if ok else 'FAILED'}")
 
-        if code != '0':
+        if not ok:
             print(f"  SKIPPING - command failed")
             continue
-
-        # Wait for motion
-        time.sleep(0.5)
-        prev = robot.get_joint_angles()
-        for _ in range(30):
-            time.sleep(0.2)
-            cur = robot.get_joint_angles()
-            if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
-                break
-            prev = cur
 
         pose_after = robot.get_pose()
         joints_after = robot.get_joint_angles()
@@ -103,17 +89,14 @@ def main():
         print(f"  J diff: [{fmt(joint_diff)}]")
 
         # Check if the right axis moved
-        expected_diff = [0] * 6
-        expected_diff[axis_idx] = step
-        ok = abs(pose_diff[axis_idx] - step) < 2.0  # within 2mm/deg
+        axis_ok = abs(pose_diff[axis_idx] - step) < 2.0  # within 2mm/deg
         others_ok = all(abs(pose_diff[i]) < 2.0 for i in range(6) if i != axis_idx)
-        print(f"  {label} moved by {pose_diff[axis_idx]:.2f} (expected {step:.1f}): {'OK' if ok else 'WRONG'}")
+        print(f"  {label} moved by {pose_diff[axis_idx]:.2f} (expected {step:.1f}): {'OK' if axis_ok else 'WRONG'}")
         print(f"  Other axes stable: {'OK' if others_ok else 'DRIFT'}")
 
         # Move back
-        cmd_back = f"MovL(pose={{{pose_before[0]:.2f},{pose_before[1]:.2f},{pose_before[2]:.2f},{pose_before[3]:.2f},{pose_before[4]:.2f},{pose_before[5]:.2f}}})"
-        robot._send(cmd_back)
-        time.sleep(3)
+        robot.movl(pose_before[0], pose_before[1], pose_before[2],
+                    pose_before[3], pose_before[4], pose_before[5])
 
     print(f"\n=== Final State ===")
     pose_final = robot.get_pose()
