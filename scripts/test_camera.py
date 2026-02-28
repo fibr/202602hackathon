@@ -43,7 +43,9 @@ def main():
             cv2.imshow('RealSense Test (RGB | Depth)', display)
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            if key == ord('q') or key == 27:  # q or ESC
+                break
+            if cv2.getWindowProperty('RealSense Test (RGB | Depth)', cv2.WND_PROP_VISIBLE) < 1:
                 break
             elif key == ord('d'):
                 show_detection = not show_detection
