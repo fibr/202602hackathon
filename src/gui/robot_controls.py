@@ -126,6 +126,10 @@ class RobotControlPanel:
         self.home_rect = (z_x + btn_w + BTN_GAP, y, z_x + PAD_SIZE, y + BTN_H)
         y += BTN_H + BTN_GAP * 2
 
+        # J1 rotate button (for calibration: rotate yaw in 30° steps)
+        self.j1_rotate_rect = (z_x, y, z_x + PAD_SIZE, y + BTN_H)
+        y += BTN_H + BTN_GAP * 2
+
         # Status area starts here
         self.status_y = y
 
@@ -205,6 +209,13 @@ class RobotControlPanel:
                        color=(0, 100, 0))
         self._draw_btn(canvas, self.home_rect, "Home",
                        color=(100, 80, 0))
+
+        # --- J1 Rotate ---
+        j1_label = "J1 +30deg"
+        if self._cached_angles is not None:
+            j1_label = f"J1 +30  ({self._cached_angles[0]:.0f} now)"
+        self._draw_btn(canvas, self.j1_rotate_rect, j1_label,
+                       color=(100, 60, 0))
 
         # --- Status ---
         self._update_status_cache()
@@ -338,6 +349,11 @@ class RobotControlPanel:
             self._do_home()
             return
 
+        # J1 rotate
+        if self._in_rect(x, y, self.j1_rotate_rect):
+            self._do_j1_rotate()
+            return
+
     def _on_drag(self, x, y):
         """Handle mouse drag in panel coords (no-op for Cartesian steps)."""
         pass
@@ -447,6 +463,45 @@ class RobotControlPanel:
         self.robot.send('EnableRobot()')
         time.sleep(1)
         self.status_msg = "Robot enabled"
+
+    def _do_j1_rotate(self, step_deg=30.0):
+        """Rotate J1 by step_deg, keeping all other joints the same.
+
+        Uses MovJ(joint={...}) for joint-space motion. Waits for motion
+        completion so the user can click after the arm settles.
+        """
+        angles = self.robot.get_angles()
+        if not angles or len(angles) < 6:
+            self.status_msg = "ERROR: can't read angles"
+            return
+
+        target = list(angles)
+        target[0] += step_deg
+
+        jstr = ','.join(f'{v:.2f}' for v in target)
+        cmd = f'MovJ(joint={{{jstr}}})'
+        self.status_msg = f"J1 -> {target[0]:.0f} deg..."
+        resp = self.robot.send(cmd)
+        code = resp.split(',')[0] if resp else '-1'
+        if code != '0':
+            self.status_msg = f"MovJ error: {resp}"
+            return
+
+        # Wait for motion to complete (poll joint stability)
+        prev = self.robot.get_angles()
+        for _ in range(150):  # up to 30s
+            time.sleep(0.2)
+            cur = self.robot.get_angles()
+            if prev and cur and len(prev) >= 6 and len(cur) >= 6:
+                if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
+                    break
+            prev = cur
+
+        final = self.robot.get_angles()
+        if final:
+            self.status_msg = f"J1 = {final[0]:.1f} deg — click TCP tip"
+        else:
+            self.status_msg = "J1 rotate done"
 
     def _do_home(self):
         if self.jogging:
