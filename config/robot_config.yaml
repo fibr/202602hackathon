@@ -21,7 +21,7 @@ rod:
   length_mm: 175.0             # Rod length
 
 gripper:
-  tool_length_mm: 130.0       # Flange to fingertip (Nova5 standard end effector plate)
+  tool_length_mm: 200.0       # Flange to fingertip (Nova5 + gripper assembly)
 
 kinematics:
   linear_step_mm: 5.0         # Interpolation step for linear moves

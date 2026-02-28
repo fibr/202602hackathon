@@ -222,7 +222,7 @@ def main():
     base_offset = robot_cfg.get('base_offset_mm')
     robot_overlay = RobotOverlay(
         T_camera_to_base=transform.T_camera_to_base,
-        tool_length_mm=gripper_cfg.get('tool_length_mm', 130.0),
+        tool_length_mm=gripper_cfg.get('tool_length_mm', 200.0),
         base_offset_mm=np.array(base_offset) if base_offset else None,
     )
 
