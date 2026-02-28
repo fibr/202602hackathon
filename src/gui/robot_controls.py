@@ -1,11 +1,14 @@
 """Shared OpenCV GUI panel for robot arm control.
 
-Draws interactive controls (XY jog pad, Z buttons, gripper, speed, enable/home,
-live status) onto an OpenCV canvas. Used by detect_checkerboard.py and
-control_panel.py.
+Draws interactive controls (XY pad, Z buttons, gripper, speed, enable/home,
+live status) onto an OpenCV canvas. Used by detect_checkerboard.py,
+control_panel.py, and collect_dataset.py.
 
 The panel is drawn on the right side of the frame. Mouse events in the panel
 area are routed to handle_mouse(); events outside are left to the app.
+
+XY pad and Z buttons use Cartesian MovL steps (20mm XY, 10mm Z).
+Joint jog (1-6 keys) is available via keyboard.
 
 Robot connection is duck-typed: needs send(), get_pose(), get_angles() methods.
 """
@@ -23,6 +26,10 @@ PAD_DEADZONE = 15       # center deadzone radius
 BTN_H = 36              # button height
 BTN_GAP = 6             # gap between buttons
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+# Cartesian step sizes
+CART_STEP_XY = 20.0     # mm per XY pad click
+CART_STEP_Z = 10.0      # mm per Z button click
 
 # Colors
 COL_PAD_BG = (50, 50, 50)
@@ -65,7 +72,7 @@ class RobotControlPanel:
         self.jog_axis = None  # current jog axis string e.g. 'J1+'
         self._mouse_down = False
         self._mouse_pos = None  # (x, y) relative to panel
-        self._z_jog_dir = None  # 'up' or 'down' while held
+        self._moving = False  # True while a Cartesian step is executing
 
         # Cached robot state (throttled queries)
         self._cached_pose = None
@@ -168,10 +175,8 @@ class RobotControlPanel:
                 cv2.line(canvas, (cx, cy), (mx + px, my), COL_PAD_DOT, 2)
 
         # --- Z buttons ---
-        self._draw_btn(canvas, self.z_up_rect, "Z +",
-                       active=(self._z_jog_dir == 'up'))
-        self._draw_btn(canvas, self.z_dn_rect, "Z -",
-                       active=(self._z_jog_dir == 'down'))
+        self._draw_btn(canvas, self.z_up_rect, "Z +")
+        self._draw_btn(canvas, self.z_dn_rect, "Z -")
 
         # --- Gripper ---
         self._draw_btn(canvas, self.grip_open_rect, "Open",
@@ -285,17 +290,17 @@ class RobotControlPanel:
 
     def _on_press(self, x, y):
         """Handle mouse button press in panel coords."""
-        # XY Pad
+        # XY Pad — Cartesian step on click
         if self._in_rect(x, y, self.pad_rect):
-            self._do_xy_jog(x, y)
+            self._do_xy_step(x, y)
             return
 
-        # Z buttons
+        # Z buttons — Cartesian step
         if self._in_rect(x, y, self.z_up_rect):
-            self._start_z_jog('up')
+            self._do_cart_step(2, +1, CART_STEP_Z)
             return
         if self._in_rect(x, y, self.z_dn_rect):
-            self._start_z_jog('down')
+            self._do_cart_step(2, -1, CART_STEP_Z)
             return
 
         # Gripper
@@ -323,85 +328,99 @@ class RobotControlPanel:
             return
 
     def _on_drag(self, x, y):
-        """Handle mouse drag in panel coords."""
-        if self._in_rect(x, y, self.pad_rect):
-            self._do_xy_jog(x, y)
-        # Z buttons: if dragged off, stop
-        elif self._z_jog_dir is not None:
-            if self._z_jog_dir == 'up' and not self._in_rect(x, y, self.z_up_rect):
-                self._stop_jog()
-            elif self._z_jog_dir == 'down' and not self._in_rect(x, y, self.z_dn_rect):
-                self._stop_jog()
+        """Handle mouse drag in panel coords (no-op for Cartesian steps)."""
+        pass
 
     def _on_release(self, x, y):
         """Handle mouse button release."""
-        if self.jogging or self._z_jog_dir is not None:
+        # Stop any active joint jog (from keyboard)
+        if self.jogging:
             self._stop_jog()
 
-    def _do_xy_jog(self, x, y):
-        """Start or update XY jog based on pad position."""
+    def _do_xy_step(self, x, y):
+        """Do a Cartesian XY step based on click position in the pad."""
+        if self._moving:
+            return
+
         cx, cy = self.pad_center
         dx = x - cx
         dy = y - cy
         dist = (dx * dx + dy * dy) ** 0.5
 
         if dist < PAD_DEADZONE:
-            if self.jogging:
-                self._stop_jog()
             return
 
         # Determine dominant axis: X or Y
-        # In robot frame for the calibration app: WASD mapping
-        # Right = X+, Left = X-, Up = Y+, Down = Y-
-        # On the pad: right = +dx, up = -dy
+        # Pad layout: right = X+, left = X-, up = Y+, down = Y-
         if abs(dx) >= abs(dy):
-            # Horizontal: X axis
-            axis = 'X+' if dx > 0 else 'X-'
+            axis_idx = 0  # X
+            sign = +1 if dx > 0 else -1
         else:
-            # Vertical: Y axis (up on screen = Y+)
-            axis = 'Y+' if dy < 0 else 'Y-'
+            axis_idx = 1  # Y
+            sign = +1 if dy < 0 else -1  # up on screen = Y+
 
-        # Map to MoveJog joint axes (approximate via J1/J2)
-        # For better UX, use actual Cartesian jog isn't supported,
-        # so we use joint jog axes:
-        # X ~ J1 rotation, Y ~ J2 tilt — this is a rough mapping
-        # Actually, the plan says to use MoveJog() which only supports joint axes.
-        # Let's map XY pad to J1 (rotation around base = roughly X/Y in workspace)
-        # and J2 (shoulder = roughly forward/back).
-        # But this is confusing. Better approach: map to the same jog axes that
-        # the keyboard used, but those were Cartesian steps (MovL), not jog.
-        #
-        # The plan says: "Click and hold: continuous MoveJog in the direction"
-        # MoveJog only works with J1+ through J6+. No Cartesian jog.
-        # Map: X+/- -> J1+/-, Y+/- -> J2+/-, this is the best we can do with jog.
-        jog_map = {'X+': 'J1+', 'X-': 'J1-', 'Y+': 'J2+', 'Y-': 'J2-'}
-        jog_axis = jog_map[axis]
+        self._do_cart_step(axis_idx, sign, CART_STEP_XY)
 
-        if self.jog_axis != jog_axis:
-            if self.jogging:
-                self.robot.send('MoveJog()')
-            self.robot.send(f'MoveJog({jog_axis})')
-            self.jog_axis = jog_axis
-            self.jogging = True
-            self.status_msg = f"JOG {jog_axis}"
+    def _do_cart_step(self, axis_idx, sign, step_mm):
+        """Execute a Cartesian step: read pose, offset one axis, MovL.
 
-    def _start_z_jog(self, direction):
-        """Start Z-axis jog (up or down)."""
-        if self.jogging:
-            self.robot.send('MoveJog()')
-        axis = 'J3-' if direction == 'up' else 'J3+'  # J3- raises Z, J3+ lowers
-        self.robot.send(f'MoveJog({axis})')
-        self._z_jog_dir = direction
-        self.jog_axis = axis
-        self.jogging = True
-        self.status_msg = f"JOG Z {'up' if direction == 'up' else 'down'}"
+        Args:
+            axis_idx: 0=X, 1=Y, 2=Z
+            sign: +1 or -1
+            step_mm: step size in mm
+        """
+        if self._moving:
+            return
+        self._moving = True
+
+        labels = {0: 'X', 1: 'Y', 2: 'Z'}
+        axis_name = labels[axis_idx]
+        dir_ch = '+' if sign > 0 else '-'
+        self.status_msg = f"{axis_name}{dir_ch} {step_mm:.0f}mm..."
+
+        pose = self.robot.get_pose()
+        if not pose or len(pose) < 6:
+            self.status_msg = "ERROR: can't read pose"
+            self._moving = False
+            return
+
+        target = list(pose)
+        target[axis_idx] += sign * step_mm
+
+        tp = target
+        cmd = (f'MovL(pose={{{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},'
+               f'{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f}}})')
+        resp = self.robot.send(cmd)
+        code = resp.split(',')[0] if resp else '-1'
+        if code != '0':
+            self.status_msg = f"MovL error: {resp}"
+            self._moving = False
+            return
+
+        # Wait for motion to complete (poll joint stability)
+        time.sleep(0.3)
+        prev = self.robot.get_angles()
+        for _ in range(50):
+            time.sleep(0.1)
+            cur = self.robot.get_angles()
+            if prev and cur and len(prev) >= 6 and len(cur) >= 6:
+                if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
+                    break
+            prev = cur
+
+        new_pose = self.robot.get_pose()
+        if new_pose and len(new_pose) >= 3:
+            self.status_msg = (f"{axis_name}{dir_ch} done  "
+                               f"[{new_pose[0]:.1f},{new_pose[1]:.1f},{new_pose[2]:.1f}]")
+        else:
+            self.status_msg = f"{axis_name}{dir_ch} done"
+        self._moving = False
 
     def _stop_jog(self):
-        """Stop any active jog."""
+        """Stop any active joint jog."""
         self.robot.send('MoveJog()')
         self.jogging = False
         self.jog_axis = None
-        self._z_jog_dir = None
         self.status_msg = "Stopped"
 
     def _gripper_open(self):

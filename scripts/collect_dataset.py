@@ -38,8 +38,33 @@ from vision.rod_detector import RodDetector
 from calibration import CoordinateTransform
 from config_loader import load_config
 from visualization import RobotOverlay
+from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'rod_dataset')
+
+
+class DobotPanelAdapter:
+    """Adapter to make DobotNova5 compatible with RobotControlPanel.
+
+    The panel expects send(), get_pose() -> list, get_angles() -> list.
+    DobotNova5 has _send(), get_pose() -> np.ndarray, get_joint_angles().
+    """
+
+    def __init__(self, robot):
+        self._robot = robot
+
+    def send(self, cmd):
+        return self._robot._send(cmd)
+
+    def get_pose(self):
+        p = self._robot.get_pose()
+        return list(p) if p is not None else None
+
+    def get_angles(self):
+        a = self._robot.get_joint_angles()
+        return list(a) if a is not None else None
+
+
 HOVER_HEIGHT_MM = 200.0    # Height above rod centroid
 GRIPPER_DOWN_RX = 180.0    # rx when gripper points straight down
 
@@ -232,6 +257,14 @@ def main():
         print("Connecting to robot...")
         robot = try_connect_robot(config)
 
+    # GUI panel (only if robot connected)
+    panel = None
+    if robot:
+        adapter = DobotPanelAdapter(robot)
+        panel = RobotControlPanel(adapter, panel_x=width, panel_height=height)
+        robot_speed = config.get('robot', {}).get('speed_percent', 30)
+        panel.speed = robot_speed
+
     print()
     print("=== Rod Dataset Collection ===")
     print(f"Resolution: {width}x{height}")
@@ -246,7 +279,12 @@ def main():
     camera = RealSenseCamera(width=width, height=height, fps=15)
     camera.start()
 
+    def on_mouse(event, x, y, flags, param):
+        if panel and x >= width:
+            panel.handle_mouse(event, x, y, flags)
+
     cv2.namedWindow('Collect Dataset')
+    cv2.setMouseCallback('Collect Dataset', on_mouse)
 
     # Let auto-exposure settle
     for _ in range(30):
@@ -263,6 +301,8 @@ def main():
             if color is None:
                 continue
 
+            canvas_w = width + PANEL_WIDTH if panel else width
+            canvas = np.zeros((height, canvas_w, 3), dtype=np.uint8)
             vis = color.copy()
 
             # Run detection overlay if toggled
@@ -313,7 +353,11 @@ def main():
             cv2.putText(vis, status, (10, h_img - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-            cv2.imshow('Collect Dataset', vis)
+            canvas[0:height, 0:width] = vis
+            if panel:
+                panel.draw(canvas)
+
+            cv2.imshow('Collect Dataset', canvas)
             key_raw = cv2.waitKeyEx(1)
             key = key_raw & 0xFF
 
@@ -325,11 +369,15 @@ def main():
             except cv2.error:
                 break
 
-            if key == ord('d'):
+            # Panel keyboard handling
+            if key != 255 and panel and panel.handle_key(key):
+                pass
+
+            elif key == ord('d'):
                 show_detection = not show_detection
                 print(f"  Detection overlay: {'ON' if show_detection else 'OFF'}")
 
-            if key == ord('r'):
+            elif key == ord('r'):
                 show_robot_overlay = not show_robot_overlay
                 print(f"  Robot skeleton overlay: {'ON' if show_robot_overlay else 'OFF'}")
 
@@ -354,7 +402,7 @@ def main():
                 robot_overlay.nudge_base(dz_mm=-NUDGE_MM)
                 print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
 
-            if key == ord('g'):
+            elif key == ord('g'):
                 if not show_detection:
                     print("  Turn on detection first (press 'd')")
                 elif last_detection is None:
@@ -373,7 +421,7 @@ def main():
                         else:
                             print(f"  Move failed or timed out")
 
-            if key == ord(' '):
+            elif key == ord(' '):
                 idx_str = f"{next_idx:03d}"
                 color_path = os.path.join(DATASET_DIR, f"{idx_str}_color.png")
                 depth_path = os.path.join(DATASET_DIR, f"{idx_str}_depth.png")
@@ -390,6 +438,8 @@ def main():
                 count += 1
 
     finally:
+        if panel and panel.jogging:
+            panel._stop_jog()
         camera.stop()
         cv2.destroyAllWindows()
         if robot:
