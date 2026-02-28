@@ -44,6 +44,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from vision import RealSenseCamera
 from config_loader import load_config
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
+from calibration import CoordinateTransform
+from visualization import RobotOverlay
 
 # Checkerboard parameters
 BOARD_COLS = 7   # inner corners (8 squares - 1)
@@ -415,6 +417,19 @@ def main():
         panel.speed = speed
         panel.status_msg = "Touch TCP to board, then click on it"
 
+    # Robot overlay (load calibration if available)
+    robot_overlay = None
+    calibration_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
+    if os.path.exists(calibration_path):
+        transform = CoordinateTransform()
+        transform.load(calibration_path)
+        gripper_cfg = config.get('gripper', {})
+        robot_overlay = RobotOverlay(
+            T_camera_to_base=transform.T_camera_to_base,
+            tool_length_mm=gripper_cfg.get('tool_length_mm', 200.0),
+        )
+        print(f"Loaded calibration for robot overlay")
+
     # State
     pairs = []  # list of (p_cam_3d_meters, p_robot_3d_meters, corner_2d_px)
     current_corners = None
@@ -510,6 +525,20 @@ def main():
                 cv2.circle(display, px, 8, (0, 255, 255), 2)
                 cv2.putText(display, str(i + 1), (px[0] + 10, px[1] - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+            # Robot joint overlay
+            if robot_overlay and camera.intrinsics is not None:
+                if robot:
+                    angles = robot.get_angles()
+                    if angles:
+                        display = robot_overlay.draw_joints(
+                            display, np.array(angles), camera.intrinsics)
+                    else:
+                        display = robot_overlay.draw_base_marker(
+                            display, camera.intrinsics)
+                else:
+                    display = robot_overlay.draw_base_marker(
+                        display, camera.intrinsics)
 
             # Status bar on camera image
             board_status = "Board OK" if found else "No board"
