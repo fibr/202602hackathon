@@ -19,19 +19,35 @@ from config_loader import load_config
 
 
 class FastRobot:
-    """Minimal low-latency dashboard connection."""
+    """Minimal low-latency dashboard connection with auto-reconnect."""
 
     def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.sock = None
+        self._connect()
+
+    def _connect(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.settimeout(2)
-        self.sock.connect((ip, port))
+        self.sock.connect((self.ip, self.port))
         try:
             self.sock.recv(1024)
         except socket.timeout:
             pass
 
     def send(self, cmd):
-        self.sock.send(f"{cmd}\n".encode())
+        try:
+            self.sock.send(f"{cmd}\n".encode())
+        except (BrokenPipeError, OSError):
+            print("\r\n  Connection lost, reconnecting...")
+            self._connect()
+            self.sock.send(f"{cmd}\n".encode())
         time.sleep(0.05)
         try:
             return self.sock.recv(4096).decode().strip()
