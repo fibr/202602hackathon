@@ -22,6 +22,9 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh scripts/collect_dataset.py --snapshot   # Single-frame detection debug (6-stage images)
 ./run.sh scripts/detect_checkerboard.py          # Interactive calibration (GUI panel + click corners)
 ./run.sh scripts/detect_checkerboard.py --verify # Verify calibration: hover above board corners
+./run.sh scripts/test_ik.py              # Validate local IK against robot's built-in FK/IK
+./run.sh scripts/demo_cube.py            # Random reachable poses demo (default)
+./run.sh scripts/demo_cube.py --mode cube # Trace cube corners
 ```
 
 ## Logging
@@ -37,9 +40,17 @@ log.debug("file only — use for protocol traces")
 
 Inspect logs: `tail -f logs/*.log` or `cat logs/$(ls -t logs/ | head -1)`
 
+## Tests
+
+```bash
+./run.sh -m pytest tests/                    # Run all tests
+./run.sh -m pytest tests/test_ik_solver.py   # IK solver tests (16 tests)
+./run.sh -m pytest tests/test_trajectory.py  # Trajectory tests (9 tests)
+```
+
 ## Dependencies
 
-Defined in `requirements.txt`: pyrealsense2, opencv-python, numpy, PyYAML. No other build system — just pip in a venv.
+Defined in `requirements.txt`: pyrealsense2, opencv-python, numpy, PyYAML, pin (Pinocchio), scipy. No other build system — just pip in a venv.
 
 ## Architecture
 
@@ -50,8 +61,11 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/gui/` — Shared OpenCV GUI panel for robot arm control (XY jog pad, Z, gripper, speed, enable/home, status)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
+- `src/kinematics/ik_solver.py` — Local IK/FK using Pinocchio + Nova5 URDF (~0.8ms per solve)
 - `src/planner/` — Generates ordered waypoints (approach, grasp, lift, reorient, place, release)
+- `src/planner/trajectory.py` — Quintic smoothstep trajectory subdivision for smooth joint motion
 - `src/robot/dobot_api.py` — TCP/IP driver, dashboard port 29999 only (V4 syntax)
+- `assets/nova5_robot.urdf` — Official Nova5 URDF with configurable gripper tool_tip frame
 - `src/robot/gripper.py` — Electric gripper via ToolDOInstant dual-channel control
 - `config/robot_config.yaml` — Shared config (robot IP, speeds, camera, detection thresholds)
 - `config/settings.yaml` — Local overrides, gitignored (create to override any config value)
@@ -92,6 +106,18 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 
 ### Robot modes
 `RobotMode()` returns: 1=init, 2=brake_open, 4=disabled, **5=enabled (idle)**, 6=backdrive, 7=running, 9=error, 10=pause, 11=jog
+
+## Local Kinematics & Trajectory
+
+Cartesian motion commands (`MovJ(pose={...})`) are unreliable and frequently error out. Instead, all motion uses **local IK + joint-angle commands**:
+
+1. **IK Solver** (`src/kinematics/ik_solver.py`): Uses Pinocchio to load `assets/nova5_robot.urdf` and solve IK via damped least-squares (~0.8ms, 1200 Hz). Configurable tool_tip offset for gripper length (`gripper.tool_length_mm` in config).
+2. **Joint unwrapping**: For joints with ±360° range (J1, J4, J5, J6), `_unwrap_to_seed()` picks the solution closest to the seed to prevent full-revolution configuration flips.
+3. **Trajectory subdivision** (`src/planner/trajectory.py`): Large joint moves are subdivided into small steps (default 5°/step) using quintic smoothstep `s(t) = 10t³ - 15t⁴ + 6t⁵` — zero velocity and acceleration at endpoints.
+4. **Execution**: Each step is sent as `MovJ(joint={...})` with retry logic (clear error + re-enable on failure).
+5. **Linear moves**: Cartesian path is interpolated into small steps (default 5mm), each solved by IK, then executed as a sequence of small joint moves.
+
+All public interfaces use mm and degrees. Internal math uses meters and radians.
 
 ## Git
 

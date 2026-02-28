@@ -26,9 +26,11 @@ with a gripper picks it up and stands it upright.
 1. **Camera** streams aligned RGB + depth frames via `pyrealsense2`
 2. **Vision module** detects the rod, computes its 3D pose (position + orientation) in camera frame
 3. **Calibration** transforms camera-frame coordinates to robot base-frame coordinates
-4. **Planner** computes a grasp strategy and a sequence of waypoints
-5. **Robot driver** sends motion commands to the Dobot Nova5 over TCP/IP
-6. **Gripper** closes, lifts, reorients, places, and opens
+4. **Planner** computes a grasp strategy and a sequence of Cartesian waypoints
+5. **Local IK** converts each waypoint to joint angles using Pinocchio + Nova5 URDF
+6. **Trajectory** subdivides large joint moves into smooth quintic-interpolated steps
+7. **Robot driver** sends joint-angle commands (`MovJ(joint={...})`) to the Nova5
+8. **Gripper** closes, lifts, reorients, places, and opens
 
 ---
 
@@ -96,7 +98,46 @@ with a gripper picks it up and stands it upright.
 
 **Dependencies:** `opencv-python`, `numpy`
 
-### 3.3 Grasp Planner (`planner/`)
+### 3.3 Local Kinematics (`kinematics/`)
+
+**Purpose:** Compute inverse/forward kinematics locally to avoid unreliable Cartesian motion commands.
+
+**Why:** `MovJ(pose={...})` and `MovL(pose={...})` frequently put the robot into error state. Individual joint-angle commands (`MovJ(joint={...})`) work reliably. Local IK converts Cartesian targets to joint angles before sending.
+
+**Implementation:**
+- Loads the official Nova5 URDF (`assets/nova5_robot.urdf`) via **Pinocchio** (`pin` package)
+- URDF includes a configurable `tool_tip` frame for gripper offset
+- Damped least-squares (Levenberg-Marquardt) iterative IK solver, ~0.8ms per solve (1200 Hz)
+- Joint unwrapping (`_unwrap_to_seed`) prevents full-revolution flips on joints with ±360° limits
+- Linear Cartesian interpolation: subdivides a straight-line path into small steps, solves IK at each
+
+**Key methods:**
+- `solve_ik(pos_mm, rpy_deg, seed_joints_deg)` → joint angles in degrees (or None)
+- `forward_kin(joints_deg)` → (pos_mm, rpy_deg)
+- `interpolate_linear(start_pos, start_rpy, end_pos, end_rpy, ...)` → list of joint configs
+
+**Dependencies:** `pin` (Pinocchio), `numpy`
+
+### 3.4 Trajectory Generation (`planner/trajectory.py`)
+
+**Purpose:** Subdivide large joint moves into smooth, small steps to prevent motion errors.
+
+**Approach:** Quintic smoothstep polynomial `s(t) = 10t³ - 15t⁴ + 6t⁵`:
+- Zero velocity at start and end (smooth ramp-up/ramp-down)
+- Zero acceleration at start and end (no jerk at endpoints)
+- Configurable `max_step_deg` (default 5°) — larger moves get more steps
+
+**Execution:** Each step is sent as `MovJ(joint={...})` with retry logic:
+- On failure: clear error, re-enable robot, wait 500ms, retry (up to 2 retries per step)
+- Logs progress at DEBUG level
+
+**Key functions:**
+- `quintic_trajectory(q_start, q_goal, max_step_deg)` → list of joint configs
+- `execute_trajectory(robot, q_start, q_goal, ...)` → True/False
+
+**Dependencies:** `numpy`
+
+### 3.5 Grasp Planner (`planner/grasp_planner.py`)
 
 **Purpose:** Given the rod's 3D pose in robot-base frame, compute a grasp strategy.
 
@@ -131,7 +172,7 @@ Rod is lying on its side:
 
 **Dependencies:** `numpy`
 
-### 3.4 Robot Driver (`robot/`)
+### 3.6 Robot Driver (`robot/`)
 
 **Purpose:** Communicate with the Dobot Nova5 via TCP/IP protocol.
 
@@ -155,7 +196,7 @@ Rod is lying on its side:
 
 **Dependencies:** `numpy`, standard library `socket`
 
-### 3.5 Orchestrator (`main.py`)
+### 3.7 Orchestrator (`main.py`)
 
 **Purpose:** Top-level state machine that ties all modules together.
 
@@ -260,6 +301,9 @@ Transform: T_camera_to_base (from calibration)
 pyrealsense2>=2.50      # RealSense camera SDK
 opencv-python>=4.8      # Computer vision
 numpy>=1.24             # Numerical computation
+PyYAML>=6.0             # Configuration files
+pin>=3.0                # Pinocchio — URDF-based kinematics
+scipy>=1.10             # Scientific computing
 ```
 
 No ROS required. No Docker required. Pure Python with TCP/IP sockets.
@@ -269,7 +313,9 @@ No ROS required. No Docker required. Pure Python with TCP/IP sockets.
 ## 8. File Structure
 
 ```
-202602hackathon_1/
+202602hackathon_4/
+├── assets/
+│   └── nova5_robot.urdf         # Official Nova5 URDF + gripper tool_tip frame
 ├── docs/
 │   └── architecture.md          # This document
 ├── src/
@@ -279,23 +325,36 @@ No ROS required. No Docker required. Pure Python with TCP/IP sockets.
 │   │   └── rod_detector.py      # Rod detection and pose estimation
 │   ├── calibration/
 │   │   ├── __init__.py
-│   │   ├── calibrate.py         # Hand-eye calibration routine
 │   │   └── transform.py         # Coordinate frame transforms
+│   ├── kinematics/
+│   │   ├── __init__.py
+│   │   └── ik_solver.py         # Local IK/FK via Pinocchio + URDF
 │   ├── robot/
 │   │   ├── __init__.py
 │   │   ├── dobot_api.py         # TCP/IP communication with Nova5
 │   │   └── gripper.py           # Gripper control abstraction
 │   ├── planner/
 │   │   ├── __init__.py
-│   │   └── grasp_planner.py     # Waypoint generation for pick-and-stand
+│   │   ├── grasp_planner.py     # Waypoint generation for pick-and-stand
+│   │   └── trajectory.py        # Quintic smoothstep trajectory subdivision
+│   ├── gui/                     # Shared OpenCV GUI panel
+│   ├── logger.py                # Session logging (console + file)
+│   ├── config_loader.py         # YAML config with local overrides
 │   └── main.py                  # Orchestrator / state machine
 ├── config/
-│   ├── robot_config.yaml        # Robot IP, ports, joint limits, speeds
+│   ├── robot_config.yaml        # Robot IP, speeds, gripper, kinematics config
+│   ├── settings.yaml            # Local overrides (gitignored)
 │   └── calibration.yaml         # Camera-to-robot transform (generated)
 ├── scripts/
-│   ├── test_camera.py           # Verify camera stream
-│   ├── test_robot.py            # Verify robot connection and basic moves
-│   └── calibrate.py             # Run calibration procedure
+│   ├── test_robot.py            # Robot connection and basic moves
+│   ├── test_ik.py               # Validate local IK against robot FK/IK
+│   ├── control_panel.py         # Interactive camera + robot GUI control
+│   ├── demo_cube.py             # Random poses / cube corner demo
+│   ├── detect_checkerboard.py   # Calibration via checkerboard
+│   └── collect_dataset.py       # Detection debugging
+├── tests/
+│   ├── test_ik_solver.py        # IK solver unit tests (16 tests)
+│   └── test_trajectory.py       # Trajectory unit tests (9 tests)
 ├── requirements.txt
 └── README.md
 ```
