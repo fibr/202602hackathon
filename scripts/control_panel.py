@@ -119,7 +119,7 @@ HELP = """\x1b[2J\x1b[H\
  SPEED                       STATUS
  [/]  -/+ 10%                p  Pose       s  E-stop    /  Raw command
  {/}  cart step -/+ 5mm      j  Angles     h  Help      q  Quit
-                              m  Mode
+                              m  Mode       0  Home (all joints 0)
 """
 
 
@@ -310,6 +310,36 @@ def main():
             elif ch == 'x':
                 r.send('ClearError()')
                 status("Errors cleared")
+
+            # Home
+            elif ch == '0':
+                if jogging:
+                    r.send('MoveJog()')
+                    jogging = None
+                status("Homing (all joints -> 0)...")
+                r.send('SpeedFactor(10)')
+                resp = r.send('MovJ(joint={0,0,0,0,0,0})')
+                code = resp.split(',')[0] if resp else '-1'
+                if code != '0':
+                    status(f"Home failed: {resp}")
+                    r.send(f'SpeedFactor({speed})')
+                else:
+                    # Wait for motion
+                    prev = r.get_angles()
+                    for _ in range(150):  # up to 30s
+                        time.sleep(0.2)
+                        cur = r.get_angles()
+                        if prev and cur:
+                            if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
+                                break
+                        prev = cur
+                    r.send(f'SpeedFactor({speed})')
+                    angles = r.get_angles()
+                    if angles:
+                        val = ','.join(f'{v:.1f}' for v in angles)
+                        status(f"Home done  Joints: {val}")
+                    else:
+                        status("Home done")
 
             # Raw command
             elif ch == '/':
