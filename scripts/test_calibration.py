@@ -3,7 +3,6 @@
 
 Detects the checkerboard, transforms the 4 outer corners to robot base frame
 using the saved calibration, then moves the arm to 5cm above each corner.
-Uses the DobotNova5 driver (MovJ with ROS2 driver, jog fallback without).
 
 Usage:
     ./run.sh scripts/test_calibration.py [--dry-run] [--hd]
@@ -188,7 +187,7 @@ def main():
     print("\n=== Connecting to robot ===")
     robot = DobotNova5()
     robot.connect()
-    print(f"  Motion mode: {robot.motion_mode}")
+    print("  Connected.")
 
     robot.enable()
     robot.set_speed(SPEED_PERCENT)
