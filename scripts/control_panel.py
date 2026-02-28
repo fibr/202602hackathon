@@ -41,21 +41,32 @@ class FastRobot:
         self.sock.close()
 
 
-JOG_POS = {'1': 'J1+', '2': 'J2+', '3': 'J3+', '4': 'J4+', '5': 'J5+', '6': 'J6+'}
-JOG_NEG = {'!': 'J1-', '@': 'J2-', '#': 'J3-', '$': 'J4-', '%': 'J5-', '^': 'J6-'}
-ALL_JOG = {**JOG_POS, **JOG_NEG}
+JOG_JOINT_POS = {'1': 'J1+', '2': 'J2+', '3': 'J3+', '4': 'J4+', '5': 'J5+', '6': 'J6+'}
+JOG_JOINT_NEG = {'!': 'J1-', '@': 'J2-', '#': 'J3-', '$': 'J4-', '%': 'J5-', '^': 'J6-'}
+JOG_CART = {
+    'w': 'X+', 'W': 'X-',
+    'a': 'Y+', 'A': 'Y-',
+    'r': 'Z+', 'f': 'Z-',
+    't': 'Rx+', 'T': 'Rx-',
+    'g': 'Ry+', 'G': 'Ry-',
+    'b': 'Rz+', 'B': 'Rz-',
+}
+ALL_JOG = {**JOG_JOINT_POS, **JOG_JOINT_NEG, **JOG_CART}
 
 HELP = """\x1b[2J\x1b[H\
 === Dobot Nova5 Control Panel ===
 
- JOG (hold to move)           GRIPPER        SETUP
- 1/! .. 6/^  J1-J6 +/-        c  Close       e  Enable
- s  Emergency stop             o  Open        d  Disable
-                                              x  ClearError
- SPEED                        STATUS
- [/]  -/+ 10%                  p  Pose        /  Raw command
-                               a  Angles      h  Help
-                               m  Mode        q  Quit
+ JOINT JOG (hold)             CARTESIAN JOG (hold)       GRIPPER
+ 1/! .. 6/^  J1-J6 +/-        w/W  X+ / X-               c  Close
+                               a/A  Y+ / Y-               o  Open
+ SPEED                         r/f  Z+ / Z-
+ [/]  -/+ 10%                  t/T  Rx+ / Rx-            SETUP
+                               g/G  Ry+ / Ry-             e  Enable
+ STATUS                        b/B  Rz+ / Rz-             d  Disable
+ p  Pose                                                   x  ClearError
+ j  Angles                    s  Emergency stop
+ m  Mode                      /  Raw command               h  Help
+                                                           q  Quit
 """
 
 
@@ -164,7 +175,7 @@ def main():
                 resp = r.send('GetPose()')
                 val = resp.split('{')[1].split('}')[0] if '{' in resp else resp
                 status(f"Pose: {val}")
-            elif ch == 'a':
+            elif ch == 'j':
                 resp = r.send('GetAngle()')
                 val = resp.split('{')[1].split('}')[0] if '{' in resp else resp
                 status(f"Joints: {val}")
