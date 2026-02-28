@@ -60,7 +60,6 @@ class GraspPlanner:
         Returns:
             List of Waypoint objects to execute in order
         """
-        rx, ry, rz = rod_center_base
         rod_x, rod_y, rod_z = rod_center_base
 
         # Compute gripper orientation to align with rod

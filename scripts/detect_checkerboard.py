@@ -16,7 +16,7 @@ Workflow:
 Usage:
     ./run.sh scripts/detect_checkerboard.py [--hd]
 
-    --hd   Use 1280x720 resolution (default: 640x480)
+    --sd   Use 640x480 resolution (default: 1280x720 HD)
 
 Arm control (OpenCV window must be focused):
     1-6        Jog J1+..J6+ (hold key, press space to stop)
@@ -416,7 +416,7 @@ def do_cart_step(robot, axis_idx, sign):
     for _ in range(50):
         time.sleep(0.1)
         cur = robot.get_angles()
-        if prev and cur:
+        if prev and cur and len(prev) >= 6 and len(cur) >= 6:
             if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
                 break
         prev = cur
@@ -429,8 +429,8 @@ def do_cart_step(robot, axis_idx, sign):
 
 
 def main():
-    hd = '--hd' in sys.argv
-    width, height = (1280, 720) if hd else (640, 480)
+    sd = '--sd' in sys.argv
+    width, height = (640, 480) if sd else (1280, 720)
 
     config = load_config()
     rc = config.get('robot', {})

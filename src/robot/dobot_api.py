@@ -186,7 +186,7 @@ class DobotNova5:
             elapsed += poll_interval
 
             current = self.get_joint_angles()
-            if current is None:
+            if current is None or np.allclose(current, 0):
                 continue
 
             if prev_joints is not None:

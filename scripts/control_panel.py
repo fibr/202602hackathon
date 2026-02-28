@@ -221,7 +221,7 @@ def main():
         for _ in range(50):  # up to 5s
             time.sleep(0.1)
             cur = r.get_angles()
-            if prev and cur:
+            if prev and cur and len(prev) >= 6 and len(cur) >= 6:
                 if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
                     break
             prev = cur

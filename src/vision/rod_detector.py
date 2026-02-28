@@ -262,22 +262,22 @@ class RodDetector:
 
             candidate_info['score'] = score
 
+            # Validate depth is in workspace range before accepting as best
+            cx_int, cy_int = int(cx), int(cy)
+            depth_at_center = depth_image[
+                min(cy_int, h - 1), min(cx_int, w - 1)]
+            if depth_at_center > 0 and (
+                depth_at_center < self.depth_min_mm or
+                depth_at_center > self.depth_max_mm
+            ):
+                candidate_info['reject_reason'] = (
+                    f"depth {depth_at_center}mm outside "
+                    f"{self.depth_min_mm}-{self.depth_max_mm}")
+                candidate_info['passed'] = False
+                continue
+
             if score > best_score:
                 best_score = score
-                cx_int, cy_int = int(cx), int(cy)
-
-                # Validate depth is in workspace range
-                depth_at_center = depth_image[
-                    min(cy_int, h - 1), min(cx_int, w - 1)]
-                if depth_at_center > 0 and (
-                    depth_at_center < self.depth_min_mm or
-                    depth_at_center > self.depth_max_mm
-                ):
-                    candidate_info['reject_reason'] = (
-                        f"depth {depth_at_center}mm outside "
-                        f"{self.depth_min_mm}-{self.depth_max_mm}")
-                    candidate_info['passed'] = False
-                    continue
 
                 # Get 3D center point
                 center_3d = camera.pixel_to_3d(cx_int, cy_int, depth_frame)
