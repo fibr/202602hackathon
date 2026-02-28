@@ -22,22 +22,22 @@ Arm control (OpenCV window must be focused):
     1-6        Jog J1+..J6+ (hold key, press space to stop)
     !@#$%^     Jog J1-..J6- (shift + 1-6)
     space      Stop jog
-    w/W        X+ / X-  (10mm step)
-    a/A        Y+ / Y-
-    r/f        Z+ / Z-
-    t/T g/G    Rx/Ry +/- (5 deg step)
-    b/B        Rz+ / Rz-
+    W/S        Y+ / Y-  forward/back (20mm step)
+    A/D        X- / X+  left/right   (20mm step)
+    Q/E        Z+ / Z-  up/down      (10mm step)
+    r/R t/T    Rx/Ry +/- (5 deg step)
+    y/Y        Rz+ / Rz-
     [/]        Speed -/+ 10%
     c/o        Gripper close/open
-    e          Enable robot
+    v          Enable robot
     p          Print pose
 
 Calibration:
     click      Record correspondence (ray-plane intersection with board)
-    s          Solve & save (RANSAC + least-squares, needs 4+ points)
+    Enter      Solve & save (RANSAC + least-squares, needs 4+ points)
     u          Undo last point
     n          Clear all points
-    q / Esc    Quit
+    Esc        Quit
 """
 
 import sys
@@ -62,15 +62,16 @@ SQUARE_SIZE_M = 0.02  # 2cm squares
 SNAP_RADIUS_PX = 30  # max pixel distance to snap click to a corner
 
 # Arm control parameters
-CART_STEP_MM = 10.0
+CART_STEP_MM = 10.0      # vertical (Q/E) step
+CART_STEP_MM_XY = 20.0   # horizontal (WASD) step
 CART_STEP_DEG = 5.0
 CART_KEYS = {
-    ord('w'): (0, +1), ord('W'): (0, -1),   # X+ / X-
-    ord('a'): (1, +1), ord('A'): (1, -1),   # Y+ / Y-
-    ord('r'): (2, +1), ord('f'): (2, -1),   # Z+ / Z-
-    ord('t'): (3, +1), ord('T'): (3, -1),   # Rx+ / Rx-
-    ord('g'): (4, +1), ord('G'): (4, -1),   # Ry+ / Ry-
-    ord('b'): (5, +1), ord('B'): (5, -1),   # Rz+ / Rz-
+    ord('w'): (1, +1), ord('s'): (1, -1),   # Y+ / Y- (forward/back)
+    ord('a'): (0, -1), ord('d'): (0, +1),   # X- / X+ (left/right)
+    ord('q'): (2, +1), ord('e'): (2, -1),   # Z+ / Z- (up/down)
+    ord('r'): (3, +1), ord('R'): (3, -1),   # Rx+ / Rx-
+    ord('t'): (4, +1), ord('T'): (4, -1),   # Ry+ / Ry-
+    ord('y'): (5, +1), ord('Y'): (5, -1),   # Rz+ / Rz-
 }
 CART_LABELS = {0: 'X', 1: 'Y', 2: 'Z', 3: 'Rx', 4: 'Ry', 5: 'Rz'}
 
@@ -396,7 +397,12 @@ def do_cart_step(robot, axis_idx, sign):
     if not pose or len(pose) < 6:
         return "ERROR: can't read pose"
 
-    step = CART_STEP_MM if axis_idx < 3 else CART_STEP_DEG
+    if axis_idx < 2:       # X, Y (horizontal)
+        step = CART_STEP_MM_XY
+    elif axis_idx == 2:    # Z (vertical)
+        step = CART_STEP_MM
+    else:                  # rotations
+        step = CART_STEP_DEG
     target = list(pose)
     target[axis_idx] += sign * step
 
@@ -441,9 +447,9 @@ def main():
     print(f"Board: {BOARD_COLS+1}x{BOARD_ROWS+1} squares, {SQUARE_SIZE_M*100:.0f}cm")
     print(f"Resolution: {width}x{height}")
     print()
-    print("Arm control: 1-6/!@#$%^ jog joints, space stop, waAgGtTrfbB cart step")
-    print("             c/o gripper, [/] speed, e enable, p pose")
-    print("Calibration: touch TCP to board, click on it, s solve, u undo, n clear, q quit")
+    print("Arm control: WASD move, Q/E up/down, 1-6/!@#$%^ jog, space stop")
+    print("             c/o gripper, [/] speed, v enable, p pose")
+    print("Calibration: touch TCP to board, click on it, Enter solve, u undo, n clear, Esc quit")
     print()
 
     # Connect to robot
@@ -585,14 +591,14 @@ def main():
             bar_text = f"{len(pairs)} pts | Spd:{speed}%{jog_str} | {board_status} | {status_msg}"
             cv2.putText(display, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-            cv2.putText(display, "1-6 jog | waArfgGtTbB cart | co grip | s solve | u undo | n clear | q quit",
+            cv2.putText(display, "WASD move | QE up/dn | 1-6 jog | co grip | Enter solve | u undo | n clear | Esc quit",
                         (10, height - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
 
             cv2.imshow('Calibration', display)
             key = cv2.waitKey(30) & 0xFF
 
-            if key == ord('q') or key == 27:
+            if key == 27:  # Esc only (q is Z+ now)
                 break
             if cv2.getWindowProperty('Calibration', cv2.WND_PROP_VISIBLE) < 1:
                 break
@@ -641,7 +647,7 @@ def main():
                 status_msg = f"Speed: {speed}%"
 
             # Enable
-            elif key == ord('e'):
+            elif key == ord('v'):
                 robot.send('DisableRobot()')
                 time.sleep(1)
                 robot.send('ClearError()')
@@ -670,7 +676,7 @@ def main():
                 status_msg = "Cleared all points"
                 print(f"  {status_msg}")
 
-            elif key == ord('s'):
+            elif key == 13:  # Enter
                 if len(pairs) < 3:
                     status_msg = f"Need 3+ points (have {len(pairs)})"
                     print(f"  {status_msg}")
