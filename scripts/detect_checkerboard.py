@@ -634,7 +634,6 @@ def main():
                 print(f"\nInlier mean: {np.mean(inlier_errors):.1f} mm, max: {np.max(inlier_errors):.1f} mm")
 
                 # Save
-                from calibration.transform import CoordinateTransform
                 ct = CoordinateTransform()
                 ct.T_camera_to_base = T_cam2base
                 out_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
