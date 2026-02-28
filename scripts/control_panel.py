@@ -2,10 +2,8 @@
 """Interactive control panel for Dobot Nova5.
 
 Hold jog keys for continuous joint motion, release to stop.
-Cartesian keys step via MovL on motion port 30003.
+Cartesian keys step via MovL (V4 syntax) on dashboard port.
 Gripper and other commands are instant.
-
-Requires ROS2 driver: docker compose --profile dobot up -d
 """
 
 import sys
@@ -21,84 +19,49 @@ from config_loader import load_config
 
 
 class FastRobot:
-    """Low-latency dual-port connection: dashboard (29999) + motion (30003)."""
+    """Minimal low-latency dashboard connection with auto-reconnect."""
 
-    def __init__(self, ip, dash_port, motion_port):
+    def __init__(self, ip, port):
         self.ip = ip
-        self.dash_port = dash_port
-        self.motion_port = motion_port
-        self.dash_sock = None
-        self.motion_sock = None
-        self._connect_dash()
-        self._connect_motion()
+        self.port = port
+        self.sock = None
+        self._connect()
 
-    def _connect_dash(self):
-        if self.dash_sock:
+    def _connect(self):
+        if self.sock:
             try:
-                self.dash_sock.close()
+                self.sock.close()
             except Exception:
                 pass
-        self.dash_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.dash_sock.settimeout(2)
-        self.dash_sock.connect((self.ip, self.dash_port))
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(2)
+        self.sock.connect((self.ip, self.port))
         try:
-            self.dash_sock.recv(1024)
+            self.sock.recv(1024)
         except socket.timeout:
             pass
 
-    def _connect_motion(self):
-        if self.motion_sock:
-            try:
-                self.motion_sock.close()
-            except Exception:
-                pass
-        self.motion_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.motion_sock.settimeout(2)
-        try:
-            self.motion_sock.connect((self.ip, self.motion_port))
-            try:
-                self.motion_sock.recv(1024)
-            except socket.timeout:
-                pass
-        except (ConnectionRefusedError, socket.timeout, OSError):
-            self.motion_sock.close()
-            self.motion_sock = None
-
     def send(self, cmd):
-        """Send a command on the dashboard port."""
         for attempt in range(3):
             try:
-                self.dash_sock.send(f"{cmd}\n".encode())
+                self.sock.send(f"{cmd}\n".encode())
                 time.sleep(0.05)
                 try:
-                    return self.dash_sock.recv(4096).decode().strip()
+                    return self.sock.recv(4096).decode().strip()
                 except socket.timeout:
                     return ""
             except (BrokenPipeError, ConnectionResetError, OSError):
                 if attempt < 2:
-                    print(f"\r\n  Dashboard connection lost, reconnecting ({attempt+2}/3)...")
+                    print(f"\r\n  Connection lost, reconnecting ({attempt+2}/3)...")
                     time.sleep(1)
                     try:
-                        self._connect_dash()
+                        self._connect()
                     except (ConnectionRefusedError, socket.timeout, OSError):
                         continue
                 else:
                     print("\r\n  ERROR: Cannot reach robot after 3 attempts.")
+                    print("  Check: is another dashboard session open? (only one allowed)")
                     raise
-
-    def send_motion(self, cmd):
-        """Send a command on the motion port (30003)."""
-        if not self.motion_sock:
-            return "-1,{},no_motion_port;"
-        try:
-            self.motion_sock.send(f"{cmd}\n".encode())
-            time.sleep(0.05)
-            try:
-                return self.motion_sock.recv(4096).decode().strip()
-            except socket.timeout:
-                return ""
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            return "-1,{},connection_error;"
 
     def parse_vals(self, resp):
         """Extract comma-separated floats from '{...}' in response."""
@@ -114,15 +77,8 @@ class FastRobot:
     def get_angles(self):
         return self.parse_vals(self.send('GetAngle()'))
 
-    def inverse_kin(self, x, y, z, rx, ry, rz):
-        resp = self.send(f'InverseKin({x},{y},{z},{rx},{ry},{rz})')
-        return self.parse_vals(resp)
-
     def close(self):
-        if self.dash_sock:
-            self.dash_sock.close()
-        if self.motion_sock:
-            self.motion_sock.close()
+        self.sock.close()
 
 
 JOG_JOINT_POS = {'1': 'J1+', '2': 'J2+', '3': 'J3+', '4': 'J4+', '5': 'J5+', '6': 'J6+'}
@@ -167,17 +123,10 @@ def main():
     config = load_config()
     rc = config.get('robot', {})
     ip = rc.get('ip', '192.168.5.1')
-    dash_port = rc.get('dashboard_port', 29999)
-    motion_port = rc.get('motion_port', 30003)
+    port = rc.get('dashboard_port', 29999)
 
-    print(f"Connecting to {ip} (dashboard:{dash_port}, motion:{motion_port})...")
-    r = FastRobot(ip, dash_port, motion_port)
-
-    if r.motion_sock:
-        print("  Motion port connected (MovL/MovJ available)")
-    else:
-        print("  WARNING: Motion port not available. Cartesian steps and Home disabled.")
-        print("  Start ROS2 driver: docker compose --profile dobot up -d")
+    print(f"Connecting to {ip}:{port}...")
+    r = FastRobot(ip, port)
 
     # Enable
     r.send('DisableRobot()')
@@ -211,10 +160,6 @@ def main():
 
     def do_cart_step(axis_idx, sign):
         """Step in Cartesian space: read pose, offset, MovL to target."""
-        if not r.motion_sock:
-            status("ERROR: motion port not connected (need ROS2 driver)")
-            return
-
         pose = r.get_pose()
         if not pose or len(pose) < 6:
             status("ERROR: can't read pose")
@@ -231,8 +176,8 @@ def main():
         status(f"{axis_name}{dir_ch}  cur:[{cur_val}] tgt:[{tgt_val}]")
 
         tp = target_pose
-        cmd = f'MovL({tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f})'
-        resp = r.send_motion(cmd)
+        cmd = f'MovL(pose={{{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f}}})'
+        resp = r.send(cmd)
         code = resp.split(',')[0] if resp else '-1'
         if code != '0':
             status(f"ERROR: {cmd} -> {resp}")
@@ -288,7 +233,6 @@ def main():
 
             # Cartesian step
             elif ch in CART_KEYS:
-                # Stop any active jog first
                 if jogging:
                     r.send('MoveJog()')
                     jogging = None
@@ -371,21 +315,17 @@ def main():
 
             # Home
             elif ch == '0':
-                if not r.motion_sock:
-                    status("ERROR: motion port not connected (need ROS2 driver)")
-                    continue
                 if jogging:
                     r.send('MoveJog()')
                     jogging = None
                 status("Homing...")
                 r.send('SpeedFactor(10)')
-                resp = r.send_motion('MovJ(43.5,-13.9,-85.4,196.3,-90.0,43.5)')
+                resp = r.send('MovJ(joint={43.5,-13.9,-85.4,196.3,-90.0,43.5})')
                 code = resp.split(',')[0] if resp else '-1'
                 if code != '0':
                     status(f"Home failed: {resp}")
                     r.send(f'SpeedFactor({speed})')
                 else:
-                    # Wait for motion
                     prev = r.get_angles()
                     for _ in range(150):  # up to 30s
                         time.sleep(0.2)

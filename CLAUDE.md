@@ -49,7 +49,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
 - `src/planner/` — Generates ordered waypoints (approach, grasp, lift, reorient, place, release)
-- `src/robot/dobot_api.py` — Dual-port TCP/IP driver (dashboard 29999 + motion 30003)
+- `src/robot/dobot_api.py` — TCP/IP driver, dashboard port 29999 only (V4 syntax)
 - `src/robot/gripper.py` — Electric gripper via ToolDOInstant dual-channel control
 - `config/robot_config.yaml` — Shared config (robot IP, speeds, camera, detection thresholds)
 - `config/settings.yaml` — Local overrides, gitignored (create to override any config value)
@@ -59,22 +59,18 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 
 ## Robot Protocol (Nova5 firmware 4.6.2)
 
-Dual-port architecture. The ROS2 driver must be running for motion commands.
-
-```bash
-docker compose --profile dobot up -d   # Start ROS2 driver (required for MovJ/MovL)
-```
+All commands go through dashboard port 29999. V4 named-parameter syntax required.
 
 Response format: `code,{value},CommandName();` where code 0 = success.
 
-### Port 30003 — motion commands (requires ROS2 driver)
-- `MovJ(x,y,z,rx,ry,rz)` — joint-space move to Cartesian pose
-- `MovL(x,y,z,rx,ry,rz)` — linear move to Cartesian pose
-- Motion is fire-and-forget; completion detected by polling joint stability via dashboard
-- **Error -7**: returned if MovJ/MovL sent to dashboard port 29999 instead of motion port 30003
-- V4 `pose={...}` syntax also returns -7 on dashboard — it's a port issue, not syntax
+### V4 motion commands (dashboard port 29999)
+- `MovJ(pose={x,y,z,rx,ry,rz})` — joint-space move to Cartesian pose
+- `MovL(pose={x,y,z,rx,ry,rz})` — linear move to Cartesian pose
+- `MovJ(joint={j1,j2,j3,j4,j5,j6})` — joint-space move to joint angles
+- Motion is fire-and-forget; completion detected by polling joint stability
+- **V3 syntax** `MovL(x,y,z,...)` without `pose={}` returns **-30001** — do NOT use
 
-### Port 29999 — dashboard commands
+### Other dashboard commands
 - **Joint jog**: `MoveJog(J1+)` through `MoveJog(J6-)` — **uppercase only**, lowercase silently ignored
 - **Jog stop**: `MoveJog()`
 - **Gripper close**: `ToolDOInstant(2,0)` then `ToolDOInstant(1,1)` — must turn off opposing channel first
@@ -86,7 +82,7 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 - **Forward kinematics**: `PositiveKin(j1,j2,j3,j4,j5,j6)` → returns pose
 
 ### What doesn't work
-- `MovJ`/`MovL` on port 29999 → error **-7** (must use port 30003)
+- V3 syntax `MovL(x,y,z,rx,ry,rz)` → error **-30001** (must use V4 `pose={...}` syntax)
 - Cartesian jog `MoveJog(z+)` → silently ignored; `MoveJog(Z+)` → error -6
 - `DO(port, val)` → error -1 (use ToolDOInstant instead)
 - `ToolDO(index, status)` → error -1 in idle mode (use ToolDOInstant)
@@ -111,5 +107,9 @@ Response format: `code,{value},CommandName();` where code 0 = success.
 ## Hardware
 
 - **Camera**: RealSense D435i at USB 3.0 (640×480 @ 15fps, fixed mount, eye-to-hand)
-- **Robot**: Dobot Nova5 (firmware 4.6.2) at `192.168.5.1`, dashboard 29999 + motion 30003
+- **Robot**: Dobot Nova5 (firmware 4.6.2) at `192.168.5.1`, dashboard port 29999 (V4 syntax)
+- **No teach pendant/controller** — all control via dashboard TCP only
 - **Gripper**: Electric motor, dual-channel ToolDOInstant control (ch1=close, ch2=open)
+- Dashboard sends **no banner** on connect — code must handle `recv` timeout after connect
+- Dashboard allows **only one TCP connection** at a time — "IP:Port has been occupied" if two clients try
+- After power cycle, robot stays in mode 3 (init) for ~60s before reaching mode 4 (disabled)
