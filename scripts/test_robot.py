@@ -8,13 +8,22 @@ Start with low speed (default 10%) and increase gradually.
 import sys
 import os
 import time
+import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from robot import DobotNova5, Gripper
+from main import load_config
 
 
 def main():
-    robot = DobotNova5(ip="192.168.1.5")
+    config = load_config()
+    robot_cfg = config.get('robot', {})
+    robot = DobotNova5(
+        ip=robot_cfg.get('ip', '192.168.5.1'),
+        dashboard_port=robot_cfg.get('dashboard_port', 29999),
+        motion_port=robot_cfg.get('motion_port', 30003),
+        feedback_port=robot_cfg.get('feedback_port', 30004),
+    )
 
     print("=== Dobot Nova5 Connection Test ===")
     print(f"Connecting to {robot.ip}...")
@@ -60,8 +69,8 @@ def main():
         print("Check that:")
         print("  1. Robot is powered on")
         print("  2. Robot is in TCP/IP control mode (check DobotStudio Pro)")
-        print("  3. Host PC is on 192.168.1.X subnet")
-        print("  4. Robot IP is correct (192.168.1.5)")
+        print(f"  3. Host PC is on the same subnet as {robot.ip}")
+        print(f"  4. Robot IP is correct ({robot.ip})")
     except Exception as e:
         print(f"ERROR: {e}")
     finally:

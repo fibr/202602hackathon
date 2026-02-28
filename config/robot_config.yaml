@@ -1,7 +1,7 @@
 # Robot configuration for Dobot Nova5 + RealSense D435i system
 
 robot:
-  ip: "192.168.1.5"
+  ip: "192.168.5.1"
   dashboard_port: 29999
   motion_port: 30003
   feedback_port: 30004

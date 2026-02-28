@@ -26,7 +26,7 @@ class RobotState:
 class DobotNova5:
     """Driver for Dobot Nova5 6-axis robot arm over TCP/IP."""
 
-    def __init__(self, ip: str = "192.168.1.5",
+    def __init__(self, ip: str = "192.168.5.1",
                  dashboard_port: int = 29999,
                  motion_port: int = 30003,
                  feedback_port: int = 30004):
