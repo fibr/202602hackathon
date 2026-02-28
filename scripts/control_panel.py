@@ -93,18 +93,23 @@ def main():
     sys.stdout.write(HELP)
     status(f"Ready. Speed:{speed}%")
 
-    jogging = None  # Currently active jog axis, or None
+    jogging = None      # Currently active jog axis, or None
+    last_jog_key = 0.0  # Timestamp of last jog keypress
+
+    # Grace period: keep jogging through key-repeat gaps.
+    # Terminal key repeat has ~30-80ms gaps; 150ms covers that comfortably
+    # while still stopping quickly on actual release.
+    JOG_GRACE = 0.15
 
     try:
         tty.setcbreak(fd)  # cbreak instead of raw — allows Ctrl+C
 
         while True:
-            # Short poll — 30ms for responsive jog stop
-            ready = select.select([sys.stdin], [], [], 0.03)[0]
+            ready = select.select([sys.stdin], [], [], 0.02)[0]
 
             if not ready:
-                # No key pressed — stop jog if active
-                if jogging:
+                # No key — stop jog only after grace period expires
+                if jogging and (time.time() - last_jog_key) > JOG_GRACE:
                     r.send('MoveJog()')
                     jogging = None
                     status(f"Speed:{speed}%")
@@ -116,10 +121,13 @@ def main():
             if ch == 'q':
                 break
 
-            # Jog — start/continue on keypress, stops on release (no key in 30ms)
+            # Jog — continuous while key held, stops after 150ms of no keypress
             elif ch in ALL_JOG:
                 axis = ALL_JOG[ch]
+                last_jog_key = time.time()
                 if jogging != axis:
+                    if jogging:
+                        r.send('MoveJog()')  # stop previous axis first
                     r.send(f'MoveJog({axis})')
                     jogging = axis
                     status(f"JOG {axis}  Speed:{speed}%")
