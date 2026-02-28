@@ -28,10 +28,10 @@ BTN_GAP = 6             # gap between buttons
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 # Cartesian step sizes
-CART_STEP_XY_MIN = 5.0   # mm at edge of deadzone
-CART_STEP_XY_MAX = 40.0  # mm at edge of pad
-CART_STEP_Z = 10.0       # mm per Z button click
-CART_COOLDOWN = 0.3      # seconds between commands (prevent queue buildup)
+CART_STEP_XY_MIN = 5.0    # mm at edge of deadzone
+CART_STEP_XY_MAX = 100.0  # mm at edge of pad
+CART_STEP_Z = 10.0        # mm per Z button click
+CART_COOLDOWN = 0.3       # seconds between commands (prevent queue buildup)
 
 # Colors
 COL_PAD_BG = (50, 50, 50)
