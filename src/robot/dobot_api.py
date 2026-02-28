@@ -221,17 +221,25 @@ class DobotNova5:
     # --- ToolDO (gripper) ---
 
     def tool_do(self, index: int, status: int):
-        """Set a tool digital output (ToolDO).
+        """Set a tool digital output (ToolDO). May require running mode."""
+        resp = self._send(f"ToolDO({index},{status})")
+        code, _ = self._parse_response(resp)
+        return code == RC_OK
 
-        For dual-solenoid pneumatic gripper:
-            ToolDO(1, 1) = close gripper
-            ToolDO(2, 1) = open gripper
+    def tool_do_instant(self, index: int, status: int):
+        """Set a tool digital output immediately (ToolDOInstant).
+
+        Works in enabled-idle mode (no motion queue needed).
+
+        Electric gripper dual-channel control:
+            Close: tool_do_instant(2, 0) then tool_do_instant(1, 1)
+            Open:  tool_do_instant(1, 0) then tool_do_instant(2, 1)
 
         Args:
             index: ToolDO index (1 or 2)
             status: 0 or 1
         """
-        resp = self._send(f"ToolDO({index},{status})")
+        resp = self._send(f"ToolDOInstant({index},{status})")
         code, _ = self._parse_response(resp)
         return code == RC_OK
 
