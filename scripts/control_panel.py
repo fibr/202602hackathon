@@ -150,6 +150,11 @@ def main():
         sys.stdout.write(f"\r\x1b[K  {msg}")
         sys.stdout.flush()
 
+    def flush_input():
+        """Drain any buffered keystrokes from stdin."""
+        while select.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.read(1)
+
     sys.stdout.write(HELP)
     status(f"Ready. Speed:{speed}%  Step:{cart_step}mm")
 
@@ -199,6 +204,7 @@ def main():
             status(f"{axis_name}{dir_ch} done  Pose: {val}")
         else:
             status(f"{axis_name}{dir_ch} done")
+        flush_input()
 
     try:
         tty.setcbreak(fd)
@@ -304,6 +310,7 @@ def main():
                 r.send('EnableRobot()')
                 time.sleep(1)
                 status("Enabled")
+                flush_input()
             elif ch == 'd':
                 r.send('DisableRobot()')
                 status("Disabled")
@@ -340,6 +347,7 @@ def main():
                         status(f"Home done  Joints: {val}")
                     else:
                         status("Home done")
+                flush_input()
 
             # Raw command
             elif ch == '/':
