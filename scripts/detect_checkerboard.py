@@ -435,6 +435,7 @@ def main():
     config = load_config()
     rc = config.get('robot', {})
     ip = rc.get('ip', '192.168.5.1')
+    port = rc.get('dashboard_port', 29999)
 
     print("=== Interactive Calibration ===")
     print(f"Board: {BOARD_COLS+1}x{BOARD_ROWS+1} squares, {SQUARE_SIZE_M*100:.0f}cm")
@@ -446,9 +447,25 @@ def main():
     print()
 
     # Connect to robot
-    print(f"Connecting to robot at {ip}...")
-    robot = RobotConnection(ip)
-    robot.connect()
+    print(f"Connecting to robot at {ip}:{port}...")
+    robot = RobotConnection(ip, port)
+    try:
+        robot.connect()
+    except ConnectionRefusedError:
+        print(f"  ERROR: Connection refused at {ip}:{port}")
+        print(f"  - Is the robot powered on and booted? (takes ~60s after power cycle)")
+        print(f"  - Is another dashboard session already connected? (only one allowed)")
+        sys.exit(1)
+    except socket.timeout:
+        print(f"  ERROR: Connection timed out to {ip}:{port}")
+        print(f"  - Is the robot on the network? Try: ping {ip}")
+        print(f"  - Check cable connection and IP configuration")
+        sys.exit(1)
+    except OSError as e:
+        print(f"  ERROR: Cannot connect to robot: {e}")
+        print(f"  - Verify robot IP in config/robot_config.yaml")
+        sys.exit(1)
+    print(f"  Connected.")
 
     # Enable robot
     robot.send('DisableRobot()')
