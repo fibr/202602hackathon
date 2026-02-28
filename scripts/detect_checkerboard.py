@@ -552,7 +552,7 @@ def main():
     print("Arm control: GUI panel on right (XY pad, Z, gripper, speed, enable/home)")
     print("             Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed, v enable")
     print("Intrinsics:  i capture frame | I calibrate & save (need 10+ frames)")
-    print("Plane:       g save ground plane from current board detection")
+    print("Plane:       g capture sample | G average & save (multiple g then G)")
     print("Hand-eye:    click record point | Enter solve | u undo | n clear")
     print("             Esc quit | p print pose")
     print()
@@ -620,6 +620,9 @@ def main():
     # Intrinsics calibration state
     intr_frames = []  # list of (obj_points, img_points) for cv2.calibrateCamera
     intr_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'camera_intrinsics.yaml')
+
+    # Ground plane calibration state
+    plane_samples = []  # list of (normal_vec, distance) from multiple board detections
 
     def on_mouse(event, x, y, flags, param):
         nonlocal click_point
@@ -729,14 +732,15 @@ def main():
             # Status bar on camera image
             board_status = f"Board OK reproj:{reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
             intr_str = f"Intr:{len(intr_frames)}" if intr_frames else ""
+            plane_str = f"Plane:{len(plane_samples)}" if plane_samples else ""
             if panel:
                 jog_str = " JOG" if panel.jogging else ""
-                bar_text = f"{len(pairs)} pts | {intr_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
+                bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
             else:
-                bar_text = f"{len(pairs)} pts | {intr_str} | {board_status} | No robot"
+                bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | {board_status} | No robot"
             cv2.putText(display, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-            cv2.putText(display, "i intr capture | I calibrate | g plane | Enter solve | u undo | Esc quit",
+            cv2.putText(display, "i/I intrinsics | g/G plane | click+Enter hand-eye | u undo | Esc quit",
                         (10, height - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
@@ -860,36 +864,71 @@ def main():
             # --- Ground plane calibration ---
 
             elif key == ord('g'):
-                # Save ground plane normal + offset from current board detection
+                # Accumulate a ground plane sample from current board detection
                 if current_T_board is None:
-                    msg = "No board detected — can't save ground plane"
+                    msg = "No board detected — can't sample ground plane"
                     if panel:
                         panel.status_msg = msg
                     print(f"  {msg}")
                 else:
-                    # Board z=0 plane in camera frame
                     R_board = current_T_board[:3, :3]
                     t_board = current_T_board[:3, 3]
-                    plane_normal = R_board[:, 2]  # board Z axis in camera frame
-                    plane_d = np.dot(plane_normal, t_board)  # signed distance from origin
+                    normal = R_board[:, 2]  # board Z axis in camera frame
+                    d = np.dot(normal, t_board)
+                    plane_samples.append((normal, d))
+                    msg = f"Plane sample {len(plane_samples)}: d={d*1000:.1f}mm"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}  normal=[{normal[0]:.4f},{normal[1]:.4f},{normal[2]:.4f}]")
 
+            elif key == ord('G'):
+                # Average accumulated plane samples and save
+                if len(plane_samples) < 1:
+                    msg = "No plane samples — press 'g' to capture"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+                else:
+                    normals = np.array([s[0] for s in plane_samples])
+                    distances = np.array([s[1] for s in plane_samples])
+
+                    # Flip any normals pointing opposite to the majority
+                    ref = normals[0]
+                    for i in range(1, len(normals)):
+                        if np.dot(normals[i], ref) < 0:
+                            normals[i] = -normals[i]
+                            distances[i] = -distances[i]
+
+                    avg_normal = normals.mean(axis=0)
+                    avg_normal /= np.linalg.norm(avg_normal)
+                    avg_d = distances.mean()
+                    std_d = distances.std()
+
+                    # Per-sample angular deviation from mean
+                    angles_deg = [np.degrees(np.arccos(np.clip(
+                        np.dot(n, avg_normal), -1, 1))) for n in normals]
+                    max_angle = max(angles_deg)
+
+                    import yaml
                     plane_path = os.path.join(
                         os.path.dirname(__file__), '..', 'config', 'ground_plane.yaml')
-                    import yaml
                     os.makedirs(os.path.dirname(plane_path), exist_ok=True)
                     data = {
-                        'plane_normal': plane_normal.tolist(),
-                        'plane_d': float(plane_d),
-                        'T_board_in_cam': current_T_board.tolist(),
+                        'plane_normal': avg_normal.tolist(),
+                        'plane_d': float(avg_d),
+                        'num_samples': len(plane_samples),
+                        'std_d_mm': float(std_d * 1000),
+                        'max_angle_deg': float(max_angle),
                     }
                     with open(plane_path, 'w') as f:
                         yaml.dump(data, f, default_flow_style=False)
 
-                    print(f"\n=== Ground Plane Saved ===")
-                    print(f"  Normal (cam): [{plane_normal[0]:.4f}, {plane_normal[1]:.4f}, {plane_normal[2]:.4f}]")
-                    print(f"  Distance: {plane_d:.4f} m ({plane_d*1000:.1f} mm)")
+                    print(f"\n=== Ground Plane ({len(plane_samples)} samples) ===")
+                    print(f"  Normal: [{avg_normal[0]:.5f}, {avg_normal[1]:.5f}, {avg_normal[2]:.5f}]")
+                    print(f"  Distance: {avg_d*1000:.1f} mm (std: {std_d*1000:.1f} mm)")
+                    print(f"  Max angular deviation: {max_angle:.2f} deg")
                     print(f"  Saved to {plane_path}")
-                    msg = f"Plane saved: d={plane_d*1000:.1f}mm"
+                    msg = f"Plane saved: {len(plane_samples)} samples, d={avg_d*1000:.1f}mm std={std_d*1000:.1f}mm"
                     if panel:
                         panel.status_msg = msg
 
