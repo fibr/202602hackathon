@@ -148,6 +148,49 @@ class TestToolLength:
         assert pos is not None
 
 
+class TestJointUnwrap:
+    def test_no_wrap_around(self, ik):
+        """IK should not spin joints the long way around for small steps."""
+        seed = np.array([10.0, -20.0, -80.0, 10.0, -90.0, 15.0])
+        pos, rpy = ik.forward_kin(seed)
+
+        # Small 10mm step
+        target_pos = pos.copy()
+        target_pos[0] += 10.0
+        result = ik.solve_ik(target_pos, rpy, seed_joints_deg=seed)
+        assert result is not None
+        max_change = np.max(np.abs(result - seed))
+        assert max_change < 30.0, f"10mm step caused {max_change:.1f}deg joint change"
+
+    def test_j1_near_wrap_boundary(self, ik):
+        """J1 at 170deg + small step should stay near 170, not jump to -190."""
+        seed = np.array([170.0, -20.0, -80.0, 10.0, -90.0, 15.0])
+        pos, rpy = ik.forward_kin(seed)
+
+        target_pos = pos.copy()
+        target_pos[0] += 10.0
+        result = ik.solve_ik(target_pos, rpy, seed_joints_deg=seed)
+        assert result is not None
+        j1_change = abs(result[0] - seed[0])
+        assert j1_change < 20.0, f"J1 changed by {j1_change:.1f}deg (should stay near 170)"
+
+    def test_sequential_steps_stay_near_seed(self, ik):
+        """A sequence of small steps should not accumulate large joint drift."""
+        joints = np.array([30.0, -20.0, -80.0, 10.0, -90.0, 15.0])
+        original = joints.copy()
+
+        for i in range(10):
+            pos, rpy = ik.forward_kin(joints)
+            target_pos = pos.copy()
+            target_pos[1] += 5.0  # 5mm Y steps
+            new_joints = ik.solve_ik(target_pos, rpy, seed_joints_deg=joints)
+            assert new_joints is not None, f"IK failed at step {i}"
+            joints = new_joints
+
+        total_change = np.max(np.abs(joints - original))
+        assert total_change < 60.0, f"10 steps of 5mm caused {total_change:.1f}deg total drift"
+
+
 class TestIKSpeed:
     def test_ik_performance(self, ik):
         """IK solve should be fast enough for real-time use (<50ms)."""
