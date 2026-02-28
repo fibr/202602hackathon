@@ -119,7 +119,7 @@ HELP = """\x1b[2J\x1b[H\
  SPEED                       STATUS
  [/]  -/+ 10%                p  Pose       s  E-stop    /  Raw command
  {/}  cart step -/+ 5mm      j  Angles     h  Help      q  Quit
-                              m  Mode       0  Home (all joints 0)
+                              m  Mode       0  Home (300,100,400)
 """
 
 
@@ -316,9 +316,9 @@ def main():
                 if jogging:
                     r.send('MoveJog()')
                     jogging = None
-                status("Homing (all joints -> 0)...")
+                status("Homing (300,100,400)...")
                 r.send('SpeedFactor(10)')
-                resp = r.send('MovJ(joint={0,0,0,0,0,0})')
+                resp = r.send('MovJ(pose={300,100,400,-180,0,90})')
                 code = resp.split(',')[0] if resp else '-1'
                 if code != '0':
                     status(f"Home failed: {resp}")
