@@ -15,6 +15,10 @@ camera:
   depth_min_mm: 6000          # Closest valid depth (workspace ~6-19m from camera)
   depth_max_mm: 19000         # Farthest valid depth
 
+rod:
+  diameter_mm: 27.0            # Rod diameter (used to compute centroid height above table)
+  length_mm: 175.0             # Rod length
+
 gripper:
   tool_length_mm: 100.0       # Flange to fingertip (measure and update)
 

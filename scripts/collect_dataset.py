@@ -36,8 +36,8 @@ from calibration import CoordinateTransform
 from config_loader import load_config
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'rod_dataset')
-HOVER_HEIGHT_MM = 200.0   # Height above rod centroid
-GRIPPER_DOWN_RX = 180.0   # rx when gripper points straight down
+HOVER_HEIGHT_MM = 200.0    # Height above rod centroid
+GRIPPER_DOWN_RX = 180.0    # rx when gripper points straight down
 
 
 def find_next_index(dataset_dir):
@@ -77,31 +77,105 @@ def try_connect_robot(config):
         return None
 
 
-def compute_hover_pose(detection, transform):
+def pixel_to_ray_camera(u, v, intrinsics):
+    """Convert pixel (u, v) to a unit ray direction in camera frame.
+
+    Uses the RealSense intrinsics (fx, fy, ppx, ppy).
+    """
+    ray = np.array([
+        (u - intrinsics.ppx) / intrinsics.fx,
+        (v - intrinsics.ppy) / intrinsics.fy,
+        1.0,
+    ])
+    return ray / np.linalg.norm(ray)
+
+
+def ray_plane_intersect(origin, direction, plane_z):
+    """Intersect a ray with a horizontal plane at z=plane_z in base frame.
+
+    Args:
+        origin: ray origin [x, y, z] in base frame (mm)
+        direction: ray direction [dx, dy, dz] in base frame
+        plane_z: z-height of the plane in base frame (mm)
+
+    Returns:
+        [x, y, z] intersection point, or None if ray is parallel to plane.
+    """
+    if abs(direction[2]) < 1e-9:
+        return None
+    t = (plane_z - origin[2]) / direction[2]
+    if t < 0:
+        return None  # Intersection behind camera
+    return origin + t * direction
+
+
+def compute_hover_pose(detection, transform, intrinsics, rod_diameter_mm):
     """Compute robot pose to hover above the rod centroid.
+
+    Instead of using RGBD depth (unreliable at this range), cast a ray from
+    the camera through the 2D centroid pixel and intersect with the table
+    plane (z=0) + rod radius. The rod center is at z = rod_diameter/2.
+
+    The rod axis is computed by casting rays through the two endpoints of the
+    bounding rect and intersecting with the same plane.
 
     Returns:
         (x, y, z, rx, ry, rz) in mm/degrees for the robot, or None on failure.
         Gripper points down (rx=180), rz perpendicular to rod axis.
     """
-    # Transform camera-frame 3D point to robot base frame (meters)
-    center_base_m = transform.camera_to_base(detection.center_3d)
-    axis_base = transform.camera_axis_to_base(detection.axis_3d)
+    T = transform.T_camera_to_base
+    R = T[:3, :3]
+    cam_origin_m = T[:3, 3]  # Camera origin in base frame (meters)
+    cam_origin_mm = cam_origin_m * 1000.0
 
-    # Convert to mm
-    rod_x = center_base_m[0] * 1000.0
-    rod_y = center_base_m[1] * 1000.0
-    rod_z = center_base_m[2] * 1000.0
+    rod_z = rod_diameter_mm / 2.0  # Rod centroid height above table
+
+    # Cast ray through centroid pixel
+    cx, cy = detection.center_2d
+    ray_cam = pixel_to_ray_camera(cx, cy, intrinsics)
+    ray_base = R @ ray_cam  # Rotate ray to base frame
+
+    rod_center = ray_plane_intersect(cam_origin_mm, ray_base, rod_z)
+    if rod_center is None:
+        return None
+
+    # Compute rod axis in base frame from bounding rect endpoints
+    if detection.contour is not None:
+        import cv2
+        rect = cv2.minAreaRect(detection.contour)
+        (rcx, rcy), (rw, rh), angle = rect
+        if rw < rh:
+            rw, rh = rh, rw
+            angle += 90
+        angle_rad = np.radians(angle)
+        dx = int(rw / 2 * np.cos(angle_rad))
+        dy = int(rw / 2 * np.sin(angle_rad))
+
+        ray_p1 = pixel_to_ray_camera(cx - dx, cy - dy, intrinsics)
+        ray_p2 = pixel_to_ray_camera(cx + dx, cy + dy, intrinsics)
+        p1 = ray_plane_intersect(cam_origin_mm, R @ ray_p1, rod_z)
+        p2 = ray_plane_intersect(cam_origin_mm, R @ ray_p2, rod_z)
+
+        if p1 is not None and p2 is not None:
+            axis_base = p2 - p1
+            axis_norm = np.linalg.norm(axis_base[:2])  # XY only
+            if axis_norm > 0:
+                axis_base = axis_base / np.linalg.norm(axis_base)
+            else:
+                axis_base = np.array([1, 0, 0])
+        else:
+            axis_base = np.array([1, 0, 0])
+    else:
+        axis_base = np.array([1, 0, 0])
 
     # Hover above the rod
     hover_z = rod_z + HOVER_HEIGHT_MM
 
     # Gripper rotation: rz perpendicular to rod axis (projected onto XY plane)
     grasp_rz = np.degrees(np.arctan2(axis_base[1], axis_base[0]))
-    # Add 90 degrees to be perpendicular to the rod, not parallel
-    grasp_rz += 90.0
+    grasp_rz += 90.0  # Perpendicular to rod, not parallel
 
-    return (rod_x, rod_y, hover_z, GRIPPER_DOWN_RX, 0.0, grasp_rz)
+    return (rod_center[0], rod_center[1], hover_z, GRIPPER_DOWN_RX, 0.0, grasp_rz)
 
 
 def main():
@@ -125,6 +199,9 @@ def main():
         min_convexity=cam_cfg.get('min_convexity', 0.85),
         workspace_roi=cam_cfg.get('workspace_roi'),
     )
+
+    rod_cfg = config.get('rod', {})
+    rod_diameter_mm = rod_cfg.get('diameter_mm', 27.0)
 
     # Load calibration
     transform = CoordinateTransform()
@@ -180,7 +257,8 @@ def main():
                     vis = detector.draw_detection(vis, detection)
 
                     # Show hover target info
-                    pose = compute_hover_pose(detection, transform)
+                    pose = compute_hover_pose(detection, transform,
+                                              camera.intrinsics, rod_diameter_mm)
                     if pose:
                         x, y, z, rx, ry, rz = pose
                         cv2.putText(vis,
@@ -229,7 +307,8 @@ def main():
                 elif robot is None:
                     print("  Robot not connected")
                 else:
-                    pose = compute_hover_pose(last_detection, transform)
+                    pose = compute_hover_pose(last_detection, transform,
+                                              camera.intrinsics, rod_diameter_mm)
                     if pose:
                         x, y, z, rx, ry, rz = pose
                         print(f"  Moving to hover: ({x:.1f}, {y:.1f}, {z:.1f}) rx={rx:.1f} ry={ry:.1f} rz={rz:.1f}")
