@@ -155,7 +155,11 @@ def detect_corners(gray):
 
 
 def compute_board_pose(corners_2d, intrinsics):
-    """solvePnP -> (T_board_in_cam 4x4, obj_points)."""
+    """solvePnP -> (T_board_in_cam 4x4, obj_points, reproj_error_px).
+
+    reproj_error_px is the RMS reprojection error in pixels — measures how
+    well the current intrinsics explain the detected corners.
+    """
     n = len(corners_2d)
     if n == BOARD_ROWS * BOARD_COLS:
         cols, rows = BOARD_COLS, BOARD_ROWS
@@ -181,11 +185,17 @@ def compute_board_pose(corners_2d, intrinsics):
     dist_coeffs = np.array(intrinsics.coeffs, dtype=np.float64)
 
     _, rvec, tvec = cv2.solvePnP(obj_points, corners_2d, camera_matrix, dist_coeffs)
+
+    # Compute reprojection error
+    projected, _ = cv2.projectPoints(obj_points, rvec, tvec, camera_matrix, dist_coeffs)
+    reproj_err = np.sqrt(np.mean(
+        (corners_2d.reshape(-1, 2) - projected.reshape(-1, 2)) ** 2))
+
     R, _ = cv2.Rodrigues(rvec)
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3] = tvec.flatten()
-    return T, obj_points
+    return T, obj_points, reproj_err
 
 
 def corner_3d_in_cam(corner_idx, T_board_in_cam, n_cols=BOARD_COLS):
@@ -457,7 +467,7 @@ def run_verify(width, height, dry_run):
                 return
 
             if key == ord('c') and found:
-                T_board_in_cam, _ = compute_board_pose(corners, camera.intrinsics)
+                T_board_in_cam, _, _ = compute_board_pose(corners, camera.intrinsics)
                 corners_2d = corners
                 break
     finally:
@@ -638,10 +648,11 @@ def main():
             canvas = np.zeros((height, canvas_w, 3), dtype=np.uint8)
             display = color_image.copy()
 
+            reproj_err = None
             if found:
                 current_corners = corners
-                rvec_tvec = compute_board_pose(corners, camera.intrinsics)
-                current_T_board = rvec_tvec[0]
+                current_T_board, _, reproj_err = compute_board_pose(
+                    corners, camera.intrinsics)
 
                 cv2.drawChessboardCorners(display, (BOARD_COLS, BOARD_ROWS), corners, found)
 
@@ -716,7 +727,7 @@ def main():
                         display, camera.intrinsics)
 
             # Status bar on camera image
-            board_status = "Board OK" if found else "No board"
+            board_status = f"Board OK reproj:{reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
             intr_str = f"Intr:{len(intr_frames)}" if intr_frames else ""
             if panel:
                 jog_str = " JOG" if panel.jogging else ""
