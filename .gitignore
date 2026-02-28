@@ -28,6 +28,9 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Forge
+.forge_lock
+
 # Build artifacts
 *.o
 *.so
