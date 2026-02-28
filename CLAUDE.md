@@ -23,6 +23,19 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh scripts/calibrate.py            # Manual hand-eye calibration
 ```
 
+## Logging
+
+All modules log to `logs/YYYYMMDD_HHMMSS.log` (auto-created per session). Console shows INFO+, file captures DEBUG with timestamps. Robot driver logs every command/response at DEBUG level.
+
+```python
+from logger import get_logger
+log = get_logger(__name__)
+log.info("visible on console + file")
+log.debug("file only — use for protocol traces")
+```
+
+Inspect logs: `tail -f logs/*.log` or `cat logs/$(ls -t logs/ | head -1)`
+
 ## Dependencies
 
 Defined in `requirements.txt`: pyrealsense2, opencv-python, numpy, PyYAML. No other build system — just pip in a venv.

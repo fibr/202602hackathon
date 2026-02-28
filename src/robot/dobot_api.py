@@ -18,6 +18,9 @@ import socket
 import time
 import numpy as np
 from dataclasses import dataclass
+from logger import get_logger
+
+log = get_logger('robot')
 
 
 # Response code meanings (observed on 4.6.2)
@@ -63,6 +66,7 @@ class DobotNova5:
         The ROS2 driver must be running: docker compose --profile dobot up -d
         """
         # Dashboard port (always available)
+        log.info(f"Connecting to {self.ip} dashboard:{self.dashboard_port} motion:{self.motion_port}")
         self._dash_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._dash_sock.settimeout(5.0)
         self._dash_sock.connect((self.ip, self.dashboard_port))
@@ -70,6 +74,7 @@ class DobotNova5:
             self._dash_sock.recv(1024)
         except socket.timeout:
             pass
+        log.debug("Dashboard connected")
 
         # Motion port (requires ROS2 driver)
         try:
@@ -80,10 +85,12 @@ class DobotNova5:
                 self._motion_sock.recv(1024)
             except socket.timeout:
                 pass
+            log.debug("Motion port connected")
         except (ConnectionRefusedError, socket.timeout, OSError) as e:
             if self._motion_sock:
                 self._motion_sock.close()
                 self._motion_sock = None
+            log.error(f"Motion port {self.motion_port} refused: {e}")
             raise ConnectionError(
                 f"Cannot connect to motion port {self.motion_port}. "
                 f"Is the ROS2 driver running? "
@@ -92,20 +99,28 @@ class DobotNova5:
 
     def _send_dash(self, cmd: str) -> str:
         """Send a command on the dashboard port and return raw response."""
+        log.debug(f"DASH> {cmd}")
         self._dash_sock.send(f"{cmd}\n".encode())
         time.sleep(0.1)
         try:
-            return self._dash_sock.recv(4096).decode().strip()
+            resp = self._dash_sock.recv(4096).decode().strip()
+            log.debug(f"DASH< {resp}")
+            return resp
         except socket.timeout:
+            log.warning(f"DASH timeout: {cmd}")
             return ""
 
     def _send_motion(self, cmd: str) -> str:
         """Send a command on the motion port and return raw response."""
+        log.debug(f"MOT> {cmd}")
         self._motion_sock.send(f"{cmd}\n".encode())
         time.sleep(0.1)
         try:
-            return self._motion_sock.recv(4096).decode().strip()
+            resp = self._motion_sock.recv(4096).decode().strip()
+            log.debug(f"MOT< {resp}")
+            return resp
         except socket.timeout:
+            log.warning(f"MOT timeout: {cmd}")
             return ""
 
     def _parse_response(self, resp: str) -> tuple[int, str]:
@@ -296,8 +311,12 @@ class DobotNova5:
         resp = self._send_motion(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
+            log.error(f"MovL failed (code={code}): {resp}")
             return False
-        return self._wait_motion_complete(timeout)
+        ok = self._wait_motion_complete(timeout)
+        if not ok:
+            log.warning(f"MovL timeout after {timeout}s")
+        return ok
 
     def movj(self, x: float, y: float, z: float,
              rx: float, ry: float, rz: float,
@@ -316,8 +335,12 @@ class DobotNova5:
         resp = self._send_motion(cmd)
         code, _ = self._parse_response(resp)
         if code != RC_OK:
+            log.error(f"MovJ failed (code={code}): {resp}")
             return False
-        return self._wait_motion_complete(timeout)
+        ok = self._wait_motion_complete(timeout)
+        if not ok:
+            log.warning(f"MovJ timeout after {timeout}s")
+        return ok
 
     def movj_joints(self, j1: float, j2: float, j3: float,
                     j4: float, j5: float, j6: float,

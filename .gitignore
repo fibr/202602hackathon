@@ -34,6 +34,10 @@ config/settings.yaml
 # Forge
 .forge_lock
 
+# Logs
+logs/
+*.log
+
 # Build artifacts
 *.o
 *.so

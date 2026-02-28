@@ -13,11 +13,14 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config_loader import load_config
+from logger import get_logger, get_log_file
 from vision import RealSenseCamera, RodDetector
 from calibration import CoordinateTransform
 from robot import DobotNova5, Gripper
 from planner import GraspPlanner
 from planner.grasp_planner import MotionType, GripperAction
+
+log = get_logger('main')
 
 
 def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list):
@@ -44,8 +47,8 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list):
 
 def main():
     """Main entry point: detect rod, plan grasp, execute pick-and-stand."""
-    print("=== Rod Pick-and-Stand System ===")
-    print()
+    log.info("=== Rod Pick-and-Stand System ===")
+    log.info(f"Log file: {get_log_file()}")
 
     # Load config
     config = load_config()
@@ -70,10 +73,9 @@ def main():
     calibration_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
     if os.path.exists(calibration_path):
         transform.load(calibration_path)
-        print("Loaded calibration from", calibration_path)
+        log.info(f"Loaded calibration from {calibration_path}")
     else:
-        print("WARNING: No calibration file found. Using identity transform.")
-        print("  Run scripts/calibrate.py first, or create config/calibration.yaml")
+        log.warning("No calibration file found. Using identity transform.")
 
     planner = GraspPlanner(
         safe_z=planner_cfg.get('safe_z', 300.0),
@@ -91,19 +93,19 @@ def main():
     # === State Machine ===
     try:
         # INIT
-        print("[INIT] Connecting to robot...")
+        log.info("[INIT] Connecting to robot...")
         robot.connect()
         robot.clear_error()
         robot.enable()
         robot.set_speed(robot_cfg.get('speed_percent', 30))
-        print("[INIT] Robot enabled.")
+        log.info("[INIT] Robot enabled.")
 
-        print("[INIT] Starting camera...")
+        log.info("[INIT] Starting camera...")
         camera.start()
-        print("[INIT] Camera started.")
+        log.info("[INIT] Camera started.")
 
         # DETECT
-        print("[DETECT] Looking for rod...")
+        log.info("[DETECT] Looking for rod...")
         detection = None
         max_attempts = 10
         for attempt in range(max_attempts):
@@ -113,37 +115,37 @@ def main():
 
             detection = detector.detect(color_image, depth_image, depth_frame, camera)
             if detection and detection.confidence > 0.3:
-                print(f"[DETECT] Rod found! center={detection.center_3d}, "
-                      f"confidence={detection.confidence:.1%}")
+                log.info(f"[DETECT] Rod found! center={detection.center_3d}, "
+                         f"confidence={detection.confidence:.1%}")
                 break
             time.sleep(0.2)
         else:
-            print("[DETECT] Failed to detect rod after", max_attempts, "attempts.")
+            log.error(f"[DETECT] Failed to detect rod after {max_attempts} attempts.")
             return
 
         # PLAN
-        print("[PLAN] Computing grasp plan...")
+        log.info("[PLAN] Computing grasp plan...")
         # Transform from camera frame (meters) to robot base frame (mm)
         center_base_m = transform.camera_to_base(detection.center_3d)
         axis_base = transform.camera_axis_to_base(detection.axis_3d)
         center_base_mm = center_base_m * 1000.0  # Convert to mm for robot
 
         waypoints = planner.plan(center_base_mm, axis_base)
-        print(f"[PLAN] Generated {len(waypoints)} waypoints.")
+        log.info(f"[PLAN] Generated {len(waypoints)} waypoints.")
 
         # EXECUTE
-        print("[EXECUTE] Running pick-and-stand sequence...")
+        log.info("[EXECUTE] Running pick-and-stand sequence...")
         execute_waypoints(robot, gripper, waypoints)
 
-        print("[DONE] Pick-and-stand complete!")
+        log.info("[DONE] Pick-and-stand complete!")
 
     except KeyboardInterrupt:
-        print("\n[ABORT] User interrupted.")
+        log.warning("User interrupted.")
     except Exception as e:
-        print(f"[ERROR] {e}")
+        log.error(f"[ERROR] {e}", exc_info=True)
         raise
     finally:
-        print("[CLEANUP] Shutting down...")
+        log.info("[CLEANUP] Shutting down...")
         try:
             camera.stop()
         except Exception:
@@ -153,7 +155,7 @@ def main():
             robot.disconnect()
         except Exception:
             pass
-        print("[CLEANUP] Done.")
+        log.info("[CLEANUP] Done.")
 
 
 if __name__ == "__main__":
