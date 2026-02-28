@@ -170,13 +170,16 @@ def main():
 
         axis_name = CART_LABELS[axis_idx]
         dir_ch = '+' if sign > 0 else '-'
-        status(f"{axis_name}{dir_ch} MovL...")
+        cur_val = ','.join(f'{v:.1f}' for v in pose)
+        tgt_val = ','.join(f'{v:.1f}' for v in target_pose)
+        status(f"{axis_name}{dir_ch}  cur:[{cur_val}] tgt:[{tgt_val}]")
 
         tp = target_pose
-        resp = r.send(f'MovL(pose={{{tp[0]},{tp[1]},{tp[2]},{tp[3]},{tp[4]},{tp[5]}}})')
+        cmd = f'MovL(pose={{{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f}}})'
+        resp = r.send(cmd)
         code = resp.split(',')[0] if resp else '-1'
         if code != '0':
-            status(f"ERROR: MovL returned {code}")
+            status(f"ERROR: {cmd} -> {resp}")
             return
 
         # Wait for motion to complete (poll joint stability)
