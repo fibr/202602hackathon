@@ -106,10 +106,10 @@ class RobotOverlay:
         """
         self.T_cam_to_base = T_camera_to_base.copy()
         self.T_base_to_cam = np.linalg.inv(T_camera_to_base)
-        # Flange: URDF end-effector plate (100mm from J6 along local -Z)
-        self.flange_offset = np.array([0, 0, -_URDF_FLANGE_OFFSET_M])
-        # TCP: gripper fingertip (tool_length_mm from J6 along local -Z)
-        self.tool_offset = np.array([0, 0, -tool_length_mm / 1000.0])
+        # Flange: URDF end-effector plate (100mm from J6 along local +Z)
+        self.flange_offset = np.array([0, 0, _URDF_FLANGE_OFFSET_M])
+        # TCP: gripper fingertip (tool_length_mm from J6 along local +Z)
+        self.tool_offset = np.array([0, 0, tool_length_mm / 1000.0])
         # Base offset in meters (applied to all joint positions)
         self.base_offset_m = np.zeros(3)
         if base_offset_mm is not None:
