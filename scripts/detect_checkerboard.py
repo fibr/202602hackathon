@@ -45,7 +45,7 @@ from scipy.spatial.transform import Rotation
 from scipy.optimize import least_squares
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from vision import RealSenseCamera
+from vision import RealSenseCamera, CameraIntrinsics
 from config_loader import load_config
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from calibration import CoordinateTransform
@@ -197,28 +197,52 @@ def corner_3d_in_cam(corner_idx, T_board_in_cam, n_cols=BOARD_COLS):
     return p_cam
 
 
+def pixel_to_ray(pixel, intrinsics):
+    """Convert a pixel to a normalized ray direction, accounting for distortion.
+
+    Uses cv2.undistortPoints to remove lens distortion, giving a more accurate
+    ray direction than raw pinhole backprojection.
+
+    Args:
+        pixel: (x, y) pixel coordinates
+        intrinsics: CameraIntrinsics or pyrealsense2 intrinsics
+
+    Returns:
+        np.ndarray [x, y, 1] unnormalized ray direction in camera frame
+    """
+    px, py = pixel
+    camera_matrix = np.array([
+        [intrinsics.fx, 0, intrinsics.ppx],
+        [0, intrinsics.fy, intrinsics.ppy],
+        [0, 0, 1]
+    ], dtype=np.float64)
+    dist_coeffs = np.array(intrinsics.coeffs, dtype=np.float64)
+
+    # undistortPoints with no newCameraMatrix returns normalized coords
+    pts = cv2.undistortPoints(
+        np.array([[[px, py]]], dtype=np.float64),
+        camera_matrix, dist_coeffs)
+    return np.array([pts[0][0][0], pts[0][0][1], 1.0])
+
+
 def ray_plane_intersect(pixel, intrinsics, T_board_in_cam):
     """Intersect a camera ray through a pixel with the checkerboard plane.
 
     The board plane is z=0 in board frame, transformed to camera frame via
     T_board_in_cam. Returns the 3D intersection point in camera frame (meters).
 
+    Uses cv2.undistortPoints for accurate ray computation with distortion.
+
     Args:
         pixel: (x, y) pixel coordinates
-        intrinsics: RealSense intrinsics (fx, fy, ppx, ppy)
+        intrinsics: CameraIntrinsics or pyrealsense2 intrinsics
         T_board_in_cam: 4x4 board-to-camera transform from solvePnP
 
     Returns:
         np.ndarray [x, y, z] in camera frame (meters), or None if ray is
         parallel to the plane.
     """
-    # Ray direction in camera frame (unnormalized)
-    px, py = pixel
-    ray_dir = np.array([
-        (px - intrinsics.ppx) / intrinsics.fx,
-        (py - intrinsics.ppy) / intrinsics.fy,
-        1.0
-    ])
+    ray_dir = pixel_to_ray(pixel, intrinsics)
 
     # Board plane: the board's z=0 plane in camera frame
     # Normal = R @ [0,0,1] (board z-axis in camera frame)
@@ -517,7 +541,10 @@ def main():
     print()
     print("Arm control: GUI panel on right (XY pad, Z, gripper, speed, enable/home)")
     print("             Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed, v enable")
-    print("Calibration: touch TCP to board, click on it, Enter solve, u undo, n clear, Esc quit")
+    print("Intrinsics:  i capture frame | I calibrate & save (need 10+ frames)")
+    print("Plane:       g save ground plane from current board detection")
+    print("Hand-eye:    click record point | Enter solve | u undo | n clear")
+    print("             Esc quit | p print pose")
     print()
 
     # Connect to robot (optional — camera-only mode if unavailable)
@@ -579,6 +606,10 @@ def main():
     current_corners = None
     current_T_board = None
     click_point = None
+
+    # Intrinsics calibration state
+    intr_frames = []  # list of (obj_points, img_points) for cv2.calibrateCamera
+    intr_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'camera_intrinsics.yaml')
 
     def on_mouse(event, x, y, flags, param):
         nonlocal click_point
@@ -686,16 +717,17 @@ def main():
 
             # Status bar on camera image
             board_status = "Board OK" if found else "No board"
+            intr_str = f"Intr:{len(intr_frames)}" if intr_frames else ""
             if panel:
                 jog_str = " JOG" if panel.jogging else ""
-                bar_text = f"{len(pairs)} pts | Spd:{panel.speed}%{jog_str} | {board_status}"
+                bar_text = f"{len(pairs)} pts | {intr_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
             else:
-                bar_text = f"{len(pairs)} pts | {board_status} | No robot"
+                bar_text = f"{len(pairs)} pts | {intr_str} | {board_status} | No robot"
             cv2.putText(display, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-            cv2.putText(display, "Enter solve | u undo | n clear | p pose | Esc quit",
+            cv2.putText(display, "i intr capture | I calibrate | g plane | Enter solve | u undo | Esc quit",
                         (10, height - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
             # Compose canvas: camera on left, panel on right (if robot)
             canvas[0:height, 0:width] = display
@@ -739,6 +771,113 @@ def main():
                 if panel:
                     panel.status_msg = msg
                 print(f"  {msg}")
+
+            # --- Intrinsics calibration ---
+
+            elif key == ord('i'):
+                # Capture frame for intrinsics calibration
+                if not found or current_corners is None:
+                    msg = "No board detected — can't capture for intrinsics"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+                else:
+                    n = len(current_corners)
+                    # Determine grid size for this detection
+                    i_cols, i_rows = BOARD_COLS, BOARD_ROWS
+                    if n != BOARD_ROWS * BOARD_COLS:
+                        for cc, rr in [(BOARD_COLS, BOARD_ROWS - 2),
+                                       (BOARD_COLS - 2, BOARD_ROWS),
+                                       (BOARD_COLS - 2, BOARD_ROWS - 2)]:
+                            if cc * rr == n:
+                                i_cols, i_rows = cc, rr
+                                break
+                        else:
+                            msg = f"Unexpected corner count {n}, skipping"
+                            if panel:
+                                panel.status_msg = msg
+                            print(f"  {msg}")
+                            continue
+                    obj_pts = np.zeros((i_rows * i_cols, 3), dtype=np.float32)
+                    for rr in range(i_rows):
+                        for cc in range(i_cols):
+                            obj_pts[rr * i_cols + cc] = [
+                                cc * SQUARE_SIZE_M, rr * SQUARE_SIZE_M, 0]
+                    intr_frames.append((obj_pts, current_corners.copy()))
+                    msg = f"Intrinsics frame {len(intr_frames)} captured"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+
+            elif key == ord('I'):
+                # Run intrinsics calibration
+                if len(intr_frames) < 5:
+                    msg = f"Need 5+ frames for intrinsics (have {len(intr_frames)})"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+                else:
+                    obj_points = [f[0] for f in intr_frames]
+                    img_points = [f[1] for f in intr_frames]
+                    print(f"\n=== Calibrating intrinsics from {len(intr_frames)} frames ===")
+                    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
+                        obj_points, img_points, (width, height), None, None)
+                    print(f"  Reprojection error: {ret:.4f} px")
+                    print(f"  Camera matrix:\n{mtx}")
+                    print(f"  Distortion: {dist.ravel()}")
+
+                    # Save
+                    calib_intr = CameraIntrinsics(
+                        fx=mtx[0, 0], fy=mtx[1, 1],
+                        ppx=mtx[0, 2], ppy=mtx[1, 2],
+                        coeffs=dist.ravel().tolist())
+                    calib_intr.width = width
+                    calib_intr.height = height
+                    calib_intr.save(intr_path)
+                    print(f"  Saved to {intr_path}")
+
+                    # Apply immediately
+                    camera.intrinsics = calib_intr
+                    msg = f"Intrinsics saved! reproj={ret:.3f}px"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+
+            # --- Ground plane calibration ---
+
+            elif key == ord('g'):
+                # Save ground plane normal + offset from current board detection
+                if current_T_board is None:
+                    msg = "No board detected — can't save ground plane"
+                    if panel:
+                        panel.status_msg = msg
+                    print(f"  {msg}")
+                else:
+                    # Board z=0 plane in camera frame
+                    R_board = current_T_board[:3, :3]
+                    t_board = current_T_board[:3, 3]
+                    plane_normal = R_board[:, 2]  # board Z axis in camera frame
+                    plane_d = np.dot(plane_normal, t_board)  # signed distance from origin
+
+                    plane_path = os.path.join(
+                        os.path.dirname(__file__), '..', 'config', 'ground_plane.yaml')
+                    import yaml
+                    os.makedirs(os.path.dirname(plane_path), exist_ok=True)
+                    data = {
+                        'plane_normal': plane_normal.tolist(),
+                        'plane_d': float(plane_d),
+                        'T_board_in_cam': current_T_board.tolist(),
+                    }
+                    with open(plane_path, 'w') as f:
+                        yaml.dump(data, f, default_flow_style=False)
+
+                    print(f"\n=== Ground Plane Saved ===")
+                    print(f"  Normal (cam): [{plane_normal[0]:.4f}, {plane_normal[1]:.4f}, {plane_normal[2]:.4f}]")
+                    print(f"  Distance: {plane_d:.4f} m ({plane_d*1000:.1f} mm)")
+                    print(f"  Saved to {plane_path}")
+                    msg = f"Plane saved: d={plane_d*1000:.1f}mm"
+                    if panel:
+                        panel.status_msg = msg
 
             elif key == 13:  # Enter
                 if len(pairs) < 3:
