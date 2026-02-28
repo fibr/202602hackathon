@@ -29,7 +29,7 @@ Thumbs.db
 .env.*.local
 
 # Local settings (user-specific overrides)
-config/settings.yaml
+# config/settings.yaml
 
 # Dataset images (large binary files)
 data/rod_dataset/*.png

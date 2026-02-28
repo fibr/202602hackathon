@@ -1,0 +1,18 @@
+camera:
+  workspace_roi:
+    depth_max_mm: 18857
+    depth_median_mm: 8889
+    depth_min_mm: 6328
+    points:
+    - - 776
+      - 504
+    - - 989
+      - 71
+    - - 0
+      - 92
+    - - 245
+      - 509
+    resolution:
+    - 1280
+    - 720
+    type: polygon
