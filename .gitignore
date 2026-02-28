@@ -31,6 +31,12 @@ Thumbs.db
 # Local settings (user-specific overrides)
 config/settings.yaml
 
+# Dataset images (large binary files)
+data/rod_dataset/*.png
+
+# Model weights
+*.pt
+
 # Forge
 .forge_lock
 
