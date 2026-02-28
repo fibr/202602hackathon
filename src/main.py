@@ -19,20 +19,25 @@ from calibration import CoordinateTransform
 from robot import DobotNova5, Gripper
 from planner import GraspPlanner
 from planner.grasp_planner import MotionType, GripperAction
+from planner.trajectory import execute_trajectory
 from kinematics import IKSolver
 
 log = get_logger('main')
 
 
 def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
-                      ik_solver: IKSolver, linear_step_mm: float = 5.0):
-    """Execute waypoints using local IK + direct joint control.
+                      ik_solver: IKSolver, linear_step_mm: float = 5.0,
+                      max_step_deg: float = 5.0):
+    """Execute waypoints using local IK + smooth quintic trajectories.
 
-    For JOINT waypoints: solve IK once, send joint angles via movj_joints.
-    For LINEAR waypoints: interpolate Cartesian path, IK each step, send
-    as a sequence of joint moves (approximates linear Cartesian motion).
+    For JOINT waypoints: solve IK, then execute a smooth quintic trajectory
+    from current joints to target joints (subdivided into small steps).
+    For LINEAR waypoints: interpolate Cartesian path, IK each step, then
+    execute each step as a small joint move.
+
+    All moves use quintic smoothstep for zero velocity/acceleration at
+    endpoints, plus retry logic for transient failures.
     """
-    # Track current joint angles for IK seeding
     current_joints = robot.get_joint_angles()
 
     for wp in waypoints:
@@ -48,24 +53,22 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
             gripper.open()
 
         if wp.motion == MotionType.JOINT:
-            # Single IK solve, send joint angles directly
+            # Solve IK, then use smooth trajectory to get there
             joints = ik_solver.solve_ik(target_pos, target_rpy,
                                          seed_joints_deg=current_joints)
             if joints is None:
                 log.error(f"IK failed for waypoint {wp.label}")
                 raise RuntimeError(f"IK failed at {wp.label}: "
                                    f"pos={target_pos}, rpy={target_rpy}")
-            ok = robot.movj_joints(*joints)
+            ok = execute_trajectory(robot, current_joints, joints,
+                                    max_step_deg=max_step_deg)
             if not ok:
-                log.error(f"movj_joints failed at {wp.label}")
-                raise RuntimeError(f"Motion failed at {wp.label}")
+                raise RuntimeError(f"Trajectory failed at {wp.label}")
             current_joints = joints
 
         else:  # LINEAR
-            # Get current pose for interpolation start
             start_pos, start_rpy = ik_solver.forward_kin(current_joints)
 
-            # Interpolate and execute each step
             joint_path = ik_solver.interpolate_linear(
                 start_pos, start_rpy, target_pos, target_rpy,
                 seed_joints_deg=current_joints, step_mm=linear_step_mm)
@@ -73,12 +76,13 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
                 log.error(f"Linear interpolation failed for {wp.label}")
                 raise RuntimeError(f"Linear IK failed at {wp.label}")
 
+            # Execute each Cartesian step as a small trajectory
             for step_joints in joint_path:
-                ok = robot.movj_joints(*step_joints)
+                ok = execute_trajectory(robot, current_joints, step_joints,
+                                        max_step_deg=max_step_deg)
                 if not ok:
-                    log.error(f"movj_joints failed during linear move {wp.label}")
-                    raise RuntimeError(f"Motion failed during {wp.label}")
-            current_joints = joint_path[-1]
+                    raise RuntimeError(f"Trajectory failed during {wp.label}")
+                current_joints = step_joints
 
         # Execute gripper action after motion if closing
         if wp.gripper == GripperAction.CLOSE:
