@@ -14,18 +14,26 @@ class CoordinateTransform:
 
     def __init__(self):
         self.T_camera_to_base = np.eye(4)
+        self.base_offset_mm = np.zeros(3)
+        self.base_rpy_deg = np.zeros(3)
 
     def load(self, filepath: str):
         """Load calibration from YAML file."""
         with open(filepath, 'r') as f:
             data = yaml.safe_load(f)
         self.T_camera_to_base = np.array(data['T_camera_to_base'])
+        if 'base_offset_mm' in data:
+            self.base_offset_mm = np.array(data['base_offset_mm'], dtype=float)
+        if 'base_rpy_deg' in data:
+            self.base_rpy_deg = np.array(data['base_rpy_deg'], dtype=float)
 
     def save(self, filepath: str):
         """Save calibration to YAML file."""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         data = {
-            'T_camera_to_base': self.T_camera_to_base.tolist()
+            'T_camera_to_base': self.T_camera_to_base.tolist(),
+            'base_offset_mm': self.base_offset_mm.tolist(),
+            'base_rpy_deg': self.base_rpy_deg.tolist(),
         }
         with open(filepath, 'w') as f:
             yaml.dump(data, f, default_flow_style=False)

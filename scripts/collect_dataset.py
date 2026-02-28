@@ -27,8 +27,12 @@ Controls (live mode):
     d           Toggle detection overlay
     r           Toggle robot skeleton overlay (base always shown)
     g           Move robot to hover 200mm above detected rod
+    s           Save base offset + rotation to calibration file
     Arrows      Nudge base overlay position XY (10mm steps)
     +/-         Nudge base overlay position Z (10mm steps)
+    7/8         Nudge base roll ±2°
+    9/0         Nudge base pitch ±2°
+    [/]         Nudge base yaw ±2°
     q / Esc     Quit
 """
 
@@ -46,6 +50,7 @@ from calibration import CoordinateTransform
 from config_loader import load_config
 from visualization import RobotOverlay
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
+from gui.overlay_calib import OverlayCalibPanel
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'rod_dataset')
 
@@ -482,12 +487,11 @@ def main():
 
     # Robot overlay for projecting joint positions into camera image
     gripper_cfg = config.get('gripper', {})
-    robot_cfg = config.get('robot', {})
-    base_offset = robot_cfg.get('base_offset_mm')
     robot_overlay = RobotOverlay(
         T_camera_to_base=transform.T_camera_to_base,
         tool_length_mm=gripper_cfg.get('tool_length_mm', 200.0),
-        base_offset_mm=np.array(base_offset) if base_offset else None,
+        base_offset_mm=transform.base_offset_mm,
+        base_rpy_deg=transform.base_rpy_deg,
     )
 
     # Try robot connection (optional)
@@ -504,6 +508,9 @@ def main():
         robot_speed = config.get('robot', {}).get('speed_percent', 30)
         panel.speed = robot_speed
 
+    # Overlay calibration GUI panel (always available)
+    calib_panel = OverlayCalibPanel(robot_overlay, transform, calibration_path)
+
     print()
     print("=== Rod Dataset Collection ===")
     print(f"Resolution: {width}x{height}")
@@ -511,14 +518,16 @@ def main():
     print(f"Next index: {next_idx}")
     print(f"Robot: {'connected' if robot else 'not connected'}")
     print()
-    print("SPACE=capture  d=detect  r=robot overlay  g=goto rod  q=quit")
-    print("Arrow keys: nudge base overlay (10mm steps)  +/-: nudge base Z")
+    print("SPACE=capture  d=detect  r=robot overlay  t=calib panel  g=goto rod  q=quit")
+    print("Arrows: nudge XY (10mm)  +/-: Z (10mm)  7/8: roll  9/0: pitch  [/]: yaw (2 deg)")
     print()
 
     camera = RealSenseCamera(width=width, height=height, fps=15)
     camera.start()
 
     def on_mouse(event, x, y, flags, param):
+        if calib_panel.handle_mouse(event, x, y):
+            return
         if panel and x >= width:
             panel.handle_mouse(event, x, y, flags)
 
@@ -592,6 +601,7 @@ def main():
             cv2.putText(vis, status, (10, h_img - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
+            calib_panel.draw(vis)
             canvas[0:height, 0:width] = vis
             if panel:
                 panel.draw(canvas)
@@ -620,6 +630,9 @@ def main():
                 show_robot_overlay = not show_robot_overlay
                 print(f"  Robot skeleton overlay: {'ON' if show_robot_overlay else 'OFF'}")
 
+            elif key == ord('t'):
+                calib_panel.toggle()
+
             # Arrow keys to nudge base overlay position (10mm steps)
             NUDGE_MM = 10.0
             if key_raw == 65361:    # Left arrow -> base X-
@@ -640,6 +653,36 @@ def main():
             elif key == ord('-'):                      # Z-
                 robot_overlay.nudge_base(dz_mm=-NUDGE_MM)
                 print(f"  Base offset: {robot_overlay.base_offset_m * 1000} mm")
+
+            # RPY nudge (2 degree steps)
+            NUDGE_DEG = 2.0
+            if key == ord('7'):
+                robot_overlay.nudge_base_rpy(droll_deg=-NUDGE_DEG)
+                print(f"  Base RPY: {robot_overlay.base_rpy_deg} deg")
+            elif key == ord('8'):
+                robot_overlay.nudge_base_rpy(droll_deg=NUDGE_DEG)
+                print(f"  Base RPY: {robot_overlay.base_rpy_deg} deg")
+            elif key == ord('9'):
+                robot_overlay.nudge_base_rpy(dpitch_deg=-NUDGE_DEG)
+                print(f"  Base RPY: {robot_overlay.base_rpy_deg} deg")
+            elif key == ord('0'):
+                robot_overlay.nudge_base_rpy(dpitch_deg=NUDGE_DEG)
+                print(f"  Base RPY: {robot_overlay.base_rpy_deg} deg")
+            elif key == ord('['):
+                robot_overlay.nudge_base_rpy(dyaw_deg=-NUDGE_DEG)
+                print(f"  Base RPY: {robot_overlay.base_rpy_deg} deg")
+            elif key == ord(']'):
+                robot_overlay.nudge_base_rpy(dyaw_deg=NUDGE_DEG)
+                print(f"  Base RPY: {robot_overlay.base_rpy_deg} deg")
+
+            # Save overlay adjustments to calibration file
+            elif key == ord('s'):
+                transform.base_offset_mm = robot_overlay.base_offset_m * 1000.0
+                transform.base_rpy_deg = robot_overlay.base_rpy_deg
+                transform.save(calibration_path)
+                print(f"  Saved to {calibration_path}:")
+                print(f"    offset: {transform.base_offset_mm} mm")
+                print(f"    rpy:    {transform.base_rpy_deg} deg")
 
             elif key == ord('g'):
                 if not show_detection:

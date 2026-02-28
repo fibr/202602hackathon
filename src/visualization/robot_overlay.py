@@ -88,13 +88,15 @@ class RobotOverlay:
     """
 
     def __init__(self, T_camera_to_base: np.ndarray, tool_length_mm: float = 100.0,
-                 base_offset_mm: np.ndarray = None):
+                 base_offset_mm: np.ndarray = None, base_rpy_deg: np.ndarray = None):
         """
         Args:
             T_camera_to_base: 4x4 homogeneous transform (meters)
             tool_length_mm: Gripper length in mm
             base_offset_mm: Optional [dx, dy, dz] offset to the robot base in mm.
                            Use this to correct calibration errors.
+            base_rpy_deg: Optional [roll, pitch, yaw] rotation correction in degrees.
+                         Applied at the base before the FK chain.
         """
         self.T_cam_to_base = T_camera_to_base.copy()
         self.T_base_to_cam = np.linalg.inv(T_camera_to_base)
@@ -103,6 +105,10 @@ class RobotOverlay:
         self.base_offset_m = np.zeros(3)
         if base_offset_mm is not None:
             self.base_offset_m = np.array(base_offset_mm, dtype=float) / 1000.0
+        # Base rotation correction in radians (roll, pitch, yaw)
+        self.base_rpy_rad = np.zeros(3)
+        if base_rpy_deg is not None:
+            self.base_rpy_rad = np.radians(np.array(base_rpy_deg, dtype=float))
 
     def compute_joint_positions(self, joint_angles_deg: np.ndarray) -> list[np.ndarray]:
         """Compute 3D positions of all joints in robot base frame (meters).
@@ -117,9 +123,11 @@ class RobotOverlay:
         q = np.radians(joint_angles_deg)
         positions = []
 
-        # Base origin (at 0,0,0 + offset in base frame)
+        # Base origin (at 0,0,0 + offset in base frame, with rotation correction)
         T_current = np.eye(4)
         T_current[:3, 3] = self.base_offset_m
+        if np.any(self.base_rpy_rad != 0):
+            T_current[:3, :3] = _rpy_to_matrix(*self.base_rpy_rad)
         positions.append(T_current[:3, 3].copy())
 
         for i, (name, xyz, *rest) in enumerate(_NOVA5_JOINTS):
@@ -148,6 +156,15 @@ class RobotOverlay:
     def nudge_base(self, dx_mm: float = 0, dy_mm: float = 0, dz_mm: float = 0):
         """Nudge the base offset incrementally (for interactive adjustment)."""
         self.base_offset_m += np.array([dx_mm, dy_mm, dz_mm]) / 1000.0
+
+    @property
+    def base_rpy_deg(self) -> np.ndarray:
+        """Current base rotation correction in degrees [roll, pitch, yaw]."""
+        return np.degrees(self.base_rpy_rad)
+
+    def nudge_base_rpy(self, droll_deg: float = 0, dpitch_deg: float = 0, dyaw_deg: float = 0):
+        """Nudge the base rotation incrementally (for interactive adjustment)."""
+        self.base_rpy_rad += np.radians(np.array([droll_deg, dpitch_deg, dyaw_deg]))
 
     def project_to_pixels(self, points_base_m: list[np.ndarray],
                           intrinsics) -> list[tuple[int, int] | None]:

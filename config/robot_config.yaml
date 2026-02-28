@@ -4,7 +4,6 @@ robot:
   ip: "192.168.5.1"
   dashboard_port: 29999       # All commands including MovJ/MovL (V4 syntax)
   speed_percent: 30           # Start slow for safety (1-100)
-  # base_offset_mm: [0, 0, 0]  # Optional XYZ offset to correct calibration (mm)
 
 camera:
   width: 640
