@@ -51,16 +51,10 @@ class DobotNova5:
         self.ip = ip
         self.dashboard_port = dashboard_port
         self._sock = None
-        self._has_movl = False  # Set True after successful MovJ/MovL probe
         self.state = RobotState()
 
-    @property
-    def motion_mode(self) -> str:
-        """Current motion mode: 'movl' or 'jog'."""
-        return "movl" if self._has_movl else "jog"
-
     def connect(self):
-        """Connect to dashboard port and probe for V4 motion support."""
+        """Connect to the dashboard port."""
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.settimeout(5.0)
         self._sock.connect((self.ip, self.dashboard_port))
@@ -68,21 +62,6 @@ class DobotNova5:
             self._sock.recv(1024)
         except socket.timeout:
             pass
-
-    def probe_motion(self):
-        """Test V4 MovJ syntax. Call after enable().
-
-        Sends a no-op MovJ to current joint angles to check if
-        V4 named-parameter syntax works on this firmware.
-        """
-        current = self.get_joint_angles()
-        if current is not None and not np.allclose(current, 0):
-            j = current
-            cmd = (f"MovJ(joint={{{j[0]:.2f},{j[1]:.2f},{j[2]:.2f},"
-                   f"{j[3]:.2f},{j[4]:.2f},{j[5]:.2f}}})")
-            resp = self._send(cmd)
-            code, _ = self._parse_response(resp)
-            self._has_movl = (code == RC_OK)
 
     def _send(self, cmd: str) -> str:
         """Send a command and return raw response string."""
@@ -121,7 +100,6 @@ class DobotNova5:
         time.sleep(1)
         code, _ = self._parse_response(resp)
         self.state.enabled = (code == RC_OK)
-        self.probe_motion()
         return code == RC_OK
 
     def disable(self):
@@ -263,44 +241,6 @@ class DobotNova5:
         self.jog_stop()
         time.sleep(0.3)  # settling time
 
-    def move_to_joints(self, target: np.ndarray, speed_percent: int = 30,
-                       tolerance_deg: float = 1.0, timeout: float = 30.0):
-        """Move to target joint angles by jogging each joint.
-
-        Jogs each joint individually toward the target. Not a coordinated
-        move — joints move one at a time. Used as fallback when MovJ is
-        not available.
-
-        Args:
-            target: Array of 6 target joint angles in degrees
-            speed_percent: Jog speed (1-100)
-            tolerance_deg: Acceptable error per joint in degrees
-            timeout: Max time for the entire move
-        """
-        self.set_speed(speed_percent)
-        start_time = time.time()
-
-        for joint_idx in range(6):
-            joint_num = joint_idx + 1
-
-            while time.time() - start_time < timeout:
-                current = self.get_joint_angles()
-                error = target[joint_idx] - current[joint_idx]
-
-                if abs(error) <= tolerance_deg:
-                    break
-
-                direction = "+" if error > 0 else "-"
-                jog_time = min(0.5, abs(error) / 20.0)
-                jog_time = max(0.1, jog_time)
-
-                self.jog_start(f"J{joint_num}{direction}")
-                time.sleep(jog_time)
-                self.jog_stop()
-                time.sleep(0.2)
-
-        return self.get_joint_angles()
-
     # --- Cartesian motion (V4 syntax) ---
 
     def movl(self, x: float, y: float, z: float,
@@ -367,66 +307,38 @@ class DobotNova5:
     def move_linear(self, x: float, y: float, z: float,
                     rx: float, ry: float, rz: float,
                     speed_percent: int = 30,
-                    tolerance_deg: float = 1.0,
                     timeout: float = 30.0) -> bool:
         """Move TCP in a straight line to a Cartesian pose.
-
-        Uses V4 MovL if available, otherwise falls back to IK + jog.
 
         Args:
             x, y, z: Target position in mm
             rx, ry, rz: Target orientation in degrees
             speed_percent: Speed (1-100)
-            tolerance_deg: Acceptable joint error for jog fallback
             timeout: Max time for the move
 
         Returns:
-            True if motion executed, False on failure.
+            True if motion completed, False on failure.
         """
         self.set_speed(speed_percent)
-
-        if self._has_movl:
-            if self.movl(x, y, z, rx, ry, rz, timeout=timeout):
-                return True
-
-        # Fallback: IK + jog
-        target_joints = self.inverse_kin(x, y, z, rx, ry, rz)
-        if target_joints is None or np.allclose(target_joints, 0):
-            return False
-        self.move_to_joints(target_joints, speed_percent, tolerance_deg, timeout)
-        return True
+        return self.movl(x, y, z, rx, ry, rz, timeout=timeout)
 
     def move_joint(self, x: float, y: float, z: float,
                    rx: float, ry: float, rz: float,
                    speed_percent: int = 30,
-                   tolerance_deg: float = 1.0,
                    timeout: float = 30.0) -> bool:
         """Move to a Cartesian pose via joint-space motion.
-
-        Uses V4 MovJ if available, otherwise falls back to IK + jog.
 
         Args:
             x, y, z: Target position in mm
             rx, ry, rz: Target orientation in degrees
             speed_percent: Speed (1-100)
-            tolerance_deg: Acceptable joint error for jog fallback
             timeout: Max time for the move
 
         Returns:
-            True if motion executed, False on failure.
+            True if motion completed, False on failure.
         """
         self.set_speed(speed_percent)
-
-        if self._has_movl:
-            if self.movj(x, y, z, rx, ry, rz, timeout=timeout):
-                return True
-
-        # Fallback: IK + jog
-        target_joints = self.inverse_kin(x, y, z, rx, ry, rz)
-        if target_joints is None or np.allclose(target_joints, 0):
-            return False
-        self.move_to_joints(target_joints, speed_percent, tolerance_deg, timeout)
-        return True
+        return self.movj(x, y, z, rx, ry, rz, timeout=timeout)
 
     # --- ToolDO (gripper) ---
 

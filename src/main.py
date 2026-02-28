@@ -93,7 +93,6 @@ def main():
         # INIT
         print("[INIT] Connecting to robot...")
         robot.connect()
-        print(f"[INIT] Motion mode: {robot.motion_mode}")
         robot.clear_error()
         robot.enable()
         robot.set_speed(robot_cfg.get('speed_percent', 30))
