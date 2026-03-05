@@ -12,7 +12,7 @@ Supports two robot types via duck-typing:
     XY pad = Cartesian MovL, Z = Cartesian Z, jog = continuous MoveJog
   - LeRobot arm101: robot_type='arm101', get_angles(), move_joints(),
     jog_joint(), gripper_open/close(), enable/disable_torque()
-    XY pad = J1/J2 jog, Z = J3 jog, jog = step-based
+    XY pad = Cartesian IK step, Z = Cartesian IK step, jog = step-based
 
 Robot connection is duck-typed. Arm101 detected via robot.robot_type == 'arm101'.
 """
@@ -37,10 +37,15 @@ CART_STEP_XY_MAX = 100.0  # mm at edge of pad
 CART_STEP_Z = 10.0        # mm per Z button click
 CART_COOLDOWN = 0.3       # seconds between commands (prevent queue buildup)
 
-# Joint jog step sizes (arm101)
+# Joint jog step sizes (arm101 keyboard jog)
 JOG_STEP_MIN = 1.0       # degrees at edge of deadzone
 JOG_STEP_MAX = 30.0      # degrees at edge of pad
 JOG_STEP_Z = 5.0         # degrees per Z button click (J3)
+
+# Cartesian step sizes for arm101 IK-based control
+ARM101_CART_STEP_MIN = 2.0   # mm at edge of deadzone
+ARM101_CART_STEP_MAX = 30.0  # mm at edge of pad
+ARM101_CART_STEP_Z = 5.0     # mm per Z button click
 
 # Colors
 COL_PAD_BG = (50, 50, 50)
@@ -80,6 +85,7 @@ class RobotControlPanel:
 
         # Detect robot type
         self._arm101 = getattr(robot, 'robot_type', None) == 'arm101'
+        self._ik_solver = None  # lazy-loaded for arm101 Cartesian control
 
         # State
         self.speed = 30
@@ -405,16 +411,16 @@ class RobotControlPanel:
             self._do_xy_step(x, y)
             return
 
-        # Z buttons — Cartesian step (Dobot) or J3 jog (arm101)
+        # Z buttons — Cartesian step
         if self._in_rect(x, y, self.z_up_rect):
             if self._arm101:
-                self._do_joint_step(2, +1, JOG_STEP_Z)  # J3+
+                self._do_cart_step_ik(2, +1, ARM101_CART_STEP_Z)
             else:
                 self._do_cart_step(2, +1, CART_STEP_Z)
             return
         if self._in_rect(x, y, self.z_dn_rect):
             if self._arm101:
-                self._do_joint_step(2, -1, JOG_STEP_Z)  # J3-
+                self._do_cart_step_ik(2, -1, ARM101_CART_STEP_Z)
             else:
                 self._do_cart_step(2, -1, CART_STEP_Z)
             return
@@ -488,8 +494,58 @@ class RobotControlPanel:
         except Exception as e:
             self.status_msg = f"Jog error: {e}"
 
+    def _do_cart_step_ik(self, axis_idx, sign, step_mm):
+        """IK-based Cartesian step for arm101: read pose, offset, solve IK, move."""
+        if self.robot is None:
+            return
+        now = time.time()
+        if now - self._last_cmd_time < CART_COOLDOWN:
+            return
+        self._last_cmd_time = now
+
+        labels = {0: 'X', 1: 'Y', 2: 'Z'}
+        axis_name = labels[axis_idx]
+        dir_ch = '+' if sign > 0 else '-'
+
+        # Lazy-load IK solver
+        if self._ik_solver is None:
+            try:
+                from kinematics.arm101_ik_solver import Arm101IKSolver
+                self._ik_solver = Arm101IKSolver()
+            except Exception as e:
+                self.status_msg = f"IK init error: {e}"
+                return
+
+        angles = self.robot.get_angles()
+        if angles is None:
+            self.status_msg = "ERROR: can't read angles"
+            return
+
+        # Current FK pose
+        motor_deg = np.array(angles[:5], dtype=float)
+        pos_mm, rpy_deg = self._ik_solver.forward_kin(motor_deg)
+
+        # Offset target
+        target_pos = pos_mm.copy()
+        target_pos[axis_idx] += sign * step_mm
+
+        # Solve IK
+        result = self._ik_solver.solve_ik(
+            target_pos, rpy_deg, seed_motor_deg=motor_deg)
+        if result is None:
+            self.status_msg = f"IK failed for {axis_name}{dir_ch}"
+            return
+
+        # Send joint angles (first 5 joints, keep gripper unchanged)
+        try:
+            full_angles = list(result) + [angles[5]]
+            self.robot.move_joints(full_angles)
+            self.status_msg = f"{axis_name}{dir_ch} {step_mm:.0f}mm"
+        except Exception as e:
+            self.status_msg = f"Move error: {e}"
+
     def _do_xy_step(self, x, y):
-        """Do a Cartesian XY step (Dobot) or J1/J2 jog (arm101)."""
+        """Do a Cartesian XY step (Dobot) or Cartesian IK step (arm101)."""
         if self.robot is None:
             return
         cx, cy = self.pad_center
@@ -505,15 +561,15 @@ class RobotControlPanel:
         t = min((dist - PAD_DEADZONE) / (max_dist - PAD_DEADZONE), 1.0)
 
         if self._arm101:
-            step_deg = JOG_STEP_MIN + t * (JOG_STEP_MAX - JOG_STEP_MIN)
-            # Determine dominant axis: horizontal = J1, vertical = J2
+            step_mm = ARM101_CART_STEP_MIN + t * (ARM101_CART_STEP_MAX - ARM101_CART_STEP_MIN)
+            # Determine dominant axis: right=X+, up=Y+
             if abs(dx) >= abs(dy):
-                joint_idx = 0  # J1
-                direction = +1 if dx > 0 else -1
+                axis_idx = 0  # X
+                sign = +1 if dx > 0 else -1
             else:
-                joint_idx = 1  # J2
-                direction = +1 if dy < 0 else -1  # up on screen = J2+
-            self._do_joint_step(joint_idx, direction, step_deg)
+                axis_idx = 1  # Y
+                sign = +1 if dy < 0 else -1  # up on screen = Y+
+            self._do_cart_step_ik(axis_idx, sign, step_mm)
         else:
             step_mm = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
             # Determine dominant axis: X or Y

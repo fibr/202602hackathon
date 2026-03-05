@@ -221,10 +221,7 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     pos_log_path = os.path.join(log_dir, f'positions_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
     with open(pos_log_path, 'w') as f:
-        f.write('timestamp,j1,j2,j3,j4,j5,j6')
-        if not use_arm101:
-            f.write(',x,y,z,rx,ry,rz')
-        f.write(',label\n')
+        f.write('timestamp,j1,j2,j3,j4,j5,j6,x,y,z,rx,ry,rz,label\n')
     pos_log_count = 0
 
     # GUI panel
@@ -273,6 +270,9 @@ def main():
                 bar_text += "%"
             if panel.jogging:
                 bar_text += f" | JOG {panel.jog_axis}"
+            pose = robot.get_pose()
+            if pose:
+                bar_text += f" | [{pose[0]:.0f},{pose[1]:.0f},{pose[2]:.0f}]mm"
             cv2.putText(canvas, bar_text, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
             cv2.putText(canvas, "l log | p pose | Esc quit",
@@ -303,12 +303,11 @@ def main():
                 if angles:
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                     row = ','.join(f'{v:.3f}' for v in angles)
-                    if not use_arm101:
-                        pose = robot.get_pose()
-                        if pose:
-                            row += ',' + ','.join(f'{v:.3f}' for v in pose)
-                        else:
-                            row += ',,,,,,'
+                    pose = robot.get_pose()
+                    if pose:
+                        row += ',' + ','.join(f'{v:.3f}' for v in pose)
+                    else:
+                        row += ',,,,,,'
                     with open(pos_log_path, 'a') as f:
                         f.write(f'{ts},{row},\n')
                     pos_log_count += 1
@@ -323,10 +322,9 @@ def main():
                 angles = robot.get_angles()
                 if angles:
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
-                    if not use_arm101:
-                        pose = robot.get_pose()
-                        if pose:
-                            print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
+                    pose = robot.get_pose()
+                    if pose:
+                        print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
                     panel.status_msg = "Pose printed"
 
     except KeyboardInterrupt:
