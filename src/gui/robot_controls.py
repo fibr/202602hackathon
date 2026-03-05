@@ -314,12 +314,10 @@ class RobotControlPanel:
 
         if self.robot is None:
             put("NO ROBOT", COL_RED)
-        elif not self._arm101 and self._cached_pose is not None:
+        elif self._cached_pose is not None:
             p = self._cached_pose
             put(f"TCP: {p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}", COL_VALUE)
             put(f"     {p[3]:.1f}, {p[4]:.1f}, {p[5]:.1f}", COL_VALUE)
-        elif self._arm101:
-            put("arm101 (no FK)", COL_LABEL)
         else:
             put("TCP: ---", COL_LABEL)
             y += line_h

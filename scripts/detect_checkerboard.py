@@ -600,7 +600,9 @@ def main():
             angles = robot.get_angles()
             if angles:
                 print(f"  Joints: {', '.join(f'{v:.1f}' for v in angles)}")
-            print("  NOTE: arm101 has no FK — hand-eye calibration records joint angles only")
+            pose = robot.get_pose()
+            if pose:
+                print(f"  TCP:    {', '.join(f'{v:.1f}' for v in pose)}")
         except Exception as e:
             print(f"  WARNING: Cannot connect to arm101: {e}")
             print(f"  Continuing in camera-only mode (no arm control)")
