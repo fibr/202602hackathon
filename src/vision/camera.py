@@ -227,9 +227,12 @@ class WebcamCamera:
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self._cap.set(cv2.CAP_PROP_FPS, self.fps)
 
-        # Read back actual resolution (camera may not honour the request)
-        self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Check if camera accepted the requested resolution
+        native_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        native_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._needs_resize = (native_w != self.width or native_h != self.height)
+        if self._needs_resize:
+            print(f"Webcam: native {native_w}x{native_h}, will resize to {self.width}x{self.height}")
 
         # Try loading calibrated intrinsics; fall back to a pinhole estimate
         intr_path = os.path.normpath(_INTRINSICS_PATH)
@@ -281,6 +284,9 @@ class WebcamCamera:
         ret, frame = self._cap.read()
         if not ret or frame is None:
             return None, None, None
+
+        if self._needs_resize:
+            frame = cv2.resize(frame, (self.width, self.height))
 
         return frame, None, None
 
