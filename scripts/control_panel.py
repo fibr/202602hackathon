@@ -287,7 +287,10 @@ def main():
 
             if key == 27:  # Esc
                 break
-            if cv2.getWindowProperty('Control Panel', cv2.WND_PROP_VISIBLE) < 1:
+            try:
+                if cv2.getWindowProperty('Control Panel', cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            except cv2.error:
                 break
 
             # Arm control via shared panel

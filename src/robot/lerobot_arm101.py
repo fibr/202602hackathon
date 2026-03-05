@@ -46,8 +46,8 @@ POS_PER_DEG = 4096.0 / 360.0   # ~11.378 steps per degree
 DEG_PER_POS = 360.0 / 4096.0   # ~0.0879 degrees per step
 
 # Gripper positions (motor 6)
-GRIPPER_OPEN_POS = 1800
-GRIPPER_CLOSE_POS = 2600
+GRIPPER_OPEN_POS = 2600
+GRIPPER_CLOSE_POS = 1800
 
 # Default speed for moves (0-4095, ~0 means max speed for STS)
 DEFAULT_MOVE_SPEED = 200
