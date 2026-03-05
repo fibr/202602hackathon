@@ -204,7 +204,9 @@ def main():
             print(f"Starting {cam_type} camera ({cam_width}x{cam_height})...")
             camera = create_camera(cam_panel_config)
             camera.start()
-            print("  Camera started.")
+            # Use actual resolution (camera may not support requested size)
+            cam_width, cam_height = camera.width, camera.height
+            print(f"  Camera started ({cam_width}x{cam_height}).")
         except Exception as e:
             print(f"  WARNING: Camera not available: {e}")
             print("  Running without camera. Use --no-camera to suppress this.")

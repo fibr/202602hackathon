@@ -439,7 +439,8 @@ def run_verify(width, height, dry_run):
     print(f"Starting {cam_type} camera ({width}x{height})...")
     camera = create_camera(verify_config)
     camera.start()
-    print("Camera started. Looking for checkerboard (press 'c' to capture, 'q' to abort)...")
+    width, height = camera.width, camera.height
+    print(f"Camera started ({width}x{height}). Looking for checkerboard (press 'c' to capture, 'q' to abort)...")
 
     corners_2d = None
     T_board_in_cam = None
@@ -638,7 +639,9 @@ def main():
     print(f"Starting {cam_type} camera ({width}x{height})...")
     camera = create_camera(main_config)
     camera.start()
-    print("Camera started.\n")
+    # Use actual resolution (camera may not support requested size)
+    width, height = camera.width, camera.height
+    print(f"Camera started ({width}x{height}).\n")
 
     # GUI panel (always shown; robot=None disables arm controls)
     panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
