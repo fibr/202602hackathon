@@ -29,8 +29,8 @@ _URDF_PATH = os.path.join(
 
 # Per-joint sign correction: +1 = motor and URDF agree, -1 = inverted.
 # Order: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
-# These may need empirical tuning — start with all +1.
-JOINT_SIGNS = np.array([+1, +1, +1, +1, +1], dtype=float)
+# Empirical: verify with scripts/test_arm101_fk.py
+JOINT_SIGNS = np.array([+1, -1, +1, +1, -1], dtype=float)
 
 # Per-joint offset in degrees (motor_deg * sign + offset = urdf_deg)
 JOINT_OFFSETS_DEG = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
