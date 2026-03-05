@@ -17,6 +17,7 @@ Resolution: 360° / 4096 ≈ 0.088° per step.
 """
 
 import time
+import numpy as np
 from typing import Optional
 
 # Try importing scservo_sdk; provide helpful error if missing
@@ -25,6 +26,18 @@ try:
     HAS_SCSERVO = True
 except ImportError:
     HAS_SCSERVO = False
+
+# Lazy-loaded FK solver (avoid import cost if not needed)
+_fk_solver = None
+
+
+def _get_fk_solver():
+    """Get or create the shared Arm101IKSolver instance."""
+    global _fk_solver
+    if _fk_solver is None:
+        from kinematics.arm101_ik_solver import Arm101IKSolver
+        _fk_solver = Arm101IKSolver()
+    return _fk_solver
 
 # Motor configuration
 MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
@@ -291,8 +304,21 @@ class LeRobotArm101:
     # --- Duck-typed interface for RobotControlPanel ---
 
     def get_pose(self) -> Optional[list]:
-        """Get Cartesian pose. Returns None (no FK available for arm101)."""
-        return None
+        """Get Cartesian TCP pose [x,y,z,rx,ry,rz] in mm/deg via FK.
+
+        Returns:
+            List of 6 floats [x,y,z,rx,ry,rz], or None on error.
+        """
+        angles = self.get_angles()
+        if angles is None:
+            return None
+        try:
+            solver = _get_fk_solver()
+            pos_mm, rpy_deg = solver.forward_kin(np.array(angles[:5]))
+            return [pos_mm[0], pos_mm[1], pos_mm[2],
+                    rpy_deg[0], rpy_deg[1], rpy_deg[2]]
+        except Exception:
+            return None
 
     def get_angles(self) -> Optional[list]:
         """Get joint angles in degrees. Compatible with RobotControlPanel.
