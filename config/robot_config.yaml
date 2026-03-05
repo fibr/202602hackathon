@@ -30,3 +30,14 @@ planner:
   safe_z: 300.0               # Safe height above table (mm)
   approach_offset_z: 100.0    # Height above rod for pre-grasp (mm)
   place_position: [300.0, 0.0, 50.0]  # Where to place the standing rod (mm)
+
+# LeRobot SO-ARM101 follower configuration
+arm101:
+  port: ""                    # Serial port (auto-detect if empty, e.g. /dev/ttyACM0)
+  baudrate: 1000000           # Feetech STS3215 default baudrate
+  motor_ids: [1, 2, 3, 4, 5, 6]
+  speed: 200                  # Default servo speed (0-4095)
+  jog_step_deg: 5.0           # Joint jog step size in degrees
+  gripper_open_pos: 1800      # Gripper open raw position
+  gripper_close_pos: 2600     # Gripper close raw position
+  home_angles: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Home position in degrees (0° = center)

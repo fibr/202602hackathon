@@ -7,10 +7,14 @@ control_panel.py, and collect_dataset.py.
 The panel is drawn on the right side of the frame. Mouse events in the panel
 area are routed to handle_mouse(); events outside are left to the app.
 
-XY pad and Z buttons use Cartesian MovL steps (20mm XY, 10mm Z).
-Joint jog (1-6 keys) is available via keyboard.
+Supports two robot types via duck-typing:
+  - Dobot Nova5: send(cmd), get_pose(), get_angles()
+    XY pad = Cartesian MovL, Z = Cartesian Z, jog = continuous MoveJog
+  - LeRobot arm101: robot_type='arm101', get_angles(), move_joints(),
+    jog_joint(), gripper_open/close(), enable/disable_torque()
+    XY pad = J1/J2 jog, Z = J3 jog, jog = step-based
 
-Robot connection is duck-typed: needs send(), get_pose(), get_angles() methods.
+Robot connection is duck-typed. Arm101 detected via robot.robot_type == 'arm101'.
 """
 
 import time
@@ -27,11 +31,16 @@ BTN_H = 36              # button height
 BTN_GAP = 6             # gap between buttons
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# Cartesian step sizes
+# Cartesian step sizes (Dobot)
 CART_STEP_XY_MIN = 5.0    # mm at edge of deadzone
 CART_STEP_XY_MAX = 100.0  # mm at edge of pad
 CART_STEP_Z = 10.0        # mm per Z button click
 CART_COOLDOWN = 0.3       # seconds between commands (prevent queue buildup)
+
+# Joint jog step sizes (arm101)
+JOG_STEP_MIN = 1.0       # degrees at edge of deadzone
+JOG_STEP_MAX = 30.0      # degrees at edge of pad
+JOG_STEP_Z = 5.0         # degrees per Z button click (J3)
 
 # Colors
 COL_PAD_BG = (50, 50, 50)
@@ -46,7 +55,7 @@ COL_VALUE = (255, 200, 0)
 COL_GREEN = (0, 200, 0)
 COL_RED = (0, 0, 200)
 
-# Mode descriptions
+# Mode descriptions (Dobot)
 MODE_NAMES = {
     1: 'init', 2: 'brake', 3: 'init', 4: 'disabled', 5: 'enabled',
     6: 'backdrive', 7: 'running', 9: 'error', 10: 'pause', 11: 'jog',
@@ -57,7 +66,8 @@ class RobotControlPanel:
     """Interactive OpenCV GUI panel for robot arm control.
 
     Args:
-        robot: Object with send(cmd), get_pose(), get_angles() methods.
+        robot: Object with send(cmd), get_pose(), get_angles() methods (Dobot),
+               or robot_type='arm101' with native arm101 interface.
         panel_x: X offset where the panel starts (= camera frame width).
         panel_height: Total panel height (= canvas height).
     """
@@ -67,6 +77,9 @@ class RobotControlPanel:
         self.panel_x = panel_x
         self.panel_width = PANEL_WIDTH
         self.panel_height = panel_height
+
+        # Detect robot type
+        self._arm101 = getattr(robot, 'robot_type', None) == 'arm101'
 
         # State
         self.speed = 30
@@ -81,7 +94,9 @@ class RobotControlPanel:
         self._cached_angles = None
         self._cached_mode = None
         self._last_query = 0.0
-        self._query_interval = 0.5  # seconds
+        self._query_interval = 0.5  # seconds (arm101 can be faster)
+        if self._arm101:
+            self._query_interval = 0.1
 
         self.status_msg = ""
 
@@ -189,11 +204,17 @@ class RobotControlPanel:
         cv2.line(canvas, (cx, pr[1]), (cx, pr[3]), COL_PAD_CROSS, 1)
         # Deadzone circle
         cv2.circle(canvas, (cx, cy), PAD_DEADZONE, COL_PAD_CROSS, 1)
-        # Axis labels
-        cv2.putText(canvas, "X+", (pr[2] + px - 22, cy + 4), FONT, 0.35, COL_LABEL, 1)
-        cv2.putText(canvas, "X-", (pr[0] + px + 4, cy + 4), FONT, 0.35, COL_LABEL, 1)
-        cv2.putText(canvas, "Y+", (cx - 8, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
-        cv2.putText(canvas, "Y-", (cx - 8, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
+        # Axis labels — different for arm101 (J1/J2) vs Dobot (X/Y)
+        if self._arm101:
+            cv2.putText(canvas, "J1+", (pr[2] + px - 26, cy + 4), FONT, 0.35, COL_LABEL, 1)
+            cv2.putText(canvas, "J1-", (pr[0] + px + 2, cy + 4), FONT, 0.35, COL_LABEL, 1)
+            cv2.putText(canvas, "J2+", (cx - 10, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
+            cv2.putText(canvas, "J2-", (cx - 10, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
+        else:
+            cv2.putText(canvas, "X+", (pr[2] + px - 22, cy + 4), FONT, 0.35, COL_LABEL, 1)
+            cv2.putText(canvas, "X-", (pr[0] + px + 4, cy + 4), FONT, 0.35, COL_LABEL, 1)
+            cv2.putText(canvas, "Y+", (cx - 8, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
+            cv2.putText(canvas, "Y-", (cx - 8, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
 
         # Current drag indicator with step size
         if self._mouse_down and self._mouse_pos:
@@ -207,13 +228,22 @@ class RobotControlPanel:
                 if dist >= PAD_DEADZONE:
                     max_dist = PAD_SIZE / 2.0
                     t = min((dist - PAD_DEADZONE) / (max_dist - PAD_DEADZONE), 1.0)
-                    step = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
-                    cv2.putText(canvas, f"{step:.0f}mm",
-                                (mx + px + 8, my - 8), FONT, 0.35, COL_PAD_DOT, 1)
+                    if self._arm101:
+                        step = JOG_STEP_MIN + t * (JOG_STEP_MAX - JOG_STEP_MIN)
+                        cv2.putText(canvas, f"{step:.0f}deg",
+                                    (mx + px + 8, my - 8), FONT, 0.35, COL_PAD_DOT, 1)
+                    else:
+                        step = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
+                        cv2.putText(canvas, f"{step:.0f}mm",
+                                    (mx + px + 8, my - 8), FONT, 0.35, COL_PAD_DOT, 1)
 
-        # --- Z buttons ---
-        self._draw_btn(canvas, self.z_up_rect, "Z +")
-        self._draw_btn(canvas, self.z_dn_rect, "Z -")
+        # --- Z buttons --- (J3 for arm101)
+        if self._arm101:
+            self._draw_btn(canvas, self.z_up_rect, "J3 +")
+            self._draw_btn(canvas, self.z_dn_rect, "J3 -")
+        else:
+            self._draw_btn(canvas, self.z_up_rect, "Z +")
+            self._draw_btn(canvas, self.z_dn_rect, "Z -")
 
         # --- Gripper ---
         self._draw_btn(canvas, self.grip_open_rect, "Open",
@@ -223,12 +253,20 @@ class RobotControlPanel:
 
         # --- Speed ---
         self._draw_btn(canvas, self.spd_dn_rect, "<<")
-        self._draw_btn(canvas, self.spd_label_rect, f"{self.speed}%")
+        if self._arm101:
+            self._draw_btn(canvas, self.spd_label_rect, f"spd {self.speed}")
+        else:
+            self._draw_btn(canvas, self.spd_label_rect, f"{self.speed}%")
         self._draw_btn(canvas, self.spd_up_rect, ">>")
 
         # --- Enable / Home ---
-        self._draw_btn(canvas, self.enable_rect, "Enable",
-                       color=(0, 100, 0))
+        if self._arm101:
+            label = "Torque" if not getattr(self.robot, '_enabled', False) else "Relax"
+            color = (0, 100, 0) if not getattr(self.robot, '_enabled', False) else (0, 0, 160)
+            self._draw_btn(canvas, self.enable_rect, label, color=color)
+        else:
+            self._draw_btn(canvas, self.enable_rect, "Enable",
+                           color=(0, 100, 0))
         self._draw_btn(canvas, self.home_rect, "Home",
                        color=(100, 80, 0))
 
@@ -256,10 +294,12 @@ class RobotControlPanel:
 
         if self.robot is None:
             put("NO ROBOT", COL_RED)
-        elif self._cached_pose is not None:
+        elif not self._arm101 and self._cached_pose is not None:
             p = self._cached_pose
             put(f"TCP: {p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}", COL_VALUE)
             put(f"     {p[3]:.1f}, {p[4]:.1f}, {p[5]:.1f}", COL_VALUE)
+        elif self._arm101:
+            put("arm101 (no FK)", COL_LABEL)
         else:
             put("TCP: ---", COL_LABEL)
             y += line_h
@@ -301,10 +341,13 @@ class RobotControlPanel:
         try:
             self._cached_pose = self.robot.get_pose()
             self._cached_angles = self.robot.get_angles()
-            resp = self.robot.send('RobotMode()')
-            if '{' in resp:
-                val = resp.split('{')[1].split('}')[0]
-                self._cached_mode = int(float(val))
+            if self._arm101:
+                self._cached_mode = self.robot.get_mode()
+            else:
+                resp = self.robot.send('RobotMode()')
+                if '{' in resp:
+                    val = resp.split('{')[1].split('}')[0]
+                    self._cached_mode = int(float(val))
         except Exception:
             pass
 
@@ -343,17 +386,23 @@ class RobotControlPanel:
 
     def _on_press(self, x, y):
         """Handle mouse button press in panel coords."""
-        # XY Pad — Cartesian step on click
+        # XY Pad — Cartesian step (Dobot) or J1/J2 jog (arm101)
         if self._in_rect(x, y, self.pad_rect):
             self._do_xy_step(x, y)
             return
 
-        # Z buttons — Cartesian step
+        # Z buttons — Cartesian step (Dobot) or J3 jog (arm101)
         if self._in_rect(x, y, self.z_up_rect):
-            self._do_cart_step(2, +1, CART_STEP_Z)
+            if self._arm101:
+                self._do_joint_step(2, +1, JOG_STEP_Z)  # J3+
+            else:
+                self._do_cart_step(2, +1, CART_STEP_Z)
             return
         if self._in_rect(x, y, self.z_dn_rect):
-            self._do_cart_step(2, -1, CART_STEP_Z)
+            if self._arm101:
+                self._do_joint_step(2, -1, JOG_STEP_Z)  # J3-
+            else:
+                self._do_cart_step(2, -1, CART_STEP_Z)
             return
 
         # Gripper
@@ -401,8 +450,27 @@ class RobotControlPanel:
         if self.jogging:
             self._stop_jog()
 
+    # --- arm101: Joint step (for XY pad and Z buttons) ---
+
+    def _do_joint_step(self, joint_idx, direction, step_deg):
+        """Step a single joint by step_deg (arm101 only)."""
+        if self.robot is None:
+            return
+        now = time.time()
+        if now - self._last_cmd_time < CART_COOLDOWN:
+            return
+        self._last_cmd_time = now
+
+        try:
+            self.robot.jog_joint(joint_idx, direction, step_deg)
+            jname = f"J{joint_idx + 1}"
+            dir_ch = '+' if direction > 0 else '-'
+            self.status_msg = f"{jname}{dir_ch} {step_deg:.0f}deg"
+        except Exception as e:
+            self.status_msg = f"Jog error: {e}"
+
     def _do_xy_step(self, x, y):
-        """Do a Cartesian XY step based on click position in the pad."""
+        """Do a Cartesian XY step (Dobot) or J1/J2 jog (arm101)."""
         if self.robot is None:
             return
         cx, cy = self.pad_center
@@ -416,21 +484,31 @@ class RobotControlPanel:
         # Scale step by distance from center
         max_dist = PAD_SIZE / 2.0
         t = min((dist - PAD_DEADZONE) / (max_dist - PAD_DEADZONE), 1.0)
-        step_mm = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
 
-        # Determine dominant axis: X or Y
-        # Pad layout: right = X+, left = X-, up = Y+, down = Y-
-        if abs(dx) >= abs(dy):
-            axis_idx = 0  # X
-            sign = +1 if dx > 0 else -1
+        if self._arm101:
+            step_deg = JOG_STEP_MIN + t * (JOG_STEP_MAX - JOG_STEP_MIN)
+            # Determine dominant axis: horizontal = J1, vertical = J2
+            if abs(dx) >= abs(dy):
+                joint_idx = 0  # J1
+                direction = +1 if dx > 0 else -1
+            else:
+                joint_idx = 1  # J2
+                direction = +1 if dy < 0 else -1  # up on screen = J2+
+            self._do_joint_step(joint_idx, direction, step_deg)
         else:
-            axis_idx = 1  # Y
-            sign = +1 if dy < 0 else -1  # up on screen = Y+
-
-        self._do_cart_step(axis_idx, sign, step_mm)
+            step_mm = CART_STEP_XY_MIN + t * (CART_STEP_XY_MAX - CART_STEP_XY_MIN)
+            # Determine dominant axis: X or Y
+            # Pad layout: right = X+, left = X-, up = Y+, down = Y-
+            if abs(dx) >= abs(dy):
+                axis_idx = 0  # X
+                sign = +1 if dx > 0 else -1
+            else:
+                axis_idx = 1  # Y
+                sign = +1 if dy < 0 else -1  # up on screen = Y+
+            self._do_cart_step(axis_idx, sign, step_mm)
 
     def _do_cart_step(self, axis_idx, sign, step_mm):
-        """Fire-and-forget Cartesian step: read pose, offset, send MovL."""
+        """Fire-and-forget Cartesian step: read pose, offset, send MovL (Dobot)."""
         if self.robot is None:
             return
         now = time.time()
@@ -465,7 +543,9 @@ class RobotControlPanel:
         """Stop any active joint jog."""
         if self.robot is None:
             return
-        self.robot.send('MoveJog()')
+        if not self._arm101:
+            self.robot.send('MoveJog()')
+        # arm101 jogs are step-based (fire-and-forget), no stop needed
         self.jogging = False
         self.jog_axis = None
         self.status_msg = "Stopped"
@@ -473,33 +553,69 @@ class RobotControlPanel:
     def _gripper_open(self):
         if self.robot is None:
             return
-        self.robot.send('ToolDOInstant(1,0)')
-        self.robot.send('ToolDOInstant(2,1)')
+        if self._arm101:
+            try:
+                self.robot.gripper_open()
+            except Exception as e:
+                self.status_msg = f"Gripper error: {e}"
+                return
+        else:
+            self.robot.send('ToolDOInstant(1,0)')
+            self.robot.send('ToolDOInstant(2,1)')
         self.status_msg = "Gripper OPEN"
 
     def _gripper_close(self):
         if self.robot is None:
             return
-        self.robot.send('ToolDOInstant(2,0)')
-        self.robot.send('ToolDOInstant(1,1)')
+        if self._arm101:
+            try:
+                self.robot.gripper_close()
+            except Exception as e:
+                self.status_msg = f"Gripper error: {e}"
+                return
+        else:
+            self.robot.send('ToolDOInstant(2,0)')
+            self.robot.send('ToolDOInstant(1,1)')
         self.status_msg = "Gripper CLOSED"
 
     def _speed_change(self, delta):
-        self.speed = max(1, min(100, self.speed + delta))
-        if self.robot is not None:
-            self.robot.send(f'SpeedFactor({self.speed})')
-        self.status_msg = f"Speed: {self.speed}%"
+        if self._arm101:
+            # arm101 speed: 0-4095, step by 50
+            self.speed = max(10, min(1000, self.speed + delta * 5))
+            if self.robot is not None:
+                self.robot.speed = self.speed
+        else:
+            self.speed = max(1, min(100, self.speed + delta))
+            if self.robot is not None:
+                self.robot.send(f'SpeedFactor({self.speed})')
+        self.status_msg = f"Speed: {self.speed}"
 
     def _do_enable(self):
         if self.robot is None:
             return
-        self.status_msg = "Enabling..."
-        self.robot.send('DisableRobot()')
-        time.sleep(1)
-        self.robot.send('ClearError()')
-        self.robot.send('EnableRobot()')
-        time.sleep(1)
-        self.status_msg = "Robot enabled"
+        if self._arm101:
+            if getattr(self.robot, '_enabled', False):
+                self.status_msg = "Disabling torque..."
+                try:
+                    self.robot.disable_torque()
+                    self.status_msg = "Torque OFF (freedrive)"
+                except Exception as e:
+                    self.status_msg = f"Disable error: {e}"
+            else:
+                self.status_msg = "Enabling torque..."
+                try:
+                    self.robot.enable_torque()
+                    self.status_msg = "Torque ON"
+                except Exception as e:
+                    self.status_msg = f"Enable error: {e}"
+        else:
+            self.status_msg = "Enabling..."
+            self.robot.send('DisableRobot()')
+            time.sleep(1)
+            self.robot.send('ClearError()')
+            self.robot.send('EnableRobot()')
+            time.sleep(1)
+            self.status_msg = "Robot enabled"
 
     def _do_j1_rotate(self, step_deg=30.0):
         """Rotate J1 by step_deg, keeping all other joints the same."""
@@ -513,30 +629,44 @@ class RobotControlPanel:
         target = list(angles)
         target[0] += step_deg
 
-        jstr = ','.join(f'{v:.2f}' for v in target)
-        cmd = f'MovJ(joint={{{jstr}}})'
-        self.status_msg = f"J1 -> {target[0]:.0f} deg..."
-        resp = self.robot.send(cmd)
-        code = resp.split(',')[0] if resp else '-1'
-        if code != '0':
-            self.status_msg = f"MovJ error: {resp}"
-            return
-
-        # Wait for motion to complete (poll joint stability)
-        prev = self.robot.get_angles()
-        for _ in range(150):  # up to 30s
-            time.sleep(0.2)
-            cur = self.robot.get_angles()
-            if prev and cur and len(prev) >= 6 and len(cur) >= 6:
-                if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
-                    break
-            prev = cur
-
-        final = self.robot.get_angles()
-        if final:
-            self.status_msg = f"J1 = {final[0]:.1f} deg — click TCP tip"
+        if self._arm101:
+            self.status_msg = f"J1 -> {target[0]:.0f} deg..."
+            try:
+                self.robot.move_joints(target)
+                # Brief wait for servo to reach position
+                time.sleep(0.5)
+                final = self.robot.get_angles()
+                if final:
+                    self.status_msg = f"J1 = {final[0]:.1f} deg"
+                else:
+                    self.status_msg = "J1 rotate done"
+            except Exception as e:
+                self.status_msg = f"J1 error: {e}"
         else:
-            self.status_msg = "J1 rotate done"
+            jstr = ','.join(f'{v:.2f}' for v in target)
+            cmd = f'MovJ(joint={{{jstr}}})'
+            self.status_msg = f"J1 -> {target[0]:.0f} deg..."
+            resp = self.robot.send(cmd)
+            code = resp.split(',')[0] if resp else '-1'
+            if code != '0':
+                self.status_msg = f"MovJ error: {resp}"
+                return
+
+            # Wait for motion to complete (poll joint stability)
+            prev = self.robot.get_angles()
+            for _ in range(150):  # up to 30s
+                time.sleep(0.2)
+                cur = self.robot.get_angles()
+                if prev and cur and len(prev) >= 6 and len(cur) >= 6:
+                    if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
+                        break
+                prev = cur
+
+            final = self.robot.get_angles()
+            if final:
+                self.status_msg = f"J1 = {final[0]:.1f} deg — click TCP tip"
+            else:
+                self.status_msg = "J1 rotate done"
 
     def _do_home(self):
         if self.robot is None:
@@ -544,24 +674,34 @@ class RobotControlPanel:
         if self.jogging:
             self._stop_jog()
         self.status_msg = "Homing..."
-        self.robot.send('SpeedFactor(10)')
-        resp = self.robot.send('MovJ(joint={43.5,-13.9,-85.4,196.3,-90.0,43.5})')
-        code = resp.split(',')[0] if resp else '-1'
-        if code != '0':
-            self.status_msg = f"Home failed: {resp}"
+
+        if self._arm101:
+            try:
+                home = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # center position
+                self.robot.move_joints(home, speed=100)
+                time.sleep(1.0)
+                self.status_msg = "Home done"
+            except Exception as e:
+                self.status_msg = f"Home error: {e}"
+        else:
+            self.robot.send('SpeedFactor(10)')
+            resp = self.robot.send('MovJ(joint={43.5,-13.9,-85.4,196.3,-90.0,43.5})')
+            code = resp.split(',')[0] if resp else '-1'
+            if code != '0':
+                self.status_msg = f"Home failed: {resp}"
+                self.robot.send(f'SpeedFactor({self.speed})')
+                return
+            # Wait for motion (poll stability)
+            prev = self.robot.get_angles()
+            for _ in range(150):
+                time.sleep(0.2)
+                cur = self.robot.get_angles()
+                if prev and cur and len(prev) >= 6 and len(cur) >= 6:
+                    if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
+                        break
+                prev = cur
             self.robot.send(f'SpeedFactor({self.speed})')
-            return
-        # Wait for motion (poll stability)
-        prev = self.robot.get_angles()
-        for _ in range(150):
-            time.sleep(0.2)
-            cur = self.robot.get_angles()
-            if prev and cur and len(prev) >= 6 and len(cur) >= 6:
-                if max(abs(cur[i] - prev[i]) for i in range(6)) < 0.05:
-                    break
-            prev = cur
-        self.robot.send(f'SpeedFactor({self.speed})')
-        self.status_msg = "Home done"
+            self.status_msg = "Home done"
 
     def handle_key(self, key):
         """Handle keyboard shortcuts for arm control.
@@ -579,10 +719,20 @@ class RobotControlPanel:
             if self.robot is None:
                 return True
             axis = all_jog[key]
-            self.robot.send(f'MoveJog({axis})')
-            self.jogging = True
-            self.jog_axis = axis
-            self.status_msg = f"JOG {axis}"
+            if self._arm101:
+                # Parse J<n><+/-> into joint_idx and direction
+                joint_idx = int(axis[1]) - 1  # 0-based
+                direction = +1 if axis[2] == '+' else -1
+                try:
+                    self.robot.jog_joint(joint_idx, direction)
+                    self.status_msg = f"JOG {axis}"
+                except Exception as e:
+                    self.status_msg = f"Jog error: {e}"
+            else:
+                self.robot.send(f'MoveJog({axis})')
+                self.jogging = True
+                self.jog_axis = axis
+                self.status_msg = f"JOG {axis}"
             return True
 
         if key == ord(' '):

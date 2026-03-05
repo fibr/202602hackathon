@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Interactive control panel for Dobot Nova5 with OpenCV GUI.
+"""Interactive control panel for robot arms with OpenCV GUI.
+
+Supports:
+  - Dobot Nova5 (default): TCP/IP dashboard protocol
+  - LeRobot arm101 (--arm101): Feetech STS3215 servos over serial
 
 Camera live view on the left, clickable control panel on the right.
 GUI controls: XY jog pad, Z up/down, gripper, speed, enable/home.
@@ -17,7 +21,6 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from config_loader import load_config
-from vision import RealSenseCamera
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 
 
@@ -84,15 +87,11 @@ class FastRobot:
         self.sock.close()
 
 
-def main():
-    config = load_config()
+def connect_dobot(config):
+    """Connect to Dobot Nova5 and enable."""
     rc = config.get('robot', {})
     ip = rc.get('ip', '192.168.5.1')
     port = rc.get('dashboard_port', 29999)
-
-    # Camera resolution
-    sd = '--sd' in sys.argv
-    cam_width, cam_height = (640, 480) if sd else (1280, 720)
 
     print(f"=== Dobot Nova5 Control Panel ===")
     print(f"Connecting to {ip}:{port}...")
@@ -121,26 +120,97 @@ def main():
 
     speed = 30
     r.send(f'SpeedFactor({speed})')
+    return r, speed
 
-    # Start camera
-    print(f"Starting camera ({cam_width}x{cam_height})...")
-    camera = RealSenseCamera(width=cam_width, height=cam_height, fps=15)
-    camera.start()
-    print("  Camera started.")
+
+def connect_arm101(config):
+    """Connect to LeRobot arm101 follower."""
+    from robot.lerobot_arm101 import LeRobotArm101
+
+    ac = config.get('arm101', {})
+    port = ac.get('port', '')
+    baudrate = ac.get('baudrate', 1_000_000)
+    motor_ids = ac.get('motor_ids', [1, 2, 3, 4, 5, 6])
+    speed = ac.get('speed', 200)
+
+    print(f"=== LeRobot arm101 Control Panel ===")
+
+    if not port:
+        print("Auto-detecting serial port...")
+        try:
+            port = LeRobotArm101.find_port()
+            print(f"  Found: {port}")
+        except FileNotFoundError as e:
+            print(f"  ERROR: {e}")
+            sys.exit(1)
+
+    print(f"Connecting to {port} @ {baudrate}...")
+    try:
+        arm = LeRobotArm101(port=port, baudrate=baudrate,
+                            motor_ids=motor_ids, speed=speed)
+        arm.connect()
+    except Exception as e:
+        print(f"  ERROR: Cannot connect to arm101: {e}")
+        sys.exit(1)
+
+    # Enable torque
+    print("  Enabling torque...")
+    arm.enable_torque()
+    print("  Ready.")
+    return arm, speed
+
+
+def main():
+    config = load_config()
+    use_arm101 = '--arm101' in sys.argv
+
+    # Camera resolution
+    sd = '--sd' in sys.argv
+    no_camera = '--no-camera' in sys.argv
+    cam_width, cam_height = (640, 480) if sd else (1280, 720)
+
+    # Connect robot
+    if use_arm101:
+        robot, speed = connect_arm101(config)
+    else:
+        robot, speed = connect_dobot(config)
+
+    # Start camera (optional)
+    camera = None
+    if not no_camera:
+        try:
+            from vision import RealSenseCamera
+            print(f"Starting camera ({cam_width}x{cam_height})...")
+            camera = RealSenseCamera(width=cam_width, height=cam_height, fps=15)
+            camera.start()
+            print("  Camera started.")
+        except Exception as e:
+            print(f"  WARNING: Camera not available: {e}")
+            print("  Running without camera. Use --no-camera to suppress this.")
+            no_camera = True
+
+    if no_camera:
+        # Create a blank frame instead
+        cam_width, cam_height = 640, 480
 
     # Position log file
     log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
     os.makedirs(log_dir, exist_ok=True)
     pos_log_path = os.path.join(log_dir, f'positions_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
     with open(pos_log_path, 'w') as f:
-        f.write('timestamp,x,y,z,rx,ry,rz,j1,j2,j3,j4,j5,j6,label\n')
+        f.write('timestamp,j1,j2,j3,j4,j5,j6')
+        if not use_arm101:
+            f.write(',x,y,z,rx,ry,rz')
+        f.write(',label\n')
     pos_log_count = 0
 
     # GUI panel
-    panel = RobotControlPanel(r, panel_x=cam_width, panel_height=cam_height)
+    panel = RobotControlPanel(robot, panel_x=cam_width, panel_height=cam_height)
     panel.speed = speed
 
+    robot_name = "arm101" if use_arm101 else "Dobot Nova5"
     print()
+    print(f"Robot: {robot_name}")
     print("Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed")
     print("          v enable, l log position, p pose, Esc quit")
     print(f"Position log: {os.path.relpath(pos_log_path)}")
@@ -154,16 +224,24 @@ def main():
 
     try:
         while True:
-            color_image, depth_image, depth_frame = camera.get_frames()
-            if color_image is None:
-                continue
+            # Get camera frame or blank
+            if camera is not None:
+                color_image, depth_image, depth_frame = camera.get_frames()
+                if color_image is None:
+                    continue
+            else:
+                color_image = np.zeros((cam_height, cam_width, 3), dtype=np.uint8)
+                cv2.putText(color_image, "No Camera", (cam_width // 2 - 80, cam_height // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 100, 100), 2)
 
             # Create canvas: camera on left, panel on right
             canvas = np.zeros((cam_height, cam_width + PANEL_WIDTH, 3), dtype=np.uint8)
             canvas[0:cam_height, 0:cam_width] = color_image
 
             # Status overlay on camera
-            bar_text = f"Spd:{panel.speed}%"
+            bar_text = f"Spd:{panel.speed}"
+            if not use_arm101:
+                bar_text += "%"
             if panel.jogging:
                 bar_text += f" | JOG {panel.jog_axis}"
             cv2.putText(canvas, bar_text, (10, 25),
@@ -189,35 +267,46 @@ def main():
 
             # Log position
             elif key == ord('l'):
-                pose = r.get_pose()
-                angles = r.get_angles()
-                if pose and angles:
+                angles = robot.get_angles()
+                if angles:
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    row = ','.join(f'{v:.3f}' for v in pose + angles)
+                    row = ','.join(f'{v:.3f}' for v in angles)
+                    if not use_arm101:
+                        pose = robot.get_pose()
+                        if pose:
+                            row += ',' + ','.join(f'{v:.3f}' for v in pose)
+                        else:
+                            row += ',,,,,,'
                     with open(pos_log_path, 'a') as f:
                         f.write(f'{ts},{row},\n')
                     pos_log_count += 1
-                    pv = ','.join(f'{v:.1f}' for v in pose)
-                    panel.status_msg = f"Logged #{pos_log_count}: [{pv}]"
+                    av = ','.join(f'{v:.1f}' for v in angles)
+                    panel.status_msg = f"Logged #{pos_log_count}: [{av}]"
                     print(f"  {panel.status_msg}")
                 else:
-                    panel.status_msg = "Log failed: can't read pose"
+                    panel.status_msg = "Log failed: can't read angles"
 
             # Print pose
             elif key == ord('p'):
-                pose = r.get_pose()
-                angles = r.get_angles()
-                if pose and angles:
-                    print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
+                angles = robot.get_angles()
+                if angles:
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
+                    if not use_arm101:
+                        pose = robot.get_pose()
+                        if pose:
+                            print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
                     panel.status_msg = "Pose printed"
 
     except KeyboardInterrupt:
         pass
     finally:
-        r.send('MoveJog()')  # stop any jog
-        camera.stop()
-        r.close()
+        if use_arm101:
+            robot.close()
+        else:
+            robot.send('MoveJog()')  # stop any jog
+            robot.close()
+        if camera is not None:
+            camera.stop()
         cv2.destroyAllWindows()
         if pos_log_count:
             print(f"  Saved {pos_log_count} positions to {os.path.relpath(pos_log_path)}")
