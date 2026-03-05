@@ -527,9 +527,9 @@ class RobotControlPanel:
         target_pos = pos_mm.copy()
         target_pos[axis_idx] += sign * step_mm
 
-        # Solve IK
-        result = self._ik_solver.solve_ik(
-            target_pos, rpy_deg, seed_motor_deg=motor_deg)
+        # Solve position-only IK (5-DOF arm, orientation floats)
+        result = self._ik_solver.solve_ik_position(
+            target_pos, seed_motor_deg=motor_deg)
         if result is None:
             self.status_msg = f"IK failed for {axis_name}{dir_ch}"
             return

@@ -185,6 +185,60 @@ class Arm101IKSolver:
 
         return None
 
+    def solve_ik_position(self, target_pos_mm: np.ndarray,
+                          seed_motor_deg: np.ndarray = None,
+                          max_iter: int = 200, eps: float = 1e-3,
+                          dt: float = 0.2, damp: float = 1e-4) -> np.ndarray | None:
+        """Position-only IK: move TCP to target position, let orientation float.
+
+        Better suited for 5-DOF arms where full 6-DOF pose is over-constrained.
+
+        Args:
+            target_pos_mm: [x, y, z] in mm.
+            seed_motor_deg: 5 motor angles in degrees as starting point.
+            max_iter: Maximum iterations.
+            eps: Position convergence threshold in meters.
+            dt: Step size.
+            damp: Damping factor.
+
+        Returns:
+            5 motor angles in degrees, or None if no solution.
+        """
+        target_pos = target_pos_mm / 1000.0
+
+        if seed_motor_deg is not None:
+            q = self._motor_to_urdf(seed_motor_deg)
+        else:
+            q = pin.neutral(self.model)
+
+        active = np.array([True] * N_IK_JOINTS + [False], dtype=bool)
+
+        for i in range(max_iter):
+            pin.forwardKinematics(self.model, self.data, q)
+            pin.updateFramePlacements(self.model, self.data)
+
+            current_pos = self.data.oMf[self.ee_frame_id].translation
+            err = target_pos - current_pos  # 3D position error
+
+            if np.linalg.norm(err) < eps:
+                return self._urdf_to_motor(q)
+
+            # Position-only Jacobian (top 3 rows of full 6x6 Jacobian)
+            J_full = pin.computeFrameJacobian(
+                self.model, self.data, q, self.ee_frame_id,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+            J_pos = J_full[:3, :][:, active]  # 3 x n_active
+
+            JtJ = J_pos.T @ J_pos + damp * np.eye(J_pos.shape[1])
+            dq_active = np.linalg.solve(JtJ, J_pos.T @ err)
+
+            dq = np.zeros(self.model.nv)
+            dq[active] = dq_active
+            q = pin.integrate(self.model, q, dt * dq)
+            q = np.clip(q, self.q_min, self.q_max)
+
+        return None
+
     def get_joint_info(self) -> list[dict]:
         """Return joint name, limits (deg), and current sign/offset config."""
         info = []
