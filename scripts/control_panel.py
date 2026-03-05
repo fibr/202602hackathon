@@ -8,7 +8,13 @@ Supports:
 Camera live view on the left, clickable control panel on the right.
 GUI controls: XY jog pad, Z up/down, gripper, speed, enable/home.
 Keyboard shortcuts: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed,
-    v enable, l log position, p pose, Esc quit.
+    v enable/torque, s safe mode (arm101), l log position, p pose, Esc quit.
+
+Flags:
+    --arm101     Use LeRobot arm101 instead of Dobot Nova5
+    --safe       Start in safe mode (reduced torque/speed, arm101 only)
+    --no-camera  Run without camera
+    --sd         Use 640x480 instead of 1280x720
 """
 
 import sys
@@ -123,8 +129,13 @@ def connect_dobot(config):
     return r, speed
 
 
-def connect_arm101(config):
-    """Connect to LeRobot arm101 follower."""
+def connect_arm101(config, safe_mode=False):
+    """Connect to LeRobot arm101 follower.
+
+    Args:
+        config: Loaded robot config dict.
+        safe_mode: If True, use reduced torque and speed for safety.
+    """
     from robot.lerobot_arm101 import LeRobotArm101
 
     ac = config.get('arm101', {})
@@ -134,6 +145,8 @@ def connect_arm101(config):
     speed = ac.get('speed', 200)
 
     print(f"=== LeRobot arm101 Control Panel ===")
+    if safe_mode:
+        print("  ** SAFE MODE: reduced torque and speed **")
 
     if not port:
         print("Auto-detecting serial port...")
@@ -147,7 +160,8 @@ def connect_arm101(config):
     print(f"Connecting to {port} @ {baudrate}...")
     try:
         arm = LeRobotArm101(port=port, baudrate=baudrate,
-                            motor_ids=motor_ids, speed=speed)
+                            motor_ids=motor_ids, speed=speed,
+                            safe_mode=safe_mode)
         arm.connect()
     except Exception as e:
         print(f"  ERROR: Cannot connect to arm101: {e}")
@@ -157,12 +171,13 @@ def connect_arm101(config):
     print("  Enabling torque...")
     arm.enable_torque()
     print("  Ready.")
-    return arm, speed
+    return arm, arm.speed
 
 
 def main():
     config = load_config()
     use_arm101 = '--arm101' in sys.argv
+    safe_mode = '--safe' in sys.argv
 
     # Camera resolution
     sd = '--sd' in sys.argv
@@ -171,8 +186,10 @@ def main():
 
     # Connect robot
     if use_arm101:
-        robot, speed = connect_arm101(config)
+        robot, speed = connect_arm101(config, safe_mode=safe_mode)
     else:
+        if safe_mode:
+            print("  Note: --safe is only supported for arm101, ignoring.")
         robot, speed = connect_dobot(config)
 
     # Start camera (optional)
@@ -215,8 +232,14 @@ def main():
     robot_name = "arm101" if use_arm101 else "Dobot Nova5"
     print()
     print(f"Robot: {robot_name}")
-    print("Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed")
-    print("          v enable, l log position, p pose, Esc quit")
+    if use_arm101:
+        safe_str = " [SAFE MODE]" if safe_mode else ""
+        print(f"Mode: arm101{safe_str}")
+        print("Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed")
+        print("          v torque, s safe mode, l log position, p pose, Esc quit")
+    else:
+        print("Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed")
+        print("          v enable, l log position, p pose, Esc quit")
     print(f"Position log: {os.path.relpath(pos_log_path)}")
 
     def on_mouse(event, x, y, flags, param):

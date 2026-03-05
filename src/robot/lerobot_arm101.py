@@ -52,6 +52,11 @@ GRIPPER_CLOSE_POS = 2600
 # Default speed for moves (0-4095, ~0 means max speed for STS)
 DEFAULT_MOVE_SPEED = 200
 
+# Safe mode defaults (reduced torque / speed for cautious operation)
+SAFE_MODE_SPEED = 80            # Slow movement speed
+SAFE_MODE_MAX_TORQUE = 300      # Reduced max torque (0-1023 register range)
+ADDR_MAX_TORQUE = 48            # STS3215 max torque register (2-byte)
+
 
 class LeRobotArm101:
     """Driver for SO-ARM101 follower arm with Feetech STS3215 servos.
@@ -70,7 +75,8 @@ class LeRobotArm101:
     robot_type = 'arm101'
 
     def __init__(self, port: str, baudrate: int = DEFAULT_BAUDRATE,
-                 motor_ids: Optional[list] = None, speed: int = DEFAULT_MOVE_SPEED):
+                 motor_ids: Optional[list] = None, speed: int = DEFAULT_MOVE_SPEED,
+                 safe_mode: bool = False):
         if not HAS_SCSERVO:
             raise ImportError(
                 "scservo_sdk not installed. Run: pip install feetech-servo-sdk"
@@ -79,7 +85,8 @@ class LeRobotArm101:
         self.port_path = port
         self.baudrate = baudrate
         self.motor_ids = motor_ids or list(DEFAULT_MOTOR_IDS)
-        self.speed = speed
+        self.safe_mode = safe_mode
+        self.speed = SAFE_MODE_SPEED if safe_mode else speed
         self._enabled = False
 
         # Initialize SDK
@@ -129,8 +136,14 @@ class LeRobotArm101:
     # --- Torque control ---
 
     def enable_torque(self, motor_ids: Optional[list] = None):
-        """Enable torque on specified motors (default: all)."""
+        """Enable torque on specified motors (default: all).
+
+        In safe mode, applies reduced max torque before enabling.
+        """
         ids = motor_ids or self.motor_ids
+        if self.safe_mode:
+            for mid in ids:
+                self._write2(mid, ADDR_MAX_TORQUE, SAFE_MODE_MAX_TORQUE)
         for mid in ids:
             self._write1(mid, ADDR_TORQUE_ENABLE, 1)
         self._enabled = True
@@ -141,6 +154,28 @@ class LeRobotArm101:
         for mid in ids:
             self._write1(mid, ADDR_TORQUE_ENABLE, 0)
         self._enabled = False
+
+    def set_safe_mode(self, enabled: bool):
+        """Toggle safe mode (reduced torque and speed).
+
+        Args:
+            enabled: True to enable safe mode, False for normal operation.
+        """
+        self.safe_mode = enabled
+        if enabled:
+            self.speed = SAFE_MODE_SPEED
+            # Apply torque limit if already enabled
+            if self._enabled:
+                for mid in self.motor_ids:
+                    self._write2(mid, ADDR_MAX_TORQUE, SAFE_MODE_MAX_TORQUE)
+            print(f"  Safe mode ON (speed={SAFE_MODE_SPEED}, "
+                  f"torque_limit={SAFE_MODE_MAX_TORQUE})")
+        else:
+            self.speed = DEFAULT_MOVE_SPEED
+            if self._enabled:
+                for mid in self.motor_ids:
+                    self._write2(mid, ADDR_MAX_TORQUE, 1023)  # full torque
+            print(f"  Safe mode OFF (speed={DEFAULT_MOVE_SPEED}, full torque)")
 
     # --- Position reading ---
 

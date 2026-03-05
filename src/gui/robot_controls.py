@@ -145,6 +145,13 @@ class RobotControlPanel:
         self.home_rect = (z_x + btn_w + BTN_GAP, y, z_x + PAD_SIZE, y + BTN_H)
         y += BTN_H + BTN_GAP * 2
 
+        # Safe mode toggle (arm101 only; drawn in same slot for both)
+        if self._arm101:
+            self.safe_rect = (z_x, y, z_x + PAD_SIZE, y + BTN_H)
+            y += BTN_H + BTN_GAP * 2
+        else:
+            self.safe_rect = None
+
         # J1 rotate button (for calibration: rotate yaw in 30° steps)
         self.j1_rotate_rect = (z_x, y, z_x + PAD_SIZE, y + BTN_H)
         y += BTN_H + BTN_GAP * 2
@@ -269,6 +276,13 @@ class RobotControlPanel:
                            color=(0, 100, 0))
         self._draw_btn(canvas, self.home_rect, "Home",
                        color=(100, 80, 0))
+
+        # --- Safe mode toggle (arm101 only) ---
+        if self._arm101 and self.safe_rect:
+            is_safe = getattr(self.robot, 'safe_mode', False)
+            safe_label = "Safe: ON" if is_safe else "Safe: OFF"
+            safe_color = (0, 120, 60) if is_safe else (80, 50, 50)
+            self._draw_btn(canvas, self.safe_rect, safe_label, color=safe_color)
 
         # --- J1 Rotate ---
         j1_label = "J1 +30deg"
@@ -427,6 +441,11 @@ class RobotControlPanel:
             return
         if self._in_rect(x, y, self.home_rect):
             self._do_home()
+            return
+
+        # Safe mode toggle (arm101)
+        if self.safe_rect and self._in_rect(x, y, self.safe_rect):
+            self._toggle_safe_mode()
             return
 
         # J1 rotate
@@ -617,6 +636,21 @@ class RobotControlPanel:
             time.sleep(1)
             self.status_msg = "Robot enabled"
 
+    def _toggle_safe_mode(self):
+        """Toggle safe mode on arm101 (reduced torque/speed)."""
+        if self.robot is None or not self._arm101:
+            return
+        is_safe = getattr(self.robot, 'safe_mode', False)
+        try:
+            self.robot.set_safe_mode(not is_safe)
+            self.speed = self.robot.speed
+            if self.robot.safe_mode:
+                self.status_msg = "Safe mode ON"
+            else:
+                self.status_msg = "Safe mode OFF"
+        except Exception as e:
+            self.status_msg = f"Safe mode error: {e}"
+
     def _do_j1_rotate(self, step_deg=30.0):
         """Rotate J1 by step_deg, keeping all other joints the same."""
         if self.robot is None:
@@ -758,6 +792,11 @@ class RobotControlPanel:
         # Enable
         if key == ord('v'):
             self._do_enable()
+            return True
+
+        # Safe mode toggle (arm101 only)
+        if key == ord('s') and self._arm101:
+            self._toggle_safe_mode()
             return True
 
         return False

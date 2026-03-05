@@ -29,13 +29,16 @@ elif [ requirements.txt -nt .venv/.deps_installed ]; then
 fi
 
 # Ensure ROS2 dobot driver is running (provides motion port 30003)
-if command -v docker &>/dev/null; then
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dobot-driver$'; then
-        echo "Starting dobot driver (docker compose)..."
-        if [ ! -f .env ]; then
-            cp .env.example .env 2>/dev/null || echo "DOBOT_IP=192.168.5.1" > .env
+# Skip for arm101 — it uses serial, not Docker/ROS2
+if ! echo "$@" | grep -q -- '--arm101'; then
+    if command -v docker &>/dev/null; then
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dobot-driver$'; then
+            echo "Starting dobot driver (docker compose)..."
+            if [ ! -f .env ]; then
+                cp .env.example .env 2>/dev/null || echo "DOBOT_IP=192.168.5.1" > .env
+            fi
+            docker compose --profile dobot up -d 2>/dev/null || echo "WARNING: Failed to start dobot driver. MovL/MovJ may not work."
         fi
-        docker compose --profile dobot up -d 2>/dev/null || echo "WARNING: Failed to start dobot driver. MovL/MovJ may not work."
     fi
 fi
 
