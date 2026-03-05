@@ -15,9 +15,12 @@ Workflow:
 
 Usage:
     ./run.sh scripts/detect_checkerboard.py [--sd]
+    ./run.sh scripts/detect_checkerboard.py --arm101 [--safe] [--sd]
     ./run.sh scripts/detect_checkerboard.py --verify [--sd] [--dry-run]
 
     --sd       Use 640x480 resolution (default: 1280x720 HD)
+    --arm101   Use LeRobot arm101 instead of Dobot Nova5
+    --safe     Start in safe mode (reduced torque/speed, arm101 only)
     --verify   Verify calibration: detect board, move arm 5cm above each
                outer corner. Requires saved calibration + robot connection.
     --dry-run  With --verify: compute targets but don't move the robot
@@ -534,10 +537,34 @@ def run_verify(width, height, dry_run):
         print("Robot disconnected.")
 
 
+def connect_arm101(config, safe_mode=False):
+    """Connect to LeRobot arm101 follower. Returns (robot, speed)."""
+    from robot.lerobot_arm101 import LeRobotArm101
+
+    ac = config.get('arm101', {})
+    port = ac.get('port', '')
+    baudrate = ac.get('baudrate', 1_000_000)
+    motor_ids = ac.get('motor_ids', [1, 2, 3, 4, 5, 6])
+
+    print(f"=== LeRobot arm101 Calibration ===")
+    if safe_mode:
+        print("  ** SAFE MODE: reduced torque and speed **")
+
+    arm = LeRobotArm101(
+        port=port, baudrate=baudrate,
+        motor_ids=motor_ids, safe_mode=safe_mode)
+    arm.connect()
+    arm.enable_torque()
+    speed = arm.speed
+    return arm, speed
+
+
 def main():
     sd = '--sd' in sys.argv
     verify = '--verify' in sys.argv
     dry_run = '--dry-run' in sys.argv
+    use_arm101 = '--arm101' in sys.argv
+    safe_mode = '--safe' in sys.argv
     width, height = (640, 480) if sd else (1280, 720)
 
     if verify:
@@ -563,30 +590,46 @@ def main():
 
     # Connect to robot (optional — camera-only mode if unavailable)
     robot = None
-    print(f"Connecting to robot at {ip}:{port}...")
-    try:
-        robot = RobotConnection(ip, port)
-        robot.connect()
-        print(f"  Connected.")
+    speed = 30
+    if use_arm101:
+        if safe_mode:
+            pass  # handled by connect_arm101
+        try:
+            robot, speed = connect_arm101(config, safe_mode=safe_mode)
+            angles = robot.get_angles()
+            if angles:
+                print(f"  Joints: {', '.join(f'{v:.1f}' for v in angles)}")
+            print("  NOTE: arm101 has no FK — hand-eye calibration records joint angles only")
+        except Exception as e:
+            print(f"  WARNING: Cannot connect to arm101: {e}")
+            print(f"  Continuing in camera-only mode (no arm control)")
+            robot = None
+    else:
+        if safe_mode:
+            print("  Note: --safe is only supported for arm101, ignoring.")
+        print(f"Connecting to robot at {ip}:{port}...")
+        try:
+            robot = RobotConnection(ip, port)
+            robot.connect()
+            print(f"  Connected.")
 
-        robot.send('DisableRobot()')
-        time.sleep(1)
-        robot.send('ClearError()')
-        robot.send('EnableRobot()')
-        time.sleep(1)
+            robot.send('DisableRobot()')
+            time.sleep(1)
+            robot.send('ClearError()')
+            robot.send('EnableRobot()')
+            time.sleep(1)
 
-        speed = 30
-        robot.send(f'SpeedFactor({speed})')
+            robot.send(f'SpeedFactor({speed})')
 
-        pose = robot.get_pose()
-        if pose:
-            print(f"  Robot pose: {', '.join(f'{v:.1f}' for v in pose)}")
-        else:
-            print("  WARNING: couldn't read robot pose")
-    except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        print(f"  WARNING: Cannot connect to robot: {e}")
-        print(f"  Continuing in camera-only mode (no arm control)")
-        robot = None
+            pose = robot.get_pose()
+            if pose:
+                print(f"  Robot pose: {', '.join(f'{v:.1f}' for v in pose)}")
+            else:
+                print("  WARNING: couldn't read robot pose")
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            print(f"  WARNING: Cannot connect to robot: {e}")
+            print(f"  Continuing in camera-only mode (no arm control)")
+            robot = None
 
     # Start camera
     cam_type = config.get('camera', {}).get('type', 'realsense')
@@ -601,7 +644,10 @@ def main():
     panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
     if robot:
         panel.speed = speed
-        panel.status_msg = "Touch TCP to board, then click on it"
+        if use_arm101:
+            panel.status_msg = "arm101: jog arm, camera features available"
+        else:
+            panel.status_msg = "Touch TCP to board, then click on it"
     else:
         panel.status_msg = "Camera-only mode"
 
@@ -855,9 +901,11 @@ def main():
             elif key == ord('p') and robot:
                 pose = robot.get_pose()
                 angles = robot.get_angles()
-                if pose and angles:
+                if pose:
                     print(f"  Pose:   {', '.join(f'{v:.2f}' for v in pose)}")
+                if angles:
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
+                if pose or angles:
                     panel.status_msg = "Pose printed to console"
 
             # --- Calibration controls ---
@@ -964,10 +1012,12 @@ def main():
         pass
     finally:
         if robot:
-            robot.send('MoveJog()')  # stop any jog
+            if use_arm101:
+                robot.close()
+            else:
+                robot.send('MoveJog()')  # stop any jog
+                robot.close()
         camera.stop()
-        if robot:
-            robot.close()
         cv2.destroyAllWindows()
         print("\nDone.")
 
