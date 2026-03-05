@@ -327,6 +327,7 @@ def run_snapshot(config, width, height):
     print(f"Starting {cam_type} camera ({width}x{height})...")
     camera = create_camera(snapshot_config)
     camera.start()
+    width, height = camera.width, camera.height
 
     for _ in range(30):
         camera.get_frames()
@@ -538,6 +539,7 @@ def main():
     print(f"Starting {cam_type} camera ({width}x{height})...")
     camera = create_camera(live_config)
     camera.start()
+    width, height = camera.width, camera.height
 
     def on_mouse(event, x, y, flags, param):
         if calib_panel.handle_mouse(event, x, y):
