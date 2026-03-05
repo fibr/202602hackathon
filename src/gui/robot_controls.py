@@ -250,13 +250,9 @@ class RobotControlPanel:
                         cv2.putText(canvas, f"{step:.0f}mm",
                                     (mx + px + 8, my - 8), FONT, 0.35, COL_PAD_DOT, 1)
 
-        # --- Z buttons --- (J3 for arm101)
-        if self._arm101:
-            self._draw_btn(canvas, self.z_up_rect, "J3 +")
-            self._draw_btn(canvas, self.z_dn_rect, "J3 -")
-        else:
-            self._draw_btn(canvas, self.z_up_rect, "Z +")
-            self._draw_btn(canvas, self.z_dn_rect, "Z -")
+        # --- Z buttons ---
+        self._draw_btn(canvas, self.z_up_rect, "Z +")
+        self._draw_btn(canvas, self.z_dn_rect, "Z -")
 
         # --- Gripper ---
         self._draw_btn(canvas, self.grip_open_rect, "Open",
