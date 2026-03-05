@@ -216,23 +216,34 @@ class WebcamCamera:
 
     def start(self):
         """Open the webcam and set up intrinsics."""
-        self._cap = cv2.VideoCapture(self.device_index)
+        # Use V4L2 backend on Linux for reliable resolution control
+        backend = cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else cv2.CAP_ANY
+        self._cap = cv2.VideoCapture(self.device_index, backend)
+        if not self._cap.isOpened():
+            # Fallback to default backend
+            self._cap = cv2.VideoCapture(self.device_index)
         if not self._cap.isOpened():
             raise RuntimeError(
                 f"Cannot open webcam device {self.device_index}. "
                 "Check that no other process is using it."
             )
 
+        # Set MJPEG codec first — many cameras only support higher
+        # resolutions in MJPEG mode (not raw YUYV)
+        self._cap.set(cv2.CAP_PROP_FOURCC,
+                      cv2.VideoWriter_fourcc(*'MJPG'))
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self._cap.set(cv2.CAP_PROP_FPS, self.fps)
 
-        # Check if camera accepted the requested resolution
-        native_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        native_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self._needs_resize = (native_w != self.width or native_h != self.height)
+        # Read back actual resolution
+        actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._needs_resize = (actual_w != self.width or actual_h != self.height)
         if self._needs_resize:
-            print(f"Webcam: native {native_w}x{native_h}, will resize to {self.width}x{self.height}")
+            print(f"Webcam: got {actual_w}x{actual_h}, will resize to {self.width}x{self.height}")
+        else:
+            print(f"Webcam: opened at {self.width}x{self.height}")
 
         # Try loading calibrated intrinsics; fall back to a pinhole estimate
         intr_path = os.path.normpath(_INTRINSICS_PATH)
