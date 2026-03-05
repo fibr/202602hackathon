@@ -217,17 +217,11 @@ class RobotControlPanel:
         cv2.line(canvas, (cx, pr[1]), (cx, pr[3]), COL_PAD_CROSS, 1)
         # Deadzone circle
         cv2.circle(canvas, (cx, cy), PAD_DEADZONE, COL_PAD_CROSS, 1)
-        # Axis labels — different for arm101 (J1/J2) vs Dobot (X/Y)
-        if self._arm101:
-            cv2.putText(canvas, "J1+", (pr[2] + px - 26, cy + 4), FONT, 0.35, COL_LABEL, 1)
-            cv2.putText(canvas, "J1-", (pr[0] + px + 2, cy + 4), FONT, 0.35, COL_LABEL, 1)
-            cv2.putText(canvas, "J2+", (cx - 10, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
-            cv2.putText(canvas, "J2-", (cx - 10, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
-        else:
-            cv2.putText(canvas, "X+", (pr[2] + px - 22, cy + 4), FONT, 0.35, COL_LABEL, 1)
-            cv2.putText(canvas, "X-", (pr[0] + px + 4, cy + 4), FONT, 0.35, COL_LABEL, 1)
-            cv2.putText(canvas, "Y+", (cx - 8, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
-            cv2.putText(canvas, "Y-", (cx - 8, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
+        # Axis labels
+        cv2.putText(canvas, "X+", (pr[2] + px - 22, cy + 4), FONT, 0.35, COL_LABEL, 1)
+        cv2.putText(canvas, "X-", (pr[0] + px + 4, cy + 4), FONT, 0.35, COL_LABEL, 1)
+        cv2.putText(canvas, "Y+", (cx - 8, pr[1] + 14), FONT, 0.35, COL_LABEL, 1)
+        cv2.putText(canvas, "Y-", (cx - 8, pr[3] - 5), FONT, 0.35, COL_LABEL, 1)
 
         # Current drag indicator with step size
         if self._mouse_down and self._mouse_pos:
