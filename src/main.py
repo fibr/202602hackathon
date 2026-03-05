@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config_loader import load_config
 from logger import get_logger, get_log_file
-from vision import RealSenseCamera, RodDetector
+from vision import RodDetector, create_camera
 from calibration import CoordinateTransform
 from robot import DobotNova5, Gripper
 from planner import GraspPlanner
@@ -124,11 +124,7 @@ def main():
     kin_cfg = config.get('kinematics', {})
 
     # Initialize components
-    camera = RealSenseCamera(
-        width=camera_cfg.get('width', 640),
-        height=camera_cfg.get('height', 480),
-        fps=camera_cfg.get('fps', 15),
-    )
+    camera = create_camera(config)
 
     detector = RodDetector(
         min_aspect_ratio=camera_cfg.get('min_aspect_ratio', 2.2),

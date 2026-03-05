@@ -120,7 +120,7 @@ class RodDetector:
             'uniformity_score': uniformity_score,
         }
 
-    def detect(self, color_image: np.ndarray, depth_image: np.ndarray,
+    def detect(self, color_image: np.ndarray, depth_image,
                depth_frame, camera) -> RodDetection | None:
         """Detect a rod in the current frame using FastSAM segmentation.
 
@@ -129,13 +129,13 @@ class RodDetector:
         2. Filter segments by overlap with workspace ROI (>=50%)
         3. Filter by minimum contour area
         4. Score by shape (aspect ratio), darkness, and uniformity
-        5. Pick best candidate, compute 3D center + axis from depth
+        5. Pick best candidate, compute 3D center + axis from depth (if available)
 
         Args:
             color_image: BGR image (H, W, 3)
-            depth_image: Depth in mm (H, W) uint16
-            depth_frame: RealSense depth frame for 3D queries
-            camera: RealSenseCamera instance for pixel_to_3d
+            depth_image: Depth in mm (H, W) uint16, or None for webcam
+            depth_frame: RealSense depth frame for 3D queries, or None for webcam
+            camera: RealSenseCamera or WebcamCamera instance for pixel_to_3d
 
         Returns:
             RodDetection or None if no rod found
@@ -262,19 +262,21 @@ class RodDetector:
 
             candidate_info['score'] = score
 
-            # Validate depth is in workspace range before accepting as best
+            # Validate depth is in workspace range before accepting as best.
+            # Skip depth check when depth_image is None (webcam mode).
             cx_int, cy_int = int(cx), int(cy)
-            depth_at_center = depth_image[
-                min(cy_int, h - 1), min(cx_int, w - 1)]
-            if depth_at_center > 0 and (
-                depth_at_center < self.depth_min_mm or
-                depth_at_center > self.depth_max_mm
-            ):
-                candidate_info['reject_reason'] = (
-                    f"depth {depth_at_center}mm outside "
-                    f"{self.depth_min_mm}-{self.depth_max_mm}")
-                candidate_info['passed'] = False
-                continue
+            if depth_image is not None:
+                depth_at_center = depth_image[
+                    min(cy_int, h - 1), min(cx_int, w - 1)]
+                if depth_at_center > 0 and (
+                    depth_at_center < self.depth_min_mm or
+                    depth_at_center > self.depth_max_mm
+                ):
+                    candidate_info['reject_reason'] = (
+                        f"depth {depth_at_center}mm outside "
+                        f"{self.depth_min_mm}-{self.depth_max_mm}")
+                    candidate_info['passed'] = False
+                    continue
 
             if score > best_score:
                 best_score = score

@@ -44,7 +44,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from vision import RealSenseCamera
+from vision import RealSenseCamera, create_camera
 from vision.rod_detector import RodDetector
 from calibration import CoordinateTransform
 from config_loader import load_config
@@ -320,8 +320,12 @@ def run_snapshot(config, width, height):
         workspace_roi=cam_cfg.get('workspace_roi'),
     )
 
-    print(f"Starting camera ({width}x{height})...")
-    camera = RealSenseCamera(width=width, height=height, fps=15)
+    # Build an overridden config that uses the requested resolution
+    snapshot_config = dict(config)
+    snapshot_config['camera'] = dict(cam_cfg, width=width, height=height)
+    cam_type = cam_cfg.get('type', 'realsense')
+    print(f"Starting {cam_type} camera ({width}x{height})...")
+    camera = create_camera(snapshot_config)
     camera.start()
 
     for _ in range(30):
@@ -358,15 +362,20 @@ def run_snapshot(config, width, height):
     cv2.imwrite(f"{prefix}_1_color.png",
                 _put_title(color_image, "1. Color input", f"{width}x{height}"))
 
-    # 2. Depth
-    depth_colormap = cv2.applyColorMap(
-        cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
-    valid = depth_image[depth_image > 0]
-    depth_sub = ""
-    if len(valid) > 0:
-        depth_sub = f"range: {int(valid.min())}-{int(valid.max())} mm, median: {int(np.median(valid))} mm"
-    cv2.imwrite(f"{prefix}_2_depth.png",
-                _put_title(depth_colormap, "2. Depth", depth_sub))
+    # 2. Depth (not available for webcam)
+    if depth_image is not None:
+        depth_colormap = cv2.applyColorMap(
+            cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
+        valid = depth_image[depth_image > 0]
+        depth_sub = ""
+        if len(valid) > 0:
+            depth_sub = f"range: {int(valid.min())}-{int(valid.max())} mm, median: {int(np.median(valid))} mm"
+        cv2.imwrite(f"{prefix}_2_depth.png",
+                    _put_title(depth_colormap, "2. Depth", depth_sub))
+    else:
+        no_depth = np.zeros((color_image.shape[0], color_image.shape[1], 3), dtype=np.uint8)
+        cv2.imwrite(f"{prefix}_2_depth.png",
+                    _put_title(no_depth, "2. Depth", "N/A (webcam — no depth sensor)"))
 
     # Run detection
     print("Running FastSAM detection...")
@@ -522,7 +531,12 @@ def main():
     print("Arrows: nudge XY (10mm)  +/-: Z (10mm)  7/8: roll  9/0: pitch  [/]: yaw (2 deg)")
     print()
 
-    camera = RealSenseCamera(width=width, height=height, fps=15)
+    # Build a config with the CLI-requested resolution overriding config values
+    live_config = dict(config)
+    live_config['camera'] = dict(cam_cfg, width=width, height=height)
+    cam_type = cam_cfg.get('type', 'realsense')
+    print(f"Starting {cam_type} camera ({width}x{height})...")
+    camera = create_camera(live_config)
     camera.start()
 
     def on_mouse(event, x, y, flags, param):
@@ -710,10 +724,11 @@ def main():
                 depth_vis_path = os.path.join(DATASET_DIR, f"{idx_str}_depth_vis.png")
 
                 cv2.imwrite(color_path, color)
-                cv2.imwrite(depth_path, depth_img)
-                depth_colormap = cv2.applyColorMap(
-                    cv2.convertScaleAbs(depth_img, alpha=0.03), cv2.COLORMAP_JET)
-                cv2.imwrite(depth_vis_path, depth_colormap)
+                if depth_img is not None:
+                    cv2.imwrite(depth_path, depth_img)
+                    depth_colormap = cv2.applyColorMap(
+                        cv2.convertScaleAbs(depth_img, alpha=0.03), cv2.COLORMAP_JET)
+                    cv2.imwrite(depth_vis_path, depth_colormap)
 
                 print(f"  [{idx_str}] Saved to {DATASET_DIR}/")
                 next_idx += 1

@@ -45,7 +45,7 @@ from scipy.spatial.transform import Rotation
 from scipy.optimize import least_squares
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from vision import RealSenseCamera, CameraIntrinsics
+from vision import RealSenseCamera, CameraIntrinsics, create_camera
 from config_loader import load_config
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from calibration import CoordinateTransform
@@ -430,7 +430,11 @@ def run_verify(width, height, dry_run):
     transform.load(calib_path)
     print(f"Loaded calibration from {calib_path}")
 
-    camera = RealSenseCamera(width=width, height=height, fps=15)
+    verify_config = load_config()
+    verify_config['camera'] = dict(verify_config.get('camera', {}), width=width, height=height)
+    cam_type = verify_config.get('camera', {}).get('type', 'realsense')
+    print(f"Starting {cam_type} camera ({width}x{height})...")
+    camera = create_camera(verify_config)
     camera.start()
     print("Camera started. Looking for checkerboard (press 'c' to capture, 'q' to abort)...")
 
@@ -585,7 +589,11 @@ def main():
         robot = None
 
     # Start camera
-    camera = RealSenseCamera(width=width, height=height, fps=15)
+    cam_type = config.get('camera', {}).get('type', 'realsense')
+    main_config = dict(config)
+    main_config['camera'] = dict(config.get('camera', {}), width=width, height=height)
+    print(f"Starting {cam_type} camera ({width}x{height})...")
+    camera = create_camera(main_config)
     camera.start()
     print("Camera started.\n")
 

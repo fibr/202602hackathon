@@ -6,14 +6,21 @@ robot:
   speed_percent: 30           # Start slow for safety (1-100)
 
 camera:
+  # type: 'realsense' uses Intel RealSense D435i (RGB + depth)
+  # type: 'webcam'    uses any OpenCV-compatible USB camera (RGB only)
+  type: realsense
   width: 640
   height: 480
   fps: 15
+  # Webcam-only options (ignored for realsense):
+  device_index: 0             # OpenCV VideoCapture device index
+  assumed_depth_m: 1.0        # Fixed depth for pixel_to_3d (meters); tune to
+                              # match your actual camera-to-table distance
   # Rod detection parameters
   min_aspect_ratio: 2.2       # Minimum length/width ratio to consider as rod
   min_area: 500               # Minimum contour area in pixels
   depth_min_mm: 6000          # Closest valid depth (workspace ~6-19m from camera)
-  depth_max_mm: 19000         # Farthest valid depth
+  depth_max_mm: 19000         # Farthest valid depth (only used for realsense)
 
 rod:
   diameter_mm: 27.0            # Rod diameter (used to compute centroid height above table)

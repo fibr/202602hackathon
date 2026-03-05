@@ -179,9 +179,13 @@ def main():
     camera = None
     if not no_camera:
         try:
-            from vision import RealSenseCamera
-            print(f"Starting camera ({cam_width}x{cam_height})...")
-            camera = RealSenseCamera(width=cam_width, height=cam_height, fps=15)
+            from vision import create_camera
+            cam_cfg = config.get('camera', {})
+            cam_panel_config = dict(config)
+            cam_panel_config['camera'] = dict(cam_cfg, width=cam_width, height=cam_height)
+            cam_type = cam_cfg.get('type', 'realsense')
+            print(f"Starting {cam_type} camera ({cam_width}x{cam_height})...")
+            camera = create_camera(cam_panel_config)
             camera.start()
             print("  Camera started.")
         except Exception as e:
