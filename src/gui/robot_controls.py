@@ -13,6 +13,7 @@ Supports two robot types via duck-typing:
   - LeRobot arm101: robot_type='arm101', get_angles(), move_joints(),
     jog_joint(), gripper_open/close(), enable/disable_torque()
     XY pad = Cartesian IK step, Z = Cartesian IK step, jog = step-based
+    J4/J5/J6 wrist buttons = direct joint steps (5 deg each)
 
 Robot connection is duck-typed. Arm101 detected via robot.robot_type == 'arm101'.
 """
@@ -41,6 +42,7 @@ CART_COOLDOWN = 0.3       # seconds between commands (prevent queue buildup)
 JOG_STEP_MIN = 1.0       # degrees at edge of deadzone
 JOG_STEP_MAX = 30.0      # degrees at edge of pad
 JOG_STEP_Z = 5.0         # degrees per Z button click (J3)
+WRIST_STEP_DEG = 5.0     # degrees per J4/J5/J6 wrist button click
 
 # Cartesian step sizes for arm101 IK-based control
 ARM101_CART_STEP_MIN = 2.0   # mm at edge of deadzone
@@ -131,6 +133,22 @@ class RobotControlPanel:
         self.z_up_rect = (z_x, y, z_x + btn_w, y + BTN_H)
         self.z_dn_rect = (z_x + btn_w + BTN_GAP, y, z_x + PAD_SIZE, y + BTN_H)
         y += BTN_H + BTN_GAP * 2
+
+        # Wrist buttons (arm101 only): J4, J5, J6  [-] [+] rows
+        if self._arm101:
+            self.j4_dn_rect = (z_x, y, z_x + btn_w, y + BTN_H)
+            self.j4_up_rect = (z_x + btn_w + BTN_GAP, y, z_x + PAD_SIZE, y + BTN_H)
+            y += BTN_H + BTN_GAP
+            self.j5_dn_rect = (z_x, y, z_x + btn_w, y + BTN_H)
+            self.j5_up_rect = (z_x + btn_w + BTN_GAP, y, z_x + PAD_SIZE, y + BTN_H)
+            y += BTN_H + BTN_GAP
+            self.j6_dn_rect = (z_x, y, z_x + btn_w, y + BTN_H)
+            self.j6_up_rect = (z_x + btn_w + BTN_GAP, y, z_x + PAD_SIZE, y + BTN_H)
+            y += BTN_H + BTN_GAP * 2
+        else:
+            self.j4_dn_rect = self.j4_up_rect = None
+            self.j5_dn_rect = self.j5_up_rect = None
+            self.j6_dn_rect = self.j6_up_rect = None
 
         # Gripper buttons
         self.grip_open_rect = (z_x, y, z_x + btn_w, y + BTN_H)
@@ -247,6 +265,16 @@ class RobotControlPanel:
         # --- Z buttons ---
         self._draw_btn(canvas, self.z_up_rect, "Z +")
         self._draw_btn(canvas, self.z_dn_rect, "Z -")
+
+        # --- Wrist buttons (arm101 only): J4 / J5 / J6 ---
+        if self._arm101 and self.j4_dn_rect:
+            wrist_col = (90, 55, 110)  # purple-ish to distinguish from motion controls
+            self._draw_btn(canvas, self.j4_dn_rect, "J4 -", color=wrist_col)
+            self._draw_btn(canvas, self.j4_up_rect, "J4 +", color=wrist_col)
+            self._draw_btn(canvas, self.j5_dn_rect, "J5 -", color=wrist_col)
+            self._draw_btn(canvas, self.j5_up_rect, "J5 +", color=wrist_col)
+            self._draw_btn(canvas, self.j6_dn_rect, "J6 -", color=wrist_col)
+            self._draw_btn(canvas, self.j6_up_rect, "J6 +", color=wrist_col)
 
         # --- Gripper ---
         self._draw_btn(canvas, self.grip_open_rect, "Open",
@@ -412,6 +440,27 @@ class RobotControlPanel:
             else:
                 self._do_cart_step(2, -1, CART_STEP_Z)
             return
+
+        # Wrist buttons — J4/J5/J6 joint steps (arm101 only)
+        if self.j4_dn_rect:
+            if self._in_rect(x, y, self.j4_dn_rect):
+                self._do_joint_step(3, -1, WRIST_STEP_DEG)
+                return
+            if self._in_rect(x, y, self.j4_up_rect):
+                self._do_joint_step(3, +1, WRIST_STEP_DEG)
+                return
+            if self._in_rect(x, y, self.j5_dn_rect):
+                self._do_joint_step(4, -1, WRIST_STEP_DEG)
+                return
+            if self._in_rect(x, y, self.j5_up_rect):
+                self._do_joint_step(4, +1, WRIST_STEP_DEG)
+                return
+            if self._in_rect(x, y, self.j6_dn_rect):
+                self._do_joint_step(5, -1, WRIST_STEP_DEG)
+                return
+            if self._in_rect(x, y, self.j6_up_rect):
+                self._do_joint_step(5, +1, WRIST_STEP_DEG)
+                return
 
         # Gripper
         if self._in_rect(x, y, self.grip_open_rect):

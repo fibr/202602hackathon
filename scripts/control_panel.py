@@ -213,8 +213,8 @@ def main():
             no_camera = True
 
     if no_camera:
-        # Create a blank frame instead
-        cam_width, cam_height = 640, 480
+        # Create a blank frame instead; arm101 panel is taller (more buttons)
+        cam_width, cam_height = 640, 800 if use_arm101 else 480
 
     # Position log file
     log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
@@ -234,6 +234,7 @@ def main():
     if use_arm101:
         safe_str = " [SAFE MODE]" if safe_mode else ""
         print(f"Mode: arm101{safe_str}")
+        print("GUI:      XY pad=J1/J2, Z=J3, J4/J5/J6 wrist buttons (purple)")
         print("Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed")
         print("          v torque, s safe mode, l log position, p pose, Esc quit")
     else:
