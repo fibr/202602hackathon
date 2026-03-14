@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config_loader import load_config
 from logger import get_logger, get_log_file
-from vision import RodDetector, create_camera
+from vision import RodDetector, create_camera, VisualServo, make_green_cube_detector
 from calibration import CoordinateTransform
 from robot import DobotNova5, Gripper
 from planner import GraspPlanner
@@ -27,7 +27,8 @@ log = get_logger('main')
 
 def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
                       ik_solver: IKSolver, linear_step_mm: float = 5.0,
-                      max_step_deg: float = 5.0):
+                      max_step_deg: float = 5.0,
+                      pause_after: str = None) -> np.ndarray:
     """Execute waypoints using local IK + smooth quintic trajectories.
 
     For JOINT waypoints: solve IK, then execute a smooth quintic trajectory
@@ -37,6 +38,20 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
 
     All moves use quintic smoothstep for zero velocity/acceleration at
     endpoints, plus retry logic for transient failures.
+
+    Args:
+        robot: Connected DobotNova5 instance.
+        gripper: Gripper instance.
+        waypoints: Ordered list of Waypoint objects to execute.
+        ik_solver: IKSolver for pose→joints conversion.
+        linear_step_mm: Cartesian interpolation step for LINEAR moves.
+        max_step_deg: Maximum joint step per trajectory segment.
+        pause_after: If given, stop after executing the waypoint with this
+            label and return current joints. Remaining waypoints are skipped.
+            The caller is responsible for executing the rest.
+
+    Returns:
+        Current joint angles after the last executed waypoint (degrees).
     """
     current_joints = robot.get_joint_angles()
 
@@ -87,6 +102,72 @@ def execute_waypoints(robot: DobotNova5, gripper: Gripper, waypoints: list,
         # Execute gripper action after motion if closing
         if wp.gripper == GripperAction.CLOSE:
             gripper.close()
+
+        # Pause after a specific waypoint (e.g. for visual servoing)
+        if pause_after is not None and wp.label == pause_after:
+            log.info(f"[EXECUTE] Pausing after waypoint '{pause_after}'")
+            return current_joints
+
+    return current_joints
+
+
+def run_visual_servo_step(
+    robot: DobotNova5,
+    ik_solver: IKSolver,
+    servo: VisualServo,
+    current_joints: np.ndarray,
+    gripper_rz_deg: float,
+    config: dict,
+) -> np.ndarray:
+    """Run the visual servo correction loop and return updated joint angles.
+
+    Opens the gripper camera, aligns the gripper over the detected target,
+    then closes the camera.  Uses the green-cube detector by default; the
+    detection parameters are taken from the ``visual_servo`` config section.
+
+    Args:
+        robot: Connected DobotNova5 instance.
+        ik_solver: IKSolver instance.
+        servo: VisualServo instance (camera not yet open).
+        current_joints: Joint angles after PRE_GRASP (degrees).
+        gripper_rz_deg: Gripper rz at the pre-grasp pose (degrees).
+        config: Full project config dict.
+
+    Returns:
+        Updated joint angles after servo correction.
+    """
+    vs_cfg = config.get('visual_servo', {})
+
+    # Build detector — reuse green-cube detector (tunable via config)
+    detector_fn = make_green_cube_detector(
+        min_area=vs_cfg.get('detector_min_area', 200.0),
+    )
+
+    log.info("[SERVO] Opening gripper camera...")
+    try:
+        servo.open_camera()
+    except RuntimeError as exc:
+        log.warning(f"[SERVO] Cannot open gripper camera: {exc}. Skipping servo.")
+        return current_joints
+
+    try:
+        result, updated_joints = servo.align(
+            robot=robot,
+            ik_solver=ik_solver,
+            detector_fn=detector_fn,
+            current_joints=current_joints,
+            gripper_rz_deg=gripper_rz_deg,
+        )
+        status = "CONVERGED" if result.converged else "NOT CONVERGED"
+        log.info(
+            f"[SERVO] {status}: {result.iterations} iter(s), "
+            f"final_error={result.final_error_px:.1f}px, "
+            f"corrections={len(result.corrections)}"
+        )
+        return updated_joints
+    finally:
+        servo.close_camera()
+        log.info("[SERVO] Gripper camera closed.")
 
 
 def _validate_ik(robot: DobotNova5, ik_solver: IKSolver):
@@ -211,8 +292,63 @@ def main():
 
         # EXECUTE
         log.info("[EXECUTE] Running pick-and-stand sequence (local IK + joint control)...")
-        execute_waypoints(robot, gripper, waypoints, ik_solver,
-                          linear_step_mm=kin_cfg.get('linear_step_mm', 5.0))
+        vs_cfg = config.get('visual_servo', {})
+        servo_enabled = vs_cfg.get('enabled', False)
+        linear_step = kin_cfg.get('linear_step_mm', 5.0)
+
+        if servo_enabled:
+            # --- Phase 1: move to PRE_GRASP (coarse positioning) ---
+            log.info("[EXECUTE] Phase 1: coarse move to PRE_GRASP ...")
+            current_joints = execute_waypoints(
+                robot, gripper, waypoints, ik_solver,
+                linear_step_mm=linear_step,
+                pause_after='PRE_GRASP',
+            )
+
+            # --- Phase 2: gripper-camera visual servo (fine positioning) ---
+            log.info("[EXECUTE] Phase 2: gripper-camera visual servo ...")
+            pre_grasp_wp = next(
+                (wp for wp in waypoints if wp.label == 'PRE_GRASP'), None
+            )
+            gripper_rz = pre_grasp_wp.rz if pre_grasp_wp is not None else 0.0
+
+            servo = VisualServo.from_config(config)
+            current_joints = run_visual_servo_step(
+                robot, ik_solver, servo, current_joints,
+                gripper_rz_deg=gripper_rz,
+                config=config,
+            )
+
+            # After servo the robot TCP is centred over the target.
+            # Update the rod-relative waypoints so the descent and lift
+            # stay at the servo-corrected XY position rather than the
+            # coarsely-detected position (which may have calibration error).
+            corrected_pose = robot.get_pose()   # [x, y, z, rx, ry, rz] mm/deg
+            corrected_x = corrected_pose[0]
+            corrected_y = corrected_pose[1]
+            log.info(
+                f"[EXECUTE] Servo-corrected TCP: "
+                f"x={corrected_x:.1f}mm, y={corrected_y:.1f}mm"
+            )
+
+            # Labels whose XY should track the servo-corrected position
+            _rod_relative_labels = {'PRE_GRASP', 'GRASP_DESCEND', 'GRASP_CLOSE', 'LIFT'}
+            for wp in waypoints:
+                if wp.label in _rod_relative_labels:
+                    wp.x = corrected_x
+                    wp.y = corrected_y
+
+            # --- Phase 3: execute remaining waypoints after PRE_GRASP ---
+            log.info("[EXECUTE] Phase 3: continuing grasp sequence ...")
+            remaining = [wp for wp in waypoints if wp.label != 'PRE_GRASP']
+            execute_waypoints(
+                robot, gripper, remaining, ik_solver,
+                linear_step_mm=linear_step,
+            )
+        else:
+            # No visual servo: execute all waypoints directly
+            execute_waypoints(robot, gripper, waypoints, ik_solver,
+                              linear_step_mm=linear_step)
 
         log.info("[DONE] Pick-and-stand complete!")
 

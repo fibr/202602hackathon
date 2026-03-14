@@ -38,6 +38,34 @@ planner:
   approach_offset_z: 100.0    # Height above rod for pre-grasp (mm)
   place_position: [300.0, 0.0, 50.0]  # Where to place the standing rod (mm)
 
+# Gripper-mounted downward camera (cam_8 = /dev/video8)
+gripper_camera:
+  device_index: 8             # V4L2 index for /dev/video8
+  width: 640
+  height: 480
+
+# Closed-loop visual servoing using the gripper camera
+# Runs after PRE_GRASP to correct residual calibration errors.
+visual_servo:
+  enabled: false              # Set to true to activate gripper-cam servoing
+  # Pixel-to-mm conversion at the pre-grasp working height.
+  # Formula: scale ≈ height_mm * tan(half_HFOV_rad) / (img_width/2)
+  # Example: 100mm height, 60° HFOV, 640px wide → ~0.18 mm/px
+  # Example: 150mm height, 60° HFOV, 640px wide → ~0.27 mm/px
+  scale_mm_per_pixel: 0.25    # Tune to match actual camera FOV + working height
+  # Rotation of the camera X-axis relative to the gripper X-axis (degrees).
+  # 0 = camera aligned with gripper. Adjust if camera is rotated on the mount.
+  mount_angle_deg: 0.0
+  # Sign flips for mirrored or upside-down camera mounts
+  cam_flip_x: false
+  cam_flip_y: false
+  max_iterations: 12          # Max correction iterations before proceeding
+  pixel_threshold: 20.0       # Convergence: stop when |error| < this (pixels)
+  gain: 0.6                   # Proportional gain (0-1); lower = more stable
+  settle_s: 0.3               # Settle time after each corrective move (s)
+  max_correction_mm: 30.0     # Per-iteration XY clamp to prevent runaway
+  save_debug: false           # Save annotated frames to /tmp/servo_debug/
+
 # LeRobot SO-ARM101 follower configuration
 arm101:
   port: ""                    # Serial port (auto-detect if empty, e.g. /dev/ttyACM0)
