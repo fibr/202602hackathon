@@ -53,12 +53,12 @@ class CalibrationView(BaseView):
 
         y = 95
         options = [
-            ('[1] Servo Calibration',
+            ('[1] Checkerboard Calibration',
+             'Intrinsics + click TCP on board, ray-plane solve'),
+            ('[2] Servo Calibration',
              'Move arm to zero pose, save offsets  (arm101)'),
-            ('[2] Hand-Eye Calibration (Yellow Tape)',
+            ('[3] Hand-Eye Calibration (Yellow Tape)',
              'Capture FK+pixel poses, joint solve  (arm101)'),
-            ('[3] Checkerboard Calibration',
-             'Click TCP on board, ray-plane solve'),
             ('[4] Verify Checkerboard (subprocess)',
              'Move arm above board corners to verify'),
         ]
@@ -94,13 +94,13 @@ class CalibrationView(BaseView):
 
     def handle_key(self, key):
         if key == ord('1'):
-            self.app.switch_view('servo_calib')
+            self.app.switch_view('checkerboard')
             return True
         if key == ord('2'):
-            self.app.switch_view('handeye_yellow')
+            self.app.switch_view('servo_calib')
             return True
         if key == ord('3'):
-            self.app.switch_view('checkerboard')
+            self.app.switch_view('handeye_yellow')
             return True
         if key == ord('4'):
             if not self._verify_running:
