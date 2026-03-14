@@ -23,6 +23,9 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh scripts/control_panel.py --arm101 --no-camera  # arm101 without camera
 ./run.sh scripts/collect_dataset.py --no-robot   # Live camera feed with detection
 ./run.sh scripts/collect_dataset.py --snapshot   # Single-frame detection debug (6-stage images)
+./run.sh scripts/handeye_calibrate.py             # Hand-eye cal with yellow tape (default, cam4)
+./run.sh scripts/handeye_calibrate.py --tune      # With interactive HSV tuner
+./run.sh scripts/handeye_calibrate.py --method click  # Manual click mode
 ./run.sh scripts/detect_checkerboard.py          # Interactive calibration (GUI panel + click corners)
 ./run.sh scripts/detect_checkerboard.py --verify # Verify calibration: hover above board corners
 ./run.sh scripts/test_ik.py              # Validate local IK against robot's built-in FK/IK
