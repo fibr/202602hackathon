@@ -346,8 +346,14 @@ def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver):
 
         return np.array(errs)
 
-    print(f"\n  Joint optimization: {n} observations, 11 parameters")
+    print(f"\n  Joint optimization: {n} observations, 11 parameters "
+          f"({2*n} residuals)")
     print(f"  Initial offsets: {offset_init.astype(int).tolist()}")
+
+    # Initial error
+    r0 = residuals(x0).reshape(-1, 2)
+    e0 = np.linalg.norm(r0, axis=1)
+    print(f"  Initial error: mean={np.mean(e0):.1f}px, max={np.max(e0):.1f}px")
 
     result = least_squares(residuals, x0, method='lm', max_nfev=5000)
 
@@ -355,19 +361,77 @@ def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver):
     rvec_opt = result.x[5:8]
     tvec_opt = result.x[8:11]
 
-    # Compute final reprojection error
+    # Per-point residuals
     res = result.fun.reshape(-1, 2)
     errs_px = np.linalg.norm(res, axis=1)
-    print(f"  Result: cost={result.cost:.2f}, mean_err={np.mean(errs_px):.2f}px, "
-          f"max_err={np.max(errs_px):.2f}px")
+    print(f"\n  Final error: mean={np.mean(errs_px):.2f}px, "
+          f"median={np.median(errs_px):.2f}px, max={np.max(errs_px):.2f}px")
 
-    # Show offset changes
-    print(f"  Optimized offsets:")
-    for i, name in enumerate(MOTOR_NAMES[:5]):
-        old = int(offset_init[i])
-        new = int(round(offsets_opt[i]))
-        delta_deg = (new - old) * DEG_PER_POS
-        print(f"    {name:<16}: {old} -> {new}  (Δ={delta_deg:+.1f}°)")
+    # Per-point breakdown
+    print(f"  Per-point residuals:")
+    for i in range(n):
+        flag = " ***" if errs_px[i] > 2 * np.median(errs_px) else ""
+        print(f"    #{i+1:2d}: {errs_px[i]:6.2f}px  "
+              f"(dx={res[i,0]:+6.1f}, dy={res[i,1]:+6.1f}){flag}")
+
+    # Parameter uncertainty from Jacobian
+    # cov ≈ inv(J^T J) * s^2,  where s^2 = cost / (n_residuals - n_params)
+    param_names = (
+        [f"{name}_offset" for name in MOTOR_NAMES[:5]]
+        + ['rvec_x', 'rvec_y', 'rvec_z', 'tvec_x', 'tvec_y', 'tvec_z']
+    )
+    n_residuals = 2 * n
+    n_params = 11
+    dof = max(1, n_residuals - n_params)
+    s2 = result.cost / dof  # variance estimate
+    try:
+        J = result.jac
+        JtJ = J.T @ J
+        cov = np.linalg.inv(JtJ) * s2
+        std_devs = np.sqrt(np.abs(np.diag(cov)))
+
+        print(f"\n  Parameter estimates (value ± 1σ uncertainty):")
+        for i, name in enumerate(MOTOR_NAMES[:5]):
+            old = int(offset_init[i])
+            new = offsets_opt[i]
+            sigma_raw = std_devs[i]
+            sigma_deg = sigma_raw * DEG_PER_POS
+            delta_deg = (new - old) * DEG_PER_POS
+            confidence = "GOOD" if sigma_deg < 3.0 else "WEAK" if sigma_deg < 10.0 else "BAD"
+            print(f"    {name:<16}: {old} -> {int(round(new)):5d}  "
+                  f"(Δ={delta_deg:+6.1f}°)  ±{sigma_deg:.1f}°  [{confidence}]")
+
+        # Extrinsic uncertainties
+        print(f"    {'tvec_x':<16}: {tvec_opt[0]:+8.1f}mm  ±{std_devs[8]:.1f}mm")
+        print(f"    {'tvec_y':<16}: {tvec_opt[1]:+8.1f}mm  ±{std_devs[9]:.1f}mm")
+        print(f"    {'tvec_z':<16}: {tvec_opt[2]:+8.1f}mm  ±{std_devs[10]:.1f}mm")
+        rvec_deg_sigma = [np.degrees(std_devs[5+j]) for j in range(3)]
+        print(f"    {'rotation':<16}: ±({rvec_deg_sigma[0]:.2f}°, "
+              f"{rvec_deg_sigma[1]:.2f}°, {rvec_deg_sigma[2]:.2f}°)")
+    except np.linalg.LinAlgError:
+        print("  WARNING: Could not compute parameter uncertainties (singular Jacobian)")
+        print(f"  Optimized offsets:")
+        for i, name in enumerate(MOTOR_NAMES[:5]):
+            old = int(offset_init[i])
+            new = int(round(offsets_opt[i]))
+            delta_deg = (new - old) * DEG_PER_POS
+            print(f"    {name:<16}: {old} -> {new}  (Δ={delta_deg:+.1f}°)")
+
+    # Quality assessment
+    quality = ("EXCELLENT" if np.mean(errs_px) < 3 else
+               "GOOD" if np.mean(errs_px) < 8 else
+               "OK" if np.mean(errs_px) < 20 else
+               "POOR" if np.mean(errs_px) < 50 else "BAD")
+    print(f"\n  Overall quality: {quality} (mean {np.mean(errs_px):.1f}px)")
+    if quality in ("POOR", "BAD"):
+        n_outliers = np.sum(errs_px > 2 * np.median(errs_px))
+        print(f"  Suggestions:")
+        if n_outliers > 0:
+            print(f"    - {n_outliers} outlier(s) marked with *** — "
+                  f"undo them (U) and re-solve")
+        print(f"    - Check joint signs in arm101_ik_solver.py JOINT_SIGNS")
+        print(f"    - Check camera intrinsics (currently estimated, not calibrated)")
+        print(f"    - Try more diverse poses (vary all joints, not just 1-2)")
 
     # Build T_cam2base
     R_b2c, _ = cv2.Rodrigues(rvec_opt)
