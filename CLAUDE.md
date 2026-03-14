@@ -15,19 +15,15 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 
 ### Test and debug scripts
 ```bash
-./run.sh scripts/test_robot.py           # Ping, connect, enable, jog wiggle + gripper
-./run.sh scripts/test_robot.py --diag    # Dashboard diagnostics only (no motion)
 ./run.sh scripts/control_panel.py        # Camera + GUI control panel (uses robot_type from config)
 ./run.sh scripts/control_panel.py --safe             # arm101 with reduced torque/speed
 ./run.sh scripts/control_panel.py --no-camera        # Without camera
+./run.sh scripts/calibration_gui.py              # GUI servo calibration (torque off, camera + live readout)
+./run.sh scripts/calibration_gui.py --handeye    # GUI hand-eye calibration (manual poses + yellow tape)
 ./run.sh scripts/collect_dataset.py --no-robot   # Live camera feed with detection
 ./run.sh scripts/collect_dataset.py --snapshot   # Single-frame detection debug (6-stage images)
-./run.sh scripts/handeye_calibrate.py             # Hand-eye cal with yellow tape (default, cam4)
-./run.sh scripts/handeye_calibrate.py --tune      # With interactive HSV tuner
-./run.sh scripts/handeye_calibrate.py --method click  # Manual click mode
 ./run.sh scripts/detect_checkerboard.py          # Interactive calibration (GUI panel + click corners)
 ./run.sh scripts/detect_checkerboard.py --verify # Verify calibration: hover above board corners
-./run.sh scripts/test_ik.py              # Validate local IK against robot's built-in FK/IK
 ./run.sh scripts/demo_cube.py            # Random reachable poses demo (default)
 ./run.sh scripts/demo_cube.py --mode cube # Trace cube corners
 ./scripts/run_digital_twin.sh            # Isaac Sim digital twin (arm101 + cubes)
