@@ -919,18 +919,35 @@ def main():
                     display = robot_overlay.draw_base_marker(
                         display, camera.intrinsics)
 
-            # Status bar on camera image
-            board_status = f"Board OK reproj:{reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
+            # --- HUD overlay with dark backgrounds for readability ---
+
+            # Top status bar
+            board_status = f"Board: reproj {reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
             n_intr = len(intr_detections) if intr_detections else len(intr_frames)
-            intr_str = f"Intr:{n_intr}" if n_intr else ""
-            plane_str = f"Plane:{len(plane_samples)}" if plane_samples else ""
+            intr_str = f"  Intr:{n_intr}" if n_intr else ""
+            plane_str = f"  Plane:{len(plane_samples)}" if plane_samples else ""
             jog_str = " JOG" if panel.jogging else ""
-            bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
-            cv2.putText(display, bar_text, (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-            cv2.putText(display, "i/I intrinsics | g/G plane | click+Enter hand-eye | u undo | Esc quit",
-                        (10, height - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+            bar_text = f"{len(pairs)} pts |{intr_str}{plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
+            # Dark background strip at top
+            cv2.rectangle(display, (0, 0), (width, 32), (0, 0, 0), -1)
+            cv2.putText(display, bar_text, (10, 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0) if found else (0, 0, 255), 1)
+
+            # Bottom help bar — two lines with dark background
+            help_lines = [
+                "[i] capture intrinsics frame  [I] calibrate  [g] capture plane  [Esc] quit",
+                "[click] record hand-eye pt  [Enter] solve  [u] undo  [n] clear  [p] pose",
+            ]
+            line_h = 22
+            bar_h = line_h * len(help_lines) + 8
+            cv2.rectangle(display, (0, height - bar_h), (width, height),
+                          (0, 0, 0), -1)
+            for i, line in enumerate(help_lines):
+                y = height - bar_h + 4 + line_h * (i + 1)
+                cv2.putText(display, line, (10, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (220, 220, 220), 1)
 
             # Compose canvas: camera on left, panel on right
             canvas[0:height, 0:width] = display
