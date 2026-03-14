@@ -25,7 +25,7 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh src/unified_gui.py --safe --view control      # Safe mode (arm101)
 ```
 
-Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `digital_twin`. Use `--list` to see all with descriptions.
+Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `digital_twin`, `verify_calib`. Use `--list` to see all with descriptions.
 
 ### Individual scripts (still work standalone)
 ```bash
