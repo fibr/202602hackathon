@@ -27,26 +27,27 @@ import cv2
 import numpy as np
 
 from gui.views.base import BaseView, ViewRegistry
+from calibration.calib_helpers import (
+    find_yellow_tape,
+    read_all_raw,
+    load_offsets,
+    save_handeye_calibration,
+    solve_pnp,
+    MOTOR_NAMES as _CH_MOTOR_NAMES,
+    HANDEYE_FILE,
+    OFFSET_FILE,
+)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 _PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-_SCRIPTS_DIR = os.path.join(_PROJECT_ROOT, 'scripts')
 
 MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
                'wrist_flex', 'wrist_roll']
 
 MIN_CAPTURES = 8   # Minimum for a reliable solve
 GOOD_CAPTURES = 12  # Recommended number of captures
-
-
-def _get_cg():
-    """Lazy-import calibration_gui helpers."""
-    if _SCRIPTS_DIR not in sys.path:
-        sys.path.insert(0, _SCRIPTS_DIR)
-    import calibration_gui as _cg
-    return _cg
 
 
 def _brute_force_signs(raw_positions_list, pts_2d, K, dist_coeffs, solver,
@@ -308,10 +309,9 @@ def save_calibration_results(signs, offsets_raw, T_c2b):
     print(f"  Saved offsets + signs to {offset_file}")
 
     # Save hand-eye extrinsics
-    handeye_file = os.path.join(_PROJECT_ROOT, 'config', 'calibration_arm101.yaml')
+    handeye_file = HANDEYE_FILE
     try:
-        cg = _get_cg()
-        cg.save_handeye_calibration(T_c2b, handeye_file)
+        save_handeye_calibration(T_c2b, handeye_file)
     except Exception as exc:
         print(f"  WARNING: Could not save hand-eye calibration: {exc}")
 
@@ -350,7 +350,6 @@ class ServoDirectionCalibView(BaseView):
         super().__init__(app)
         self._arm = None
         self._solver = None
-        self._cg = None
         self._K = None
         self._dist = None
         self._captures = []        # list of {raw: dict, pixel: [cx,cy]}
@@ -364,12 +363,6 @@ class ServoDirectionCalibView(BaseView):
         self._current_raw = None
 
     def setup(self):
-        try:
-            self._cg = _get_cg()
-        except ImportError as exc:
-            self._error_msg = f'Import error: {exc}'
-            return
-
         self.app.ensure_robot()
         robot = self.app.robot
         if robot is None:
@@ -458,13 +451,13 @@ class ServoDirectionCalibView(BaseView):
         fh, fw = frame.shape[:2]
 
         # Yellow tape detection
-        cx, cy, mask = self._cg.find_yellow_tape(frame)
+        cx, cy, mask = find_yellow_tape(frame)
         self._current_cx = cx
         self._current_cy = cy
 
         # Read raw positions
         try:
-            self._current_raw = self._cg.read_all_raw(self._arm)
+            self._current_raw = read_all_raw(self._arm)
         except Exception:
             self._current_raw = None
 
@@ -590,7 +583,7 @@ class ServoDirectionCalibView(BaseView):
             self.app.switch_view('calibration')
             return True
 
-        if self._arm is None or self._cg is None:
+        if self._arm is None:
             return False
 
         if key == ord(' '):
@@ -676,7 +669,7 @@ class ServoDirectionCalibView(BaseView):
         print(f'\n  Starting auto-calibration with {n} captures...')
 
         # Current offsets as seed
-        offsets = self._cg.load_offsets()
+        offsets = load_offsets()
         current_offsets_raw = np.array([
             offsets.get(name, {}).get('zero_raw', 2048)
             for name in MOTOR_NAMES

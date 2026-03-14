@@ -1,8 +1,7 @@
 """Servo and hand-eye calibration views for arm101 (embedded in unified GUI).
 
 Replaces the subprocess-based launcher for calibration_gui.py.  Both views
-reuse the helper functions from scripts/calibration_gui.py via a lazy import
-so that the arm101 dynamixel SDK is only required when the view is opened.
+use the helper functions from src/calibration/calib_helpers.py directly.
 
 Views registered here:
   servo_calib    — move arm to zero pose and save servo zero offsets
@@ -17,20 +16,24 @@ import cv2
 import numpy as np
 
 from gui.views.base import BaseView, ViewRegistry
+from calibration.calib_helpers import (
+    OFFSET_FILE,
+    HANDEYE_FILE,
+    read_all_raw,
+    find_yellow_tape,
+    draw_servo_overlay,
+    draw_handeye_overlay,
+    load_offsets,
+    save_offsets,
+    save_offsets_dict,
+    joint_solve,
+    save_handeye_calibration,
+)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 _PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-_SCRIPTS_DIR = os.path.join(_PROJECT_ROOT, 'scripts')
-
-
-def _get_cg():
-    """Lazy-import calibration_gui helpers.  Raises ImportError on failure."""
-    if _SCRIPTS_DIR not in sys.path:
-        sys.path.insert(0, _SCRIPTS_DIR)
-    import calibration_gui as _cg  # noqa: F401
-    return _cg
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +61,6 @@ class ServoCalibView(BaseView):
     def __init__(self, app):
         super().__init__(app)
         self._arm = None
-        self._cg = None
         self._offsets = {}
         self._status_msg = ''
         self._status_time = 0.0
@@ -66,13 +68,6 @@ class ServoCalibView(BaseView):
 
     # ------------------------------------------------------------------
     def setup(self):
-        # Lazy import — fail gracefully if dynamixel not installed
-        try:
-            self._cg = _get_cg()
-        except ImportError as exc:
-            self._error_msg = f'Import error: {exc}'
-            return
-
         # Use the shared robot if it is an arm101
         self.app.ensure_robot()
         robot = self.app.robot
@@ -96,7 +91,7 @@ class ServoCalibView(BaseView):
         self.app.ensure_camera()
 
         # Load existing offsets
-        self._offsets = self._cg.load_offsets()
+        self._offsets = load_offsets()
         self._status_msg = 'Move arm to zero pose, then press SPACE'
         self._status_time = time.time()
 
@@ -128,7 +123,7 @@ class ServoCalibView(BaseView):
         raw_positions = {}
         angles = None
         try:
-            raw_positions = self._cg.read_all_raw(self._arm)
+            raw_positions = read_all_raw(self._arm)
             angles = self._arm.get_angles()
         except Exception as exc:
             cv2.putText(frame, f'Read error: {exc}', (10, 50),
@@ -138,7 +133,7 @@ class ServoCalibView(BaseView):
         self._current_raw = raw_positions
 
         # Draw calibration overlay
-        self._cg.draw_servo_overlay(frame, raw_positions, self._offsets, angles)
+        draw_servo_overlay(frame, raw_positions, self._offsets, angles)
 
         # Breadcrumb / back hint at the bottom of the frame
         fh, fw = frame.shape[:2]
@@ -163,23 +158,23 @@ class ServoCalibView(BaseView):
             self.app.switch_view('calibration')
             return True
 
-        if self._arm is None or self._cg is None:
+        if self._arm is None:
             return False
 
         if key == ord(' '):
             raw = getattr(self, '_current_raw', {})
             if not raw:
                 try:
-                    raw = self._cg.read_all_raw(self._arm)
+                    raw = read_all_raw(self._arm)
                 except Exception as exc:
                     self._status_msg = f'Read error: {exc}'
                     self._status_time = time.time()
                     return True
             try:
-                self._offsets = self._cg.save_offsets(raw)
+                self._offsets = save_offsets(raw)
                 self._status_msg = (
                     f'Saved offsets to '
-                    f'{os.path.basename(self._cg.OFFSET_FILE)}')
+                    f'{os.path.basename(OFFSET_FILE)}')
                 print(f'  {self._status_msg}')
             except Exception as exc:
                 self._status_msg = f'Save error: {exc}'
@@ -188,7 +183,7 @@ class ServoCalibView(BaseView):
 
         if key == ord('r'):
             try:
-                self._offsets = self._cg.load_offsets()
+                self._offsets = load_offsets()
                 self._status_msg = 'Reloaded offsets from file'
             except Exception as exc:
                 self._status_msg = f'Reload error: {exc}'
@@ -235,7 +230,6 @@ class HandEyeYellowView(BaseView):
         super().__init__(app)
         self._arm = None
         self._solver = None
-        self._cg = None
         self._K = None
         self._dist = None
         self._pts_3d = []           # FK TCP positions (mm)
@@ -252,12 +246,6 @@ class HandEyeYellowView(BaseView):
 
     # ------------------------------------------------------------------
     def setup(self):
-        try:
-            self._cg = _get_cg()
-        except ImportError as exc:
-            self._error_msg = f'Import error: {exc}'
-            return
-
         self.app.ensure_robot()
         robot = self.app.robot
         if robot is None:
@@ -353,11 +341,10 @@ class HandEyeYellowView(BaseView):
             pass
 
         # Yellow tape detection
-        cx, cy, mask = self._cg.find_yellow_tape(frame)
+        cx, cy, mask = find_yellow_tape(frame)
 
         # Draw hand-eye overlay
-        self._cg.draw_handeye_overlay(frame, tcp_pos, (cx, cy),
-                                      len(self._pts_2d))
+        draw_handeye_overlay(frame, tcp_pos, (cx, cy), len(self._pts_2d))
 
         # Small mask preview in top-right corner
         fh, fw = frame.shape[:2]
@@ -381,7 +368,7 @@ class HandEyeYellowView(BaseView):
         self._current_cx = cx
         self._current_cy = cy
         try:
-            self._current_raw = self._cg.read_all_raw(self._arm)
+            self._current_raw = read_all_raw(self._arm)
         except Exception:
             self._current_raw = None
 
@@ -396,7 +383,7 @@ class HandEyeYellowView(BaseView):
             self.app.switch_view('calibration')
             return True
 
-        if self._arm is None or self._cg is None:
+        if self._arm is None:
             return False
 
         if key == ord(' '):
@@ -425,12 +412,12 @@ class HandEyeYellowView(BaseView):
                 self._status_time = time.time()
             else:
                 print(f'\n  Joint solve: {n} points, optimising offsets + extrinsics...')
-                opt_offsets, T_c2b = self._cg.joint_solve(
+                opt_offsets, T_c2b = joint_solve(
                     self._raw_positions_list, self._pts_2d,
                     self._K, self._dist, self._solver)
                 if opt_offsets is not None:
-                    self._cg.save_offsets_dict(opt_offsets)
-                    self._cg.save_handeye_calibration(T_c2b, self._cg.HANDEYE_FILE)
+                    save_offsets_dict(opt_offsets)
+                    save_handeye_calibration(T_c2b, HANDEYE_FILE)
                     self._status_msg = 'Joint solve OK — saved offsets + extrinsics'
                 else:
                     self._status_msg = 'Joint solve FAILED'

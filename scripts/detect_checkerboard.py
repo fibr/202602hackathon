@@ -35,13 +35,16 @@ Calibration:
     u          Undo last point
     n          Clear all points
     Esc        Quit
+
+Pure algorithm helpers have been extracted to src/calibration/calib_helpers.py.
+This script re-exports them and keeps the global _board_detector and workflow
+functions (run_verify, connect_arm101, main).
 """
 
 import sys
 import os
 import socket
 import time
-import random
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -55,20 +58,72 @@ from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from calibration import CoordinateTransform
 from visualization import RobotOverlay
 
-# Legacy checkerboard parameters (used as fallback when no config)
-BOARD_COLS = 7   # inner corners (8 squares - 1)
-BOARD_ROWS = 9   # inner corners (10 squares - 1)
-SQUARE_SIZE_M = 0.02  # 2cm squares
+# Re-export all algorithm helpers from the canonical module so that any code
+# still importing from this script continues to work unchanged.
+from calibration.calib_helpers import (  # noqa: F401
+    BOARD_COLS,
+    BOARD_ROWS,
+    SQUARE_SIZE_M,
+    SNAP_RADIUS_PX,
+    RANSAC_ITERATIONS,
+    RANSAC_INLIER_THRESHOLD_MM,
+    detect_corners as _detect_corners_impl,
+    compute_board_pose as _compute_board_pose_impl,
+    corner_3d_in_cam,
+    pixel_to_ray,
+    ray_plane_intersect,
+    solve_rigid_transform,
+    _refine_transform,
+    solve_robust_transform,
+    _get_board_outer_corners_cam as _get_board_outer_corners_cam_impl,
+)
 
-# Module-level board detector, set by main() from config
+# Module-level board detector, set by main() from config.
+# GUI views that import this module can set this directly to configure
+# the board detector before calling detect_corners / compute_board_pose.
 _board_detector: BoardDetector = None
 
-SNAP_RADIUS_PX = 30  # max pixel distance to snap click to a corner
+VERIFY_HOVER_HEIGHT_M = 0.05  # 5cm above each corner
+VERIFY_SPEED_PERCENT = 20
 
-# RANSAC parameters
-RANSAC_ITERATIONS = 500
-RANSAC_INLIER_THRESHOLD_MM = 15.0
 
+# ---------------------------------------------------------------------------
+# Backward-compatible wrappers that pass the module global to calib_helpers
+# ---------------------------------------------------------------------------
+
+def detect_corners(gray):
+    """Find board corners — uses the module-level _board_detector if set.
+
+    See calibration.calib_helpers.detect_corners for full documentation.
+    Pass board_detector explicitly when using calib_helpers directly.
+    """
+    return _detect_corners_impl(gray, board_detector=_board_detector)
+
+
+def compute_board_pose(corners_2d, intrinsics, detection=None):
+    """solvePnP → (T_board_in_cam 4x4, obj_points, reproj_error_px).
+
+    See calibration.calib_helpers.compute_board_pose for full documentation.
+    Pass board_detector explicitly when using calib_helpers directly.
+    """
+    return _compute_board_pose_impl(corners_2d, intrinsics,
+                                    detection=detection,
+                                    board_detector=_board_detector)
+
+
+def _get_board_outer_corners_cam(T_board_in_cam):
+    """Get 4 outer corners of the calibration board in camera frame (metres).
+
+    See calibration.calib_helpers._get_board_outer_corners_cam for docs.
+    Pass board_detector explicitly when using calib_helpers directly.
+    """
+    return _get_board_outer_corners_cam_impl(T_board_in_cam,
+                                             board_detector=_board_detector)
+
+
+# ---------------------------------------------------------------------------
+# Robot connection helper (Nova5 only — arm101 uses connect_arm101 below)
+# ---------------------------------------------------------------------------
 
 class RobotConnection:
     """Dashboard connection for pose queries and arm control."""
@@ -116,350 +171,9 @@ class RobotConnection:
             self.sock.close()
 
 
-def detect_corners(gray):
-    """Find board corners using the configured BoardDetector.
-
-    Returns (found, corners, detection) when using BoardDetector,
-    or (found, corners, None) for legacy checkerboard fallback.
-    The 3-tuple is backwards compatible — callers that only unpack 2
-    values will still work because Python ignores extra unpacked values
-    when called via: found, corners = detect_corners(gray)  # won't work
-    So we return a wrapper that behaves like the old (bool, ndarray) tuple
-    but carries the detection as well.
-    """
-    global _board_detector
-    if _board_detector is not None:
-        det = _board_detector.detect(gray)
-        if det is not None:
-            return True, det.corners, det
-        return False, None, None
-
-    # Legacy fallback (no BoardDetector configured)
-    try:
-        found, corners = cv2.findChessboardCornersSB(
-            gray, (BOARD_COLS, BOARD_ROWS),
-            cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY)
-        if found:
-            return found, corners, None
-    except cv2.error:
-        pass
-
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
-    found, corners = cv2.findChessboardCorners(enhanced, (BOARD_COLS, BOARD_ROWS), flags)
-    if found:
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
-        return found, corners, None
-
-    blurred = cv2.GaussianBlur(gray, (0, 0), 3)
-    sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
-    flags = (cv2.CALIB_CB_ADAPTIVE_THRESH |
-             cv2.CALIB_CB_NORMALIZE_IMAGE |
-             cv2.CALIB_CB_FILTER_QUADS)
-    found, corners = cv2.findChessboardCorners(sharpened, (BOARD_COLS, BOARD_ROWS), flags)
-    if found:
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
-        return found, corners, None
-
-    for cols, rows in [(BOARD_COLS, BOARD_ROWS - 2), (BOARD_COLS - 2, BOARD_ROWS),
-                       (BOARD_COLS - 2, BOARD_ROWS - 2)]:
-        try:
-            found, corners = cv2.findChessboardCornersSB(
-                gray, (cols, rows), cv2.CALIB_CB_EXHAUSTIVE)
-            if found:
-                print(f"  (detected {cols}x{rows} subset of board)")
-                return found, corners, None
-        except cv2.error:
-            pass
-
-    return False, None, None
-
-
-def compute_board_pose(corners_2d, intrinsics, detection=None):
-    """solvePnP -> (T_board_in_cam 4x4, obj_points, reproj_error_px).
-
-    reproj_error_px is the RMS reprojection error in pixels — measures how
-    well the current intrinsics explain the detected corners.
-
-    Args:
-        corners_2d: Detected corners (Nx1x2 or Nx2)
-        intrinsics: CameraIntrinsics
-        detection: Optional BoardDetection for charuco ID-based obj points
-    """
-    global _board_detector
-    if _board_detector is not None and detection is not None:
-        return _board_detector.compute_pose(detection, intrinsics)
-
-    # Legacy fallback (no detector or no detection metadata)
-    n = len(corners_2d)
-    if n == BOARD_ROWS * BOARD_COLS:
-        cols, rows = BOARD_COLS, BOARD_ROWS
-    else:
-        for c, r in [(BOARD_COLS, BOARD_ROWS - 2), (BOARD_COLS - 2, BOARD_ROWS),
-                     (BOARD_COLS - 2, BOARD_ROWS - 2)]:
-            if c * r == n:
-                cols, rows = c, r
-                break
-        else:
-            cols, rows = BOARD_COLS, BOARD_ROWS
-
-    obj_points = np.zeros((rows * cols, 3), dtype=np.float32)
-    for r in range(rows):
-        for c in range(cols):
-            obj_points[r * cols + c] = [c * SQUARE_SIZE_M, r * SQUARE_SIZE_M, 0]
-
-    camera_matrix = np.array([
-        [intrinsics.fx, 0, intrinsics.ppx],
-        [0, intrinsics.fy, intrinsics.ppy],
-        [0, 0, 1]
-    ], dtype=np.float64)
-    dist_coeffs = np.array(intrinsics.coeffs, dtype=np.float64)
-
-    _, rvec, tvec = cv2.solvePnP(obj_points, corners_2d, camera_matrix, dist_coeffs)
-
-    # Compute reprojection error
-    projected, _ = cv2.projectPoints(obj_points, rvec, tvec, camera_matrix, dist_coeffs)
-    reproj_err = np.sqrt(np.mean(
-        (corners_2d.reshape(-1, 2) - projected.reshape(-1, 2)) ** 2))
-
-    R, _ = cv2.Rodrigues(rvec)
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = tvec.flatten()
-    return T, obj_points, reproj_err
-
-
-def corner_3d_in_cam(corner_idx, T_board_in_cam, n_cols=BOARD_COLS):
-    """Get the 3D position of a detected corner in camera frame (meters)."""
-    row = corner_idx // n_cols
-    col = corner_idx % n_cols
-    p_board = np.array([col * SQUARE_SIZE_M, row * SQUARE_SIZE_M, 0, 1])
-    p_cam = (T_board_in_cam @ p_board)[:3]
-    return p_cam
-
-
-def pixel_to_ray(pixel, intrinsics):
-    """Convert a pixel to a normalized ray direction, accounting for distortion.
-
-    Uses cv2.undistortPoints to remove lens distortion, giving a more accurate
-    ray direction than raw pinhole backprojection.
-
-    Args:
-        pixel: (x, y) pixel coordinates
-        intrinsics: CameraIntrinsics or pyrealsense2 intrinsics
-
-    Returns:
-        np.ndarray [x, y, 1] unnormalized ray direction in camera frame
-    """
-    px, py = pixel
-    camera_matrix = np.array([
-        [intrinsics.fx, 0, intrinsics.ppx],
-        [0, intrinsics.fy, intrinsics.ppy],
-        [0, 0, 1]
-    ], dtype=np.float64)
-    dist_coeffs = np.array(intrinsics.coeffs, dtype=np.float64)
-
-    # undistortPoints with no newCameraMatrix returns normalized coords
-    pts = cv2.undistortPoints(
-        np.array([[[px, py]]], dtype=np.float64),
-        camera_matrix, dist_coeffs)
-    return np.array([pts[0][0][0], pts[0][0][1], 1.0])
-
-
-def ray_plane_intersect(pixel, intrinsics, T_board_in_cam):
-    """Intersect a camera ray through a pixel with the checkerboard plane.
-
-    The board plane is z=0 in board frame, transformed to camera frame via
-    T_board_in_cam. Returns the 3D intersection point in camera frame (meters).
-
-    Uses cv2.undistortPoints for accurate ray computation with distortion.
-
-    Args:
-        pixel: (x, y) pixel coordinates
-        intrinsics: CameraIntrinsics or pyrealsense2 intrinsics
-        T_board_in_cam: 4x4 board-to-camera transform from solvePnP
-
-    Returns:
-        np.ndarray [x, y, z] in camera frame (meters), or None if ray is
-        parallel to the plane.
-    """
-    ray_dir = pixel_to_ray(pixel, intrinsics)
-
-    # Board plane: the board's z=0 plane in camera frame
-    # Normal = R @ [0,0,1] (board z-axis in camera frame)
-    # Point on plane = translation column of T_board_in_cam
-    R = T_board_in_cam[:3, :3]
-    t = T_board_in_cam[:3, 3]
-    plane_normal = R[:, 2]  # third column of R
-    plane_point = t
-
-    # Ray-plane intersection: ray_origin=0, ray_dir
-    # t_param = dot(plane_normal, plane_point) / dot(plane_normal, ray_dir)
-    denom = np.dot(plane_normal, ray_dir)
-    if abs(denom) < 1e-8:
-        return None  # ray parallel to plane
-
-    t_param = np.dot(plane_normal, plane_point) / denom
-    if t_param < 0:
-        return None  # intersection behind camera
-
-    return ray_dir * t_param
-
-
-def solve_rigid_transform(pts_cam, pts_robot):
-    """SVD-based rigid transform: T such that pts_robot = T @ pts_cam.
-
-    Args:
-        pts_cam: Nx3 points in camera frame (meters)
-        pts_robot: Nx3 points in robot frame (meters)
-
-    Returns:
-        4x4 homogeneous transform T_cam_to_base
-    """
-    assert len(pts_cam) >= 3
-    A = np.array(pts_cam)
-    B = np.array(pts_robot)
-
-    centroid_A = A.mean(axis=0)
-    centroid_B = B.mean(axis=0)
-
-    A_c = A - centroid_A
-    B_c = B - centroid_B
-
-    H = A_c.T @ B_c
-    U, S, Vt = np.linalg.svd(H)
-    R = Vt.T @ U.T
-
-    # Correct reflection
-    if np.linalg.det(R) < 0:
-        Vt[-1, :] *= -1
-        R = Vt.T @ U.T
-
-    t = centroid_B - R @ centroid_A
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = t
-    return T
-
-
-def _refine_transform(T_init, pts_cam, pts_robot):
-    """Refine rigid transform via least-squares optimization on SE(3).
-
-    Parameterizes the transform as 6 DOF (3 rotation via Rodrigues + 3 translation)
-    and minimizes the sum of squared residuals.
-
-    Args:
-        T_init: 4x4 initial transform estimate
-        pts_cam: Nx3 points in camera frame (meters)
-        pts_robot: Nx3 points in robot frame (meters)
-
-    Returns:
-        4x4 refined transform
-    """
-    A = np.array(pts_cam)
-    B = np.array(pts_robot)
-
-    # Extract initial params: rotation as Rodrigues vector + translation
-    R_init = T_init[:3, :3]
-    t_init = T_init[:3, 3]
-    rotvec_init = Rotation.from_matrix(R_init).as_rotvec()
-    x0 = np.concatenate([rotvec_init, t_init])
-
-    def residuals(x):
-        R = Rotation.from_rotvec(x[:3]).as_matrix()
-        t = x[3:6]
-        transformed = (R @ A.T).T + t
-        return (transformed - B).ravel()
-
-    result = least_squares(residuals, x0, method='lm')
-
-    R_opt = Rotation.from_rotvec(result.x[:3]).as_matrix()
-    t_opt = result.x[3:6]
-    T = np.eye(4)
-    T[:3, :3] = R_opt
-    T[:3, 3] = t_opt
-    return T
-
-
-def solve_robust_transform(pts_cam, pts_robot):
-    """RANSAC + SVD + least-squares refinement for rigid transform.
-
-    Args:
-        pts_cam: Nx3 points in camera frame (meters)
-        pts_robot: Nx3 points in robot frame (meters)
-
-    Returns:
-        (T_cam_to_base 4x4, inlier_mask bool array)
-    """
-    N = len(pts_cam)
-    A = np.array(pts_cam)
-    B = np.array(pts_robot)
-
-    if N < 4:
-        # Not enough for RANSAC, plain SVD + refine
-        T = solve_rigid_transform(pts_cam, pts_robot)
-        T = _refine_transform(T, A, B)
-        return T, np.ones(N, dtype=bool)
-
-    threshold_m = RANSAC_INLIER_THRESHOLD_MM / 1000.0
-
-    best_inliers = None
-    best_count = 0
-
-    for _ in range(RANSAC_ITERATIONS):
-        idx = random.sample(range(N), 3)
-        T_cand = solve_rigid_transform(A[idx], B[idx])
-
-        errors = np.array([
-            np.linalg.norm((T_cand @ np.append(A[i], 1.0))[:3] - B[i])
-            for i in range(N)
-        ])
-        inliers = errors < threshold_m
-        count = inliers.sum()
-
-        if count > best_count:
-            best_count = count
-            best_inliers = inliers
-
-    # Refit SVD on inliers, then refine with least-squares
-    inlier_idx = np.where(best_inliers)[0]
-    T_svd = solve_rigid_transform(A[inlier_idx], B[inlier_idx])
-    T_final = _refine_transform(T_svd, A[inlier_idx], B[inlier_idx])
-    return T_final, best_inliers
-
-
-VERIFY_HOVER_HEIGHT_M = 0.05  # 5cm above each corner
-VERIFY_SPEED_PERCENT = 20
-
-
-def _get_board_outer_corners_cam(T_board_in_cam):
-    """Get 4 outer corners of the calibration board in camera frame (meters)."""
-    global _board_detector
-    if _board_detector is not None:
-        sq = _board_detector.square_size_m
-        inner_cols = _board_detector.inner_cols
-        inner_rows = _board_detector.inner_rows
-    else:
-        sq = SQUARE_SIZE_M
-        inner_cols = BOARD_COLS
-        inner_rows = BOARD_ROWS
-    half = sq / 2.0
-    max_x = (inner_cols - 1) * sq
-    max_y = (inner_rows - 1) * sq
-    board_corners = [
-        np.array([-half, -half, 0, 1]),
-        np.array([max_x + half, -half, 0, 1]),
-        np.array([max_x + half, max_y + half, 0, 1]),
-        np.array([-half, max_y + half, 0, 1]),
-    ]
-    labels = ["top-left", "top-right", "bottom-right", "bottom-left"]
-    corners_cam = [(T_board_in_cam @ pt)[:3] for pt in board_corners]
-    return corners_cam, labels
-
+# ---------------------------------------------------------------------------
+# Workflow functions
+# ---------------------------------------------------------------------------
 
 def run_verify(width, height, dry_run):
     """Verify calibration by moving the arm above checkerboard corners."""
@@ -605,6 +319,8 @@ def connect_arm101(config, safe_mode=False):
 
 
 def main():
+    global _board_detector
+
     sd = '--sd' in sys.argv
     verify = '--verify' in sys.argv
     dry_run = '--dry-run' in sys.argv
@@ -615,7 +331,6 @@ def main():
     config = load_config()
 
     # Initialize board detector from config
-    global _board_detector
     _board_detector = BoardDetector.from_config(config)
 
     if verify:
@@ -708,6 +423,7 @@ def main():
 
     # Plane save callback (GUI button)
     def save_plane():
+        import yaml as _yaml
         if len(plane_samples) < 1:
             panel.status_msg = "No plane samples — press 'g' to capture"
             print(f"  {panel.status_msg}")
@@ -727,7 +443,6 @@ def main():
         angles_deg = [np.degrees(np.arccos(np.clip(
             np.dot(n, avg_normal), -1, 1))) for n in normals]
         max_angle = max(angles_deg)
-        import yaml
         plane_path = os.path.join(
             os.path.dirname(__file__), '..', 'config', 'ground_plane.yaml')
         os.makedirs(os.path.dirname(plane_path), exist_ok=True)
@@ -739,7 +454,7 @@ def main():
             'max_angle_deg': float(max_angle),
         }
         with open(plane_path, 'w') as f:
-            yaml.dump(data, f, default_flow_style=False)
+            _yaml.dump(data, f, default_flow_style=False)
         print(f"\n=== Ground Plane ({len(plane_samples)} samples) ===")
         print(f"  Normal: [{avg_normal[0]:.5f}, {avg_normal[1]:.5f}, {avg_normal[2]:.5f}]")
         print(f"  Distance: {avg_d*1000:.1f} mm (std: {std_d*1000:.1f} mm)")
@@ -930,7 +645,6 @@ def main():
             for i, det in enumerate(intr_detections):
                 obj_pts = _board_detector.get_object_points(det)
                 corners_2d = det.corners.reshape(-1, 2)
-                # Compute per-point reprojection error using current intrinsics
                 ok, rvec, tvec = cv2.solvePnP(
                     obj_pts, corners_2d.astype(np.float64), cam_mtx, dist_c)
                 if not ok:
@@ -966,7 +680,6 @@ def main():
 
         # Draw all frames overlaid on a single canvas
         vis = np.zeros((height, width, 3), dtype=np.uint8)
-        # Color palette for frames
         frame_colors = [
             (255, 100, 100), (100, 255, 100), (100, 100, 255),
             (255, 255, 100), (255, 100, 255), (100, 255, 255),
@@ -977,7 +690,6 @@ def main():
         for fi, (idx, corners, projected, errors) in enumerate(frame_data):
             base_color = frame_colors[fi % len(frame_colors)]
             for j in range(len(corners)):
-                # Color by error: green (0px) -> yellow -> red (max_err px)
                 err_ratio = min(errors[j] / max(max_err, 0.5), 1.0)
                 r = int(255 * err_ratio)
                 g = int(255 * (1.0 - err_ratio))
@@ -986,20 +698,15 @@ def main():
                 cx, cy = int(corners[j][0]), int(corners[j][1])
                 px, py = int(projected[j][0]), int(projected[j][1])
 
-                # Detected corner: filled circle
                 cv2.circle(vis, (cx, cy), 4, color, -1)
-                # Reprojected position: hollow circle
                 cv2.circle(vis, (px, py), 4, color, 1)
-                # Line from detected to reprojected
                 cv2.line(vis, (cx, cy), (px, py), color, 1)
 
-            # Frame label near the centroid of its corners
             cx_mean = int(corners[:, 0].mean())
             cy_mean = int(corners[:, 1].mean())
             cv2.putText(vis, f"F{idx+1}", (cx_mean - 10, cy_mean),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, base_color, 1)
 
-        # Legend
         cv2.rectangle(vis, (0, 0), (width, 50), (0, 0, 0), -1)
         cv2.putText(vis, f"Intrinsics: {len(frame_data)} frames, "
                     f"mean={mean_err:.2f}px, max={max_err:.2f}px  "
@@ -1008,7 +715,6 @@ def main():
         cv2.putText(vis, "Scroll=zoom  Drag=pan  Esc/q=close",
                     (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
-        # Interactive zoom/pan viewer
         win_name = "Intrinsics Visualization"
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
         zoom = 1.0
@@ -1025,7 +731,6 @@ def main():
                     zoom = min(zoom * 1.2, 10.0)
                 else:
                     zoom = max(zoom / 1.2, 0.5)
-                # Zoom toward cursor
                 pan_x = int(x - (x - pan_x) * zoom / old_zoom)
                 pan_y = int(y - (y - pan_y) * zoom / old_zoom)
             elif event == cv2.EVENT_LBUTTONDOWN:
@@ -1041,10 +746,8 @@ def main():
         cv2.setMouseCallback(win_name, _vis_mouse)
 
         while True:
-            # Apply zoom + pan
             zh, zw = int(height * zoom), int(width * zoom)
             zoomed = cv2.resize(vis, (zw, zh), interpolation=cv2.INTER_NEAREST)
-            # Crop to viewport
             vx = max(0, -pan_x)
             vy = max(0, -pan_y)
             vx2 = min(zw, width - pan_x)
@@ -1201,22 +904,20 @@ def main():
                     display = robot_overlay.draw_base_marker(
                         display, camera.intrinsics)
 
-            # --- HUD overlay with dark backgrounds for readability ---
-
-            # Top status bar
-            board_status = f"Board: reproj {reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
+            # --- HUD overlay ---
+            board_status = (f"Board: reproj {reproj_err:.2f}px"
+                            if found and reproj_err is not None
+                            else ("Board OK" if found else "No board"))
             n_intr = len(intr_detections) if intr_detections else len(intr_frames)
             intr_str = f"  Intr:{n_intr}" if n_intr else ""
             plane_str = f"  Plane:{len(plane_samples)}" if plane_samples else ""
             jog_str = " JOG" if panel.jogging else ""
             bar_text = f"{len(pairs)} pts |{intr_str}{plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
-            # Dark background strip at top
             cv2.rectangle(display, (0, 0), (width, 32), (0, 0, 0), -1)
             cv2.putText(display, bar_text, (10, 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0, 255, 0) if found else (0, 0, 255), 1)
 
-            # Bottom help bar — two lines with dark background
             help_lines = [
                 "[i] capture intrinsics  [g] capture plane  [click] hand-eye pt  [p] pose",
                 "[Enter] solve hand-eye  [u] undo  [n] clear  [Esc] quit",
@@ -1231,7 +932,6 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                             (220, 220, 220), 1)
 
-            # Compose canvas: camera on left, panel on right
             canvas[0:height, 0:width] = display
             panel.draw(canvas)
 
@@ -1246,11 +946,9 @@ def main():
             except cv2.error:
                 break
 
-            # --- Arm control via shared panel keyboard handler ---
             if key != 255 and panel and panel.handle_key(key):
                 pass  # consumed by panel
 
-            # Print pose (keep as keyboard shortcut)
             elif key == ord('p') and robot:
                 pose = robot.get_pose()
                 angles = robot.get_angles()
@@ -1260,8 +958,6 @@ def main():
                     print(f"  Joints: {', '.join(f'{v:.2f}' for v in angles)}")
                 if pose or angles:
                     panel.status_msg = "Pose printed to console"
-
-            # --- Calibration controls ---
 
             elif key == ord('u') and pairs:
                 pairs.pop()
@@ -1275,12 +971,8 @@ def main():
                 panel.status_msg = msg
                 print(f"  {msg}")
 
-            # --- Intrinsics calibration ---
-
             elif key == ord('i'):
                 capture_intrinsics_frame()
-
-            # --- Ground plane calibration ---
 
             elif key == ord('g'):
                 capture_plane_sample()

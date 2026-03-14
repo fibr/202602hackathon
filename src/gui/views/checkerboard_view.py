@@ -37,20 +37,21 @@ import numpy as np
 
 from gui.views.base import BaseView, ViewRegistry
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
+from vision.board_detector import BoardDetector, BoardDetection
+from calibration.calib_helpers import (
+    BOARD_COLS,
+    BOARD_ROWS,
+    SQUARE_SIZE_M,
+    detect_corners,
+    compute_board_pose,
+    ray_plane_intersect,
+    solve_robust_transform,
+)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 _PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-_SCRIPTS_DIR = os.path.join(_PROJECT_ROOT, 'scripts')
-
-
-def _import_dcb():
-    """Lazy-import detect_checkerboard helpers.  Raises ImportError on failure."""
-    if _SCRIPTS_DIR not in sys.path:
-        sys.path.insert(0, _SCRIPTS_DIR)
-    import detect_checkerboard as _dcb  # noqa: F401
-    return _dcb
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ class CheckerboardCalibView(BaseView):
 
     def __init__(self, app):
         super().__init__(app)
-        self._dcb = None
+        self._board_detector = None
         self._panel = None
         self._cam_width = 640
         self._cam_height = 480
@@ -101,21 +102,13 @@ class CheckerboardCalibView(BaseView):
     # ------------------------------------------------------------------
 
     def setup(self):
-        # Lazy import
-        try:
-            self._dcb = _import_dcb()
-        except ImportError as exc:
-            self._error_msg = f'Import error: {exc}'
-            return
-
         # Initialise board detector from config
         try:
-            self._dcb._board_detector = (
-                self._dcb.BoardDetector.from_config(self.app.config))
-            print(f'  Board: {self._dcb._board_detector.describe()}')
+            self._board_detector = BoardDetector.from_config(self.app.config)
+            print(f'  Board: {self._board_detector.describe()}')
         except Exception as exc:
             print(f'  WARNING: BoardDetector init failed: {exc}')
-            self._dcb._board_detector = None
+            self._board_detector = None
 
         # Ensure camera
         self.app.ensure_camera()
@@ -224,7 +217,7 @@ class CheckerboardCalibView(BaseView):
         w, h = self._cam_width, self._cam_height
         gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
 
-        found, corners, detection = self._dcb.detect_corners(gray)
+        found, corners, detection = detect_corners(gray, board_detector=self._board_detector)
 
         display = color_image.copy()
         reproj_err = None
@@ -232,17 +225,18 @@ class CheckerboardCalibView(BaseView):
         if found:
             self._current_corners = corners
             self._current_detection = detection
-            self._current_T_board, _, reproj_err = self._dcb.compute_board_pose(
-                corners, self.app.camera.intrinsics, detection)
+            self._current_T_board, _, reproj_err = compute_board_pose(
+                corners, self.app.camera.intrinsics, detection,
+                board_detector=self._board_detector)
             self._current_reproj_err = reproj_err
 
-            if (self._dcb._board_detector is not None
+            if (self._board_detector is not None
                     and detection is not None):
-                self._dcb._board_detector.draw_corners(display, detection)
+                self._board_detector.draw_corners(display, detection)
             else:
                 cv2.drawChessboardCorners(
                     display,
-                    (self._dcb.BOARD_COLS, self._dcb.BOARD_ROWS),
+                    (BOARD_COLS, BOARD_ROWS),
                     corners, found)
         else:
             self._current_corners = None
@@ -412,7 +406,7 @@ class CheckerboardCalibView(BaseView):
             print('  No robot connected — cannot record calibration point')
             return
 
-        p_cam = self._dcb.ray_plane_intersect(
+        p_cam = ray_plane_intersect(
             (cx, cy), self.app.camera.intrinsics, self._current_T_board)
         if p_cam is None:
             msg = 'Ray parallel to board plane — try a different angle'
@@ -447,8 +441,7 @@ class CheckerboardCalibView(BaseView):
                 self._panel.status_msg = msg
             return
 
-        dcb = self._dcb
-        if dcb._board_detector is not None and self._current_detection is not None:
+        if self._board_detector is not None and self._current_detection is not None:
             self._intr_detections.append(self._current_detection)
             n = len(self._current_detection.corners)
             partial = ' (partial)' if self._current_detection.is_partial else ''
@@ -457,12 +450,12 @@ class CheckerboardCalibView(BaseView):
         else:
             # Legacy checkerboard path
             n = len(self._current_corners)
-            i_cols, i_rows = dcb.BOARD_COLS, dcb.BOARD_ROWS
-            if n != dcb.BOARD_ROWS * dcb.BOARD_COLS:
+            i_cols, i_rows = BOARD_COLS, BOARD_ROWS
+            if n != BOARD_ROWS * BOARD_COLS:
                 matched = False
-                for cc, rr in [(dcb.BOARD_COLS, dcb.BOARD_ROWS - 2),
-                               (dcb.BOARD_COLS - 2, dcb.BOARD_ROWS),
-                               (dcb.BOARD_COLS - 2, dcb.BOARD_ROWS - 2)]:
+                for cc, rr in [(BOARD_COLS, BOARD_ROWS - 2),
+                               (BOARD_COLS - 2, BOARD_ROWS),
+                               (BOARD_COLS - 2, BOARD_ROWS - 2)]:
                     if cc * rr == n:
                         i_cols, i_rows = cc, rr
                         matched = True
@@ -476,7 +469,7 @@ class CheckerboardCalibView(BaseView):
             for rr in range(i_rows):
                 for cc in range(i_cols):
                     obj_pts[rr * i_cols + cc] = [
-                        cc * dcb.SQUARE_SIZE_M, rr * dcb.SQUARE_SIZE_M, 0]
+                        cc * SQUARE_SIZE_M, rr * SQUARE_SIZE_M, 0]
             self._intr_frames.append((obj_pts, self._current_corners.copy()))
             msg = f'Intrinsics frame {len(self._intr_frames)} captured'
 
@@ -498,14 +491,13 @@ class CheckerboardCalibView(BaseView):
             return
 
         w, h = self._cam_width, self._cam_height
-        dcb = self._dcb
 
-        if self._intr_detections and dcb._board_detector is not None:
+        if self._intr_detections and self._board_detector is not None:
             print(f'\n=== Calibrating intrinsics from '
                   f'{len(self._intr_detections)} frames '
-                  f'({dcb._board_detector.describe()}) ===')
+                  f'({self._board_detector.describe()}) ===')
             try:
-                ret, calib_intr = dcb._board_detector.calibrate_intrinsics(
+                ret, calib_intr = self._board_detector.calibrate_intrinsics(
                     self._intr_detections, (w, h))
                 print(f'  Reprojection error: {ret:.4f} px')
                 calib_intr.save(self._intr_path)
@@ -550,13 +542,12 @@ class CheckerboardCalibView(BaseView):
         cam_mtx = intr.camera_matrix
         dist_c = intr.dist_coeffs
         w, h = self._cam_width, self._cam_height
-        dcb = self._dcb
 
         # Compute per-frame reprojection data
         frame_data = []
-        if n_det and dcb._board_detector is not None:
+        if n_det and self._board_detector is not None:
             for i, det in enumerate(self._intr_detections):
-                obj_pts = dcb._board_detector.get_object_points(det)
+                obj_pts = self._board_detector.get_object_points(det)
                 corners_2d = det.corners.reshape(-1, 2)
                 ok, rvec, tvec = cv2.solvePnP(
                     obj_pts, corners_2d.astype(np.float64), cam_mtx, dist_c)
@@ -768,8 +759,7 @@ class CheckerboardCalibView(BaseView):
 
         pts_cam = [p[0] for p in self._pairs]
         pts_robot = [p[1] for p in self._pairs]
-        T_cam2base, inlier_mask = self._dcb.solve_robust_transform(
-            pts_cam, pts_robot)
+        T_cam2base, inlier_mask = solve_robust_transform(pts_cam, pts_robot)
         n_inliers = int(inlier_mask.sum())
         n_outliers = len(self._pairs) - n_inliers
 

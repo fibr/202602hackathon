@@ -47,12 +47,19 @@ import numpy as np
 
 from gui.views.base import BaseView, ViewRegistry
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
+from vision.board_detector import BoardDetector, BoardDetection
+from calibration.calib_helpers import (
+    BOARD_COLS,
+    BOARD_ROWS,
+    detect_corners,
+    compute_board_pose,
+    _get_board_outer_corners_cam,
+)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 _PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-_SCRIPTS_DIR = os.path.join(_PROJECT_ROOT, 'scripts')
 
 VERIFY_HOVER_HEIGHT_M = 0.05   # 5 cm above each corner
 VERIFY_SPEED_PERCENT = 20
@@ -64,14 +71,6 @@ _S_MOVING = 'moving'
 _S_AT_CORNER = 'at_corner'
 _S_DONE = 'done'
 _S_ERROR = 'error'
-
-
-def _import_dcb():
-    """Lazy-import detect_checkerboard helpers."""
-    if _SCRIPTS_DIR not in sys.path:
-        sys.path.insert(0, _SCRIPTS_DIR)
-    import detect_checkerboard as _dcb  # noqa: F401
-    return _dcb
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +90,7 @@ class VerifyCalibView(BaseView):
 
     def __init__(self, app):
         super().__init__(app)
-        self._dcb = None
+        self._board_detector = None
         self._panel = None
         self._cam_width = 640
         self._cam_height = 480
@@ -128,21 +127,13 @@ class VerifyCalibView(BaseView):
     # ------------------------------------------------------------------
 
     def setup(self):
-        try:
-            self._dcb = _import_dcb()
-        except ImportError as exc:
-            self._state = _S_ERROR
-            self._error_msg = f'Import error: {exc}'
-            return
-
         # Initialise board detector from config
         try:
-            self._dcb._board_detector = (
-                self._dcb.BoardDetector.from_config(self.app.config))
-            print(f'  [VerifyCalib] Board: {self._dcb._board_detector.describe()}')
+            self._board_detector = BoardDetector.from_config(self.app.config)
+            print(f'  [VerifyCalib] Board: {self._board_detector.describe()}')
         except Exception as exc:
             print(f'  [VerifyCalib] WARNING: BoardDetector init failed: {exc}')
-            self._dcb._board_detector = None
+            self._board_detector = None
 
         # Load calibration
         calib_path = os.path.join(_PROJECT_ROOT, 'config', 'calibration.yaml')
@@ -254,7 +245,7 @@ class VerifyCalibView(BaseView):
     def _update_detect(self, color_image) -> np.ndarray:
         """Phase 1: detect board, wait for capture."""
         gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
-        found, corners, detection = self._dcb.detect_corners(gray)
+        found, corners, detection = detect_corners(gray, board_detector=self._board_detector)
 
         display = color_image.copy()
         reproj_err = None
@@ -262,16 +253,16 @@ class VerifyCalibView(BaseView):
         if found:
             self._current_corners = corners
             self._current_detection = detection
-            self._current_T_board, _, reproj_err = self._dcb.compute_board_pose(
-                corners, self.app.camera.intrinsics, detection)
+            self._current_T_board, _, reproj_err = compute_board_pose(
+                corners, self.app.camera.intrinsics, detection,
+                board_detector=self._board_detector)
             self._current_reproj_err = reproj_err
-            dcb = self._dcb
-            if dcb._board_detector is not None and detection is not None:
-                dcb._board_detector.draw_corners(display, detection)
+            if self._board_detector is not None and detection is not None:
+                self._board_detector.draw_corners(display, detection)
             else:
                 cv2.drawChessboardCorners(
                     display,
-                    (dcb.BOARD_COLS, dcb.BOARD_ROWS),
+                    (BOARD_COLS, BOARD_ROWS),
                     corners, found)
         else:
             self._current_corners = None
@@ -564,11 +555,10 @@ class VerifyCalibView(BaseView):
                 self._panel.status_msg = 'No board detected — hold board steady first'
             return
 
-        dcb = self._dcb
         T_board = self._current_T_board
 
         # Outer corners in camera frame → robot base frame
-        corners_cam, labels = dcb._get_board_outer_corners_cam(T_board)
+        corners_cam, labels = _get_board_outer_corners_cam(T_board, board_detector=self._board_detector)
         transform = self._transform
 
         targets = []
