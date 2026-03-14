@@ -58,16 +58,19 @@ class ControlPanelView(BaseView):
             use_arm101 = self.app.config.get('robot_type') == 'arm101'
             self._cam_height = 800 if use_arm101 else 480
 
-        # Update app view dimensions to fit camera + robot_controls panel
-        self._panel_area_width = self._cam_width + PANEL_WIDTH
-        self.app.view_width = self._panel_area_width
-        self.app.view_height = self._cam_height
-
         # Create robot control panel
         # The RobotControlPanel draws at panel_x (= camera width)
         self._panel = RobotControlPanel(
             self.app.robot, panel_x=self._cam_width,
             panel_height=self._cam_height)
+
+        # Update app view dimensions to fit camera + robot_controls panel.
+        # Height must accommodate whichever is taller: camera or panel.
+        view_h = max(self._cam_height, self._panel.min_height)
+        self._panel_area_width = self._cam_width + PANEL_WIDTH
+        self.app.view_width = self._panel_area_width
+        self.app.view_height = view_h
+        self._panel.panel_height = view_h
         speed = self.app.config.get('robot', {}).get('speed_percent', 30)
         if self.app.config.get('robot_type') == 'arm101':
             speed = self.app.config.get('arm101', {}).get('speed', 200)

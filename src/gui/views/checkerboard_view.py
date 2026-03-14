@@ -119,15 +119,12 @@ class CheckerboardCalibView(BaseView):
         self._cam_width = self.app.camera.width
         self._cam_height = self.app.camera.height
 
-        # Resize app view to camera + control panel (sidebar added by app)
-        self.app.view_width = self._cam_width + PANEL_WIDTH
-        self.app.view_height = self._cam_height
-
         # Ensure robot (optional)
         self.app.ensure_robot()
         robot = self.app.robot
 
-        # Robot control panel
+        # Robot control panel (create first to query min_height before
+        # custom buttons are added — add_button() will update min_height)
         self._panel = RobotControlPanel(
             robot,
             panel_x=self._cam_width,
@@ -176,6 +173,13 @@ class CheckerboardCalibView(BaseView):
             lambda: f"Solve HandEye ({len(self._pairs)})",
             self._solve_handeye,
             color=(0, 100, 0))
+
+        # Resize app view to camera + control panel (sidebar added by app).
+        # Height must accommodate whichever is taller: camera or panel.
+        view_h = max(self._cam_height, self._panel.min_height)
+        self.app.view_width = self._cam_width + PANEL_WIDTH
+        self.app.view_height = view_h
+        self._panel.panel_height = view_h
 
         # Load existing calibration for robot-joint overlay
         calib_path = os.path.join(_PROJECT_ROOT, 'config', 'calibration.yaml')

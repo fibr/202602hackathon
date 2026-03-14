@@ -191,6 +191,15 @@ class RobotControlPanel:
         # Status area starts here
         self.status_y = y
 
+        # Estimate total height needed (status lines + margin)
+        # Status area: TCP (2 lines) + Joints (2 lines) + Mode + Jog + Msg ≈ 7×18 + margin
+        self._min_height = y + 7 * 18 + 20
+
+    @property
+    def min_height(self) -> int:
+        """Minimum canvas height needed to display all panel elements."""
+        return self._min_height
+
     def add_button(self, label, callback, color=(80, 60, 100)):
         """Add a custom button to the panel. Call before first draw.
 

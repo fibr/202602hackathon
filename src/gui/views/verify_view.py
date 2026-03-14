@@ -168,10 +168,6 @@ class VerifyCalibView(BaseView):
         self._cam_width = self.app.camera.width
         self._cam_height = self.app.camera.height
 
-        # Resize view to camera + control panel
-        self.app.view_width = self._cam_width + PANEL_WIDTH
-        self.app.view_height = self._cam_height
-
         # CLI --dry-run flag pre-sets dry-run before robot check
         if getattr(self.app.args, 'dry_run', False):
             self._dry_run = True
@@ -216,6 +212,13 @@ class VerifyCalibView(BaseView):
 
         self._panel.add_button(_dry_run_label, self._toggle_dry_run,
                                color=(80, 50, 0))
+
+        # Resize view to camera + control panel.
+        # Height must accommodate whichever is taller: camera or panel.
+        view_h = max(self._cam_height, self._panel.min_height)
+        self.app.view_width = self._cam_width + PANEL_WIDTH
+        self.app.view_height = view_h
+        self._panel.panel_height = view_h
 
     # ------------------------------------------------------------------
     def update(self, canvas):
