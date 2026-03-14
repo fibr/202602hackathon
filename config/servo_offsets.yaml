@@ -1,0 +1,32 @@
+# Servo zero-offset calibration for SO-ARM101
+#
+# Each motor's "zero_raw" is the raw servo position (0-4095) that corresponds
+# to URDF joint angle 0°. The standard assumption of 2048 for all motors
+# is WRONG because servo horns are installed at different physical angles.
+#
+# Calibrated by positioning the arm in its URDF zero configuration
+# (arm extended forward) and recording the raw positions.
+#
+# Usage:  motor_angle_deg = (raw_position - zero_raw) * 360/4096
+#
+# Last calibrated: 2026-03-14
+
+zero_offsets:
+  shoulder_pan:     # Motor 1 (J1)
+    motor_id: 1
+    zero_raw: 2026    # close to 2048, small correction
+  shoulder_lift:    # Motor 2 (J2)
+    motor_id: 2
+    zero_raw: 1577    # LARGE offset — horn installed ~41° off from 2048
+  elbow_flex:       # Motor 3 (J3)
+    motor_id: 3
+    zero_raw: 2012    # close to 2048, small correction
+  wrist_flex:       # Motor 4 (J4)
+    motor_id: 4
+    zero_raw: 2048    # exactly at servo center — correctly installed
+  wrist_roll:       # Motor 5 (J5)
+    motor_id: 5
+    zero_raw: 2925    # LARGE offset — horn installed ~77° off from 2048
+  gripper:          # Motor 6 (J6)
+    motor_id: 6
+    zero_raw: 1948    # gripper center

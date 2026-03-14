@@ -12,12 +12,19 @@ Motor mapping (SO-101 follower):
     ID 5: wrist_roll
     ID 6: gripper
 
-Position range: 0-4095 (12-bit), 2048 = center (~180°).
+Position range: 0-4095 (12-bit).
 Resolution: 360° / 4096 ≈ 0.088° per step.
+
+Zero-offset calibration:
+    Each motor's 0° may NOT be at raw position 2048. Servo horns are
+    installed at different physical angles, so per-motor offsets are loaded
+    from config/servo_offsets.yaml. Without offsets, defaults to 2048.
 """
 
+import os
 import time
 import numpy as np
+import yaml
 from typing import Optional
 
 # Try importing scservo_sdk; provide helpful error if missing
@@ -54,9 +61,31 @@ ADDR_PRESENT_SPEED = 58
 ADDR_PRESENT_LOAD = 60
 
 # Position conversion constants
-POS_CENTER = 2048       # Center position (0° = center for our purposes)
+POS_CENTER = 2048       # Default center (used if no calibration offset)
 POS_PER_DEG = 4096.0 / 360.0   # ~11.378 steps per degree
 DEG_PER_POS = 360.0 / 4096.0   # ~0.0879 degrees per step
+
+# Per-motor zero offsets file
+_SERVO_OFFSETS_PATH = os.path.join(
+    os.path.dirname(__file__), '..', '..', 'config', 'servo_offsets.yaml')
+
+
+def _load_servo_offsets() -> dict:
+    """Load per-motor zero offsets from config/servo_offsets.yaml.
+
+    Returns:
+        Dict mapping motor_id (int) -> zero_raw (int).
+        Missing motors default to POS_CENTER (2048).
+    """
+    path = os.path.normpath(_SERVO_OFFSETS_PATH)
+    offsets = {}
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f) or {}
+        for name, info in data.get('zero_offsets', {}).items():
+            if isinstance(info, dict) and 'motor_id' in info and 'zero_raw' in info:
+                offsets[info['motor_id']] = info['zero_raw']
+    return offsets
 
 # Gripper positions (motor 6)
 GRIPPER_OPEN_POS = 2600
@@ -106,6 +135,20 @@ class LeRobotArm101:
         self.port_handler = PortHandler(port)
         self.packet_handler = PacketHandler(0)  # Protocol 0 for STS/SCS
 
+        # Per-motor zero offsets (raw position corresponding to 0°)
+        self._zero_offsets = _load_servo_offsets()
+        if self._zero_offsets:
+            non_default = {mid: off for mid, off in self._zero_offsets.items()
+                          if off != POS_CENTER}
+            if non_default:
+                print(f"  Servo offsets loaded: "
+                      f"{', '.join(f'M{m}={o}' for m, o in sorted(non_default.items()))}")
+
+        # FK-based Z safety: prevent table collisions
+        # Set min_safe_z_mm to the table height + margin (mm above arm base)
+        self._z_safety_enabled = True
+        self._min_safe_z_mm = 30.0  # Minimum safe Z in mm (above arm base origin)
+
         # State cache
         self._cached_positions = None  # raw positions (0-4095)
         self._last_query_time = 0.0
@@ -151,12 +194,13 @@ class LeRobotArm101:
     def enable_torque(self, motor_ids: Optional[list] = None):
         """Enable torque on specified motors (default: all).
 
-        In safe mode, applies reduced max torque before enabling.
+        Always explicitly sets max torque to prevent stale values
+        from previous safe-mode sessions persisting in servo RAM.
         """
         ids = motor_ids or self.motor_ids
-        if self.safe_mode:
-            for mid in ids:
-                self._write2(mid, ADDR_MAX_TORQUE, SAFE_MODE_MAX_TORQUE)
+        torque_val = SAFE_MODE_MAX_TORQUE if self.safe_mode else 1023
+        for mid in ids:
+            self._write2(mid, ADDR_MAX_TORQUE, torque_val)
         for mid in ids:
             self._write1(mid, ADDR_TORQUE_ENABLE, 1)
         self._enabled = True
@@ -189,6 +233,22 @@ class LeRobotArm101:
                 for mid in self.motor_ids:
                     self._write2(mid, ADDR_MAX_TORQUE, 1023)  # full torque
             print(f"  Safe mode OFF (speed={DEFAULT_MOVE_SPEED}, full torque)")
+
+    def set_z_safety(self, enabled: bool = True, min_z_mm: float = 30.0):
+        """Configure FK-based Z-height safety to prevent table collisions.
+
+        When enabled, write_all_angles() checks the FK position of the
+        commanded joint angles and rejects commands that would place the
+        end-effector below min_z_mm.
+
+        Args:
+            enabled: True to enable safety checks.
+            min_z_mm: Minimum allowed Z height in mm (above arm base origin).
+        """
+        self._z_safety_enabled = enabled
+        self._min_safe_z_mm = min_z_mm
+        print(f"  Z safety {'ON' if enabled else 'OFF'}"
+              f"{f' (min_z={min_z_mm:.0f}mm)' if enabled else ''}")
 
     # --- Position reading ---
 
@@ -223,7 +283,7 @@ class LeRobotArm101:
             List of 6 angle values in degrees.
         """
         positions = self.read_all_positions()
-        return [self._pos_to_deg(p) for p in positions]
+        return [self._pos_to_deg(p, mid) for p, mid in zip(positions, self.motor_ids)]
 
     # --- Position writing ---
 
@@ -255,20 +315,45 @@ class LeRobotArm101:
 
         Args:
             motor_id: Motor ID (1-6).
-            angle_deg: Target angle in degrees (0° = center/2048).
+            angle_deg: Target angle in degrees (0° = calibrated zero).
             speed: Movement speed. None = use default.
         """
-        pos = self._deg_to_pos(angle_deg)
+        pos = self._deg_to_pos(angle_deg, motor_id)
         self.write_position(motor_id, pos, speed)
 
     def write_all_angles(self, angles: list, speed: int = None):
         """Write goal angles in degrees to all motors.
 
+        Includes FK-based safety check: rejects commands that would move
+        the end-effector below MIN_SAFE_Z_MM to prevent table collisions.
+
         Args:
             angles: List of 6 target angles in degrees.
             speed: Movement speed. None = use default.
+
+        Raises:
+            ValueError: If the target angles would place the arm below safe Z.
         """
-        positions = [self._deg_to_pos(a) for a in angles]
+        # FK safety check (first 5 joints determine TCP position)
+        if len(angles) >= 5 and self._z_safety_enabled:
+            try:
+                solver = _get_fk_solver()
+                pos_mm, _ = solver.forward_kin(np.array(angles[:5], dtype=float))
+                if pos_mm[2] < self._min_safe_z_mm:
+                    raise ValueError(
+                        f"SAFETY: Target Z={pos_mm[2]:.0f}mm is below minimum "
+                        f"{self._min_safe_z_mm}mm. FK=({pos_mm[0]:.0f},"
+                        f"{pos_mm[1]:.0f},{pos_mm[2]:.0f}). "
+                        f"Command rejected to prevent table collision."
+                    )
+            except ImportError:
+                pass  # FK solver not available, skip check
+            except ValueError:
+                raise  # Re-raise our safety exception
+            except Exception:
+                pass  # Other errors (e.g., bad angles), skip check
+
+        positions = [self._deg_to_pos(a, mid) for a, mid in zip(angles, self.motor_ids)]
         self.write_all_positions(positions, speed)
 
     # --- Gripper ---
@@ -378,17 +463,27 @@ class LeRobotArm101:
                 f"{self.packet_handler.getTxRxResult(result)}"
             )
 
-    @staticmethod
-    def _pos_to_deg(pos: int) -> float:
-        """Convert raw position (0-4095) to degrees. 2048 = 0°."""
+    def _pos_to_deg(self, pos: int, motor_id: int = None) -> float:
+        """Convert raw position (0-4095) to degrees using per-motor zero offset.
+
+        Args:
+            pos: Raw servo position (0-4095).
+            motor_id: Motor ID for offset lookup. None = use default center.
+        """
         if pos < 0:
             return -999.0  # error sentinel
-        return (pos - POS_CENTER) * DEG_PER_POS
+        center = self._zero_offsets.get(motor_id, POS_CENTER) if motor_id else POS_CENTER
+        return (pos - center) * DEG_PER_POS
 
-    @staticmethod
-    def _deg_to_pos(deg: float) -> int:
-        """Convert degrees to raw position (0-4095). 0° = 2048."""
-        pos = int(round(deg * POS_PER_DEG + POS_CENTER))
+    def _deg_to_pos(self, deg: float, motor_id: int = None) -> int:
+        """Convert degrees to raw position (0-4095) using per-motor zero offset.
+
+        Args:
+            deg: Angle in degrees (0° = calibrated zero position).
+            motor_id: Motor ID for offset lookup. None = use default center.
+        """
+        center = self._zero_offsets.get(motor_id, POS_CENTER) if motor_id else POS_CENTER
+        pos = int(round(deg * POS_PER_DEG + center))
         return max(0, min(4095, pos))
 
     # --- Context manager ---
