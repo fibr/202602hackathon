@@ -28,6 +28,10 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh scripts/test_ik.py              # Validate local IK against robot's built-in FK/IK
 ./run.sh scripts/demo_cube.py            # Random reachable poses demo (default)
 ./run.sh scripts/demo_cube.py --mode cube # Trace cube corners
+./scripts/run_digital_twin.sh            # Isaac Sim digital twin (arm101 + cubes)
+./scripts/run_digital_twin.sh --headless # Digital twin headless mode
+./scripts/run_digital_twin.sh --enable_cameras  # With simulated cameras
+./scripts/run_digital_twin.sh --mirror   # Mirror real arm joints in sim
 ```
 
 ## Logging
