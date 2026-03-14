@@ -20,6 +20,7 @@ Flags:
     --no-robot     Don't initialize robot
     --safe         Safe mode (reduced torque/speed, arm101 only)
     --sd           Use 640x480 camera resolution
+    --dry-run      Pre-enable dry-run mode (no arm movement) for views that support it
 """
 
 import argparse
@@ -488,6 +489,8 @@ def parse_args():
                         help='Safe mode (reduced torque/speed, arm101)')
     parser.add_argument('--sd', action='store_true',
                         help='Use 640x480 camera resolution')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Pre-enable dry-run mode (no arm movement) for views that support it')
     return parser.parse_args()
 
 

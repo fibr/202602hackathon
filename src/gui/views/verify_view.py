@@ -168,6 +168,11 @@ class VerifyCalibView(BaseView):
         self.app.view_width = self._cam_width + PANEL_WIDTH
         self.app.view_height = self._cam_height
 
+        # CLI --dry-run flag pre-sets dry-run before robot check
+        if getattr(self.app.args, 'dry_run', False):
+            self._dry_run = True
+            print('  [VerifyCalib] --dry-run flag set — dry-run mode enabled')
+
         # Robot (optional)
         self.app.ensure_robot()
         if self.app.robot is None:
