@@ -18,10 +18,8 @@ import argparse
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from config_loader import load_config
-from robot import DobotNova5
-from kinematics import IKSolver
-from planner.trajectory import execute_trajectory
+from config_loader import load_config, connect_robot
+from planner.trajectory import quintic_trajectory
 
 
 # Cube corner visit order (Hamiltonian path)
@@ -44,7 +42,7 @@ def generate_cube_targets(center, size, rpy):
     return targets
 
 
-def generate_random_targets(n, max_reach_mm, min_z_mm, ik, rpy_base,
+def generate_random_targets(n, max_reach_mm, min_z_mm, solve_ik_fn, rpy_base,
                             rpy_vary_deg=30.0):
     """Generate random reachable poses within a sphere of max_reach_mm.
 
@@ -73,7 +71,7 @@ def generate_random_targets(n, max_reach_mm, min_z_mm, ik, rpy_base,
         rpy += np.random.uniform(-rpy_vary_deg, rpy_vary_deg, 3)
 
         # Check IK feasibility
-        joints = ik.solve_ik(p, rpy, seed_joints_deg=seed)
+        joints = solve_ik_fn(p, rpy, seed_joints_deg=seed)
         if joints is not None:
             targets.append((p, rpy))
             seed = joints
@@ -111,9 +109,31 @@ def main():
         np.random.seed(args.seed)
 
     config = load_config()
-    rc = config.get('robot', {})
-    gc = config.get('gripper', {})
-    ik = IKSolver(tool_length_mm=gc.get('tool_length_mm', 100.0))
+    robot_type = config.get('robot_type', 'nova5')
+
+    if robot_type == 'arm101':
+        from kinematics.arm101_ik_solver import Arm101IKSolver
+        _ik = Arm101IKSolver()
+        def solve_ik(pos, rpy, seed_joints_deg=None):
+            return _ik.solve_ik(pos, rpy, seed_motor_deg=seed_joints_deg)
+        # arm101 is much smaller than Nova5 — adjust defaults
+        if '--reach' not in sys.argv:
+            args.reach = 200.0
+        if '--min-z' not in sys.argv:
+            args.min_z = 30.0
+        if '--center' not in sys.argv:
+            args.center = '120,0,120'
+        if '--size' not in sys.argv:
+            args.size = 40.0
+        if '--rx' not in sys.argv:
+            args.rx = 0.0
+    else:
+        from kinematics import IKSolver
+        gc = config.get('gripper', {})
+        _ik = IKSolver(tool_length_mm=gc.get('tool_length_mm', 100.0))
+        def solve_ik(pos, rpy, seed_joints_deg=None):
+            return _ik.solve_ik(pos, rpy, seed_joints_deg=seed_joints_deg)
+
     rpy_base = np.array([args.rx, 0.0, 0.0])
 
     # Generate targets
@@ -126,7 +146,7 @@ def main():
         print(f"Generating {args.n} random reachable poses "
               f"(reach<={args.reach}mm, z>={args.min_z}mm)...")
         targets = generate_random_targets(
-            args.n, args.reach, args.min_z, ik, rpy_base)
+            args.n, args.reach, args.min_z, solve_ik, rpy_base)
         print(f"  Found {len(targets)} reachable poses")
         if len(targets) == 0:
             print("  No reachable poses found. Try increasing --reach.")
@@ -137,7 +157,7 @@ def main():
     target_joints = []
     seed = None
     for i, (pos, rpy) in enumerate(targets):
-        joints = ik.solve_ik(pos, rpy, seed_joints_deg=seed)
+        joints = solve_ik(pos, rpy, seed_joints_deg=seed)
         if joints is None:
             print(f"  Target {i}: ({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f}) — SKIP (IK fail)")
             continue
@@ -151,29 +171,42 @@ def main():
         print("No valid targets!")
         return
 
-    print(f"\n{len(target_joints)} targets ready. Connecting to robot...")
+    print(f"\n{len(target_joints)} targets ready. Connecting to {robot_type}...")
 
-    robot = DobotNova5(
-        ip=rc.get('ip', '192.168.5.1'),
-        dashboard_port=rc.get('dashboard_port', 29999),
-    )
+    robot = connect_robot(config)
+    is_arm101 = getattr(robot, 'robot_type', None) == 'arm101'
+
+    def get_current_joints():
+        if is_arm101:
+            return np.array(robot.get_angles() or robot.read_all_angles())
+        return np.array(robot.get_joint_angles())
+
+    def move_smooth(q_start, q_goal, max_step_deg):
+        """Execute a smooth trajectory using quintic interpolation."""
+        steps = quintic_trajectory(q_start, q_goal, max_step_deg=max_step_deg)
+        for q in steps[1:]:  # skip q_start
+            if is_arm101:
+                ok = robot.move_joints(q.tolist())
+                time.sleep(0.02)  # small delay for servo settling
+            else:
+                ok = robot.movj_joints(*q, timeout=10.0)
+            if not ok:
+                return False
+        return True
 
     try:
-        robot.connect()
-        robot.clear_error()
-        robot.enable()
-        robot.set_speed(args.speed)
-        time.sleep(1)
+        if not is_arm101:
+            robot.set_speed(args.speed)
+        time.sleep(0.5)
 
-        current = robot.get_joint_angles()
+        current = get_current_joints()
         print(f"Current joints: [{','.join(f'{j:.1f}' for j in current)}]")
 
         # Move to first target
         pos0, rpy0, joints0 = target_joints[0]
-        first_joints = ik.solve_ik(pos0, rpy0, seed_joints_deg=current)
+        first_joints = solve_ik(pos0, rpy0, seed_joints_deg=current)
         print(f"\nMoving to first target ({pos0[0]:.0f},{pos0[1]:.0f},{pos0[2]:.0f})...")
-        if not execute_trajectory(robot, current, first_joints,
-                                  max_step_deg=args.max_step):
+        if not move_smooth(current, first_joints, args.max_step):
             print("ERROR: Failed to reach first target")
             return
 
@@ -186,7 +219,7 @@ def main():
 
             for i, (pos, rpy, pre_joints) in enumerate(target_joints):
                 # Re-solve with current seed for continuity
-                joints = ik.solve_ik(pos, rpy, seed_joints_deg=prev_joints)
+                joints = solve_ik(pos, rpy, seed_joints_deg=prev_joints)
                 if joints is None:
                     continue
 
@@ -196,8 +229,7 @@ def main():
                         f"r={dist:.0f}mm Δ={travel:.0f}°"
                 print(f"  -> {label}", end="", flush=True)
 
-                ok = execute_trajectory(robot, prev_joints, joints,
-                                        max_step_deg=args.max_step)
+                ok = move_smooth(prev_joints, joints, args.max_step)
                 if ok:
                     print(" OK")
                     move_count += 1
@@ -212,8 +244,12 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
-        robot.disable()
-        robot.disconnect()
+        if is_arm101:
+            robot.disable_torque()
+            robot.disconnect()
+        else:
+            robot.disable()
+            robot.disconnect()
         print("Disconnected.")
 
 

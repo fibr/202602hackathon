@@ -1,5 +1,7 @@
-# Robot configuration for Dobot Nova5 + RealSense D435i system
+# Active robot: 'arm101' (SO-ARM101) or 'nova5' (Dobot Nova5)
+robot_type: arm101
 
+# Dobot Nova5 configuration (used when robot_type: nova5)
 robot:
   ip: "192.168.5.1"
   dashboard_port: 29999       # All commands including MovJ/MovL (V4 syntax)
@@ -8,12 +10,12 @@ robot:
 camera:
   # type: 'realsense' uses Intel RealSense D435i (RGB + depth)
   # type: 'webcam'    uses any OpenCV-compatible USB camera (RGB only)
-  type: realsense
+  type: webcam
   width: 640
   height: 480
-  fps: 15
+  fps: 30
   # Webcam-only options (ignored for realsense):
-  device_index: 0             # OpenCV VideoCapture device index
+  device_index: 4             # Logitech BRIO (workspace overview)
   assumed_depth_m: 1.0        # Fixed depth for pixel_to_3d (meters); tune to
                               # match your actual camera-to-table distance
   # Rod detection parameters

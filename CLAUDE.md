@@ -17,10 +17,9 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ```bash
 ./run.sh scripts/test_robot.py           # Ping, connect, enable, jog wiggle + gripper
 ./run.sh scripts/test_robot.py --diag    # Dashboard diagnostics only (no motion)
-./run.sh scripts/control_panel.py        # Camera + GUI control panel (OpenCV, Dobot)
-./run.sh scripts/control_panel.py --arm101           # arm101 control panel
-./run.sh scripts/control_panel.py --arm101 --safe    # arm101 with reduced torque/speed
-./run.sh scripts/control_panel.py --arm101 --no-camera  # arm101 without camera
+./run.sh scripts/control_panel.py        # Camera + GUI control panel (uses robot_type from config)
+./run.sh scripts/control_panel.py --safe             # arm101 with reduced torque/speed
+./run.sh scripts/control_panel.py --no-camera        # Without camera
 ./run.sh scripts/collect_dataset.py --no-robot   # Live camera feed with detection
 ./run.sh scripts/collect_dataset.py --snapshot   # Single-frame detection debug (6-stage images)
 ./run.sh scripts/handeye_calibrate.py             # Hand-eye cal with yellow tape (default, cam4)
@@ -67,7 +66,7 @@ Defined in `requirements.txt`: pyrealsense2, opencv-python, numpy, PyYAML, pin (
 Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Driver**
 
 - `src/main.py` — State machine orchestrator (INIT → DETECT → PLAN → EXECUTE → DONE)
-- `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge)
+- `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge); `connect_robot(config)` factory returns connected robot based on `robot_type`
 - `src/gui/` — Shared OpenCV GUI panel for robot arm control (XY jog pad, Z, gripper, speed, enable/home, status)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
@@ -77,7 +76,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/robot/dobot_api.py` — TCP/IP driver, dashboard port 29999 only (V4 syntax)
 - `assets/nova5_robot.urdf` — Official Nova5 URDF with configurable gripper tool_tip frame
 - `src/robot/gripper.py` — Electric gripper via ToolDOInstant dual-channel control
-- `config/robot_config.yaml` — Shared config (robot IP, speeds, camera, detection thresholds)
+- `config/robot_config.yaml` — Shared config; `robot_type: arm101|nova5` selects active robot
 - `config/settings.yaml` — Local overrides, gitignored (create to override any config value)
 - `config/calibration.yaml` — Generated camera-to-base 4×4 matrix
 - `docs/architecture.md` — System design, coordinate frames, risk analysis

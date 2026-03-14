@@ -2,8 +2,10 @@
 """Interactive control panel for robot arms with OpenCV GUI.
 
 Supports:
-  - Dobot Nova5 (default): TCP/IP dashboard protocol
-  - LeRobot arm101 (--arm101): Feetech STS3215 servos over serial
+  - Dobot Nova5: TCP/IP dashboard protocol
+  - LeRobot arm101: Feetech STS3215 servos over serial
+
+Robot type is set by robot_type in config/robot_config.yaml.
 
 Camera live view on the left, clickable control panel on the right.
 GUI controls: XY jog pad, Z up/down, gripper, speed, enable/home.
@@ -11,7 +13,6 @@ Keyboard shortcuts: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed,
     v enable/torque, s safe mode (arm101), l log position, p pose, Esc quit.
 
 Flags:
-    --arm101     Use LeRobot arm101 instead of Dobot Nova5
     --safe       Start in safe mode (reduced torque/speed, arm101 only)
     --no-camera  Run without camera
     --sd         Use 640x480 instead of 1280x720
@@ -176,8 +177,8 @@ def connect_arm101(config, safe_mode=False):
 
 def main():
     config = load_config()
-    use_arm101 = '--arm101' in sys.argv
     safe_mode = '--safe' in sys.argv
+    use_arm101 = config.get('robot_type', 'nova5') == 'arm101'
 
     # Camera resolution
     sd = '--sd' in sys.argv
