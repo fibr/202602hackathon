@@ -49,15 +49,19 @@ from scipy.optimize import least_squares
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from vision import RealSenseCamera, CameraIntrinsics, create_camera
+from vision.board_detector import BoardDetector, BoardDetection
 from config_loader import load_config
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from calibration import CoordinateTransform
 from visualization import RobotOverlay
 
-# Checkerboard parameters
+# Legacy checkerboard parameters (used as fallback when no config)
 BOARD_COLS = 7   # inner corners (8 squares - 1)
 BOARD_ROWS = 9   # inner corners (10 squares - 1)
 SQUARE_SIZE_M = 0.02  # 2cm squares
+
+# Module-level board detector, set by main() from config
+_board_detector: BoardDetector = None
 
 SNAP_RADIUS_PX = 30  # max pixel distance to snap click to a corner
 
@@ -113,13 +117,30 @@ class RobotConnection:
 
 
 def detect_corners(gray):
-    """Find checkerboard corners using multiple strategies."""
+    """Find board corners using the configured BoardDetector.
+
+    Returns (found, corners, detection) when using BoardDetector,
+    or (found, corners, None) for legacy checkerboard fallback.
+    The 3-tuple is backwards compatible — callers that only unpack 2
+    values will still work because Python ignores extra unpacked values
+    when called via: found, corners = detect_corners(gray)  # won't work
+    So we return a wrapper that behaves like the old (bool, ndarray) tuple
+    but carries the detection as well.
+    """
+    global _board_detector
+    if _board_detector is not None:
+        det = _board_detector.detect(gray)
+        if det is not None:
+            return True, det.corners, det
+        return False, None, None
+
+    # Legacy fallback (no BoardDetector configured)
     try:
         found, corners = cv2.findChessboardCornersSB(
             gray, (BOARD_COLS, BOARD_ROWS),
             cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY)
         if found:
-            return found, corners
+            return found, corners, None
     except cv2.error:
         pass
 
@@ -130,7 +151,7 @@ def detect_corners(gray):
     if found:
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
         corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
-        return found, corners
+        return found, corners, None
 
     blurred = cv2.GaussianBlur(gray, (0, 0), 3)
     sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
@@ -141,7 +162,7 @@ def detect_corners(gray):
     if found:
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
         corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
-        return found, corners
+        return found, corners, None
 
     for cols, rows in [(BOARD_COLS, BOARD_ROWS - 2), (BOARD_COLS - 2, BOARD_ROWS),
                        (BOARD_COLS - 2, BOARD_ROWS - 2)]:
@@ -150,19 +171,29 @@ def detect_corners(gray):
                 gray, (cols, rows), cv2.CALIB_CB_EXHAUSTIVE)
             if found:
                 print(f"  (detected {cols}x{rows} subset of board)")
-                return found, corners
+                return found, corners, None
         except cv2.error:
             pass
 
-    return False, None
+    return False, None, None
 
 
-def compute_board_pose(corners_2d, intrinsics):
+def compute_board_pose(corners_2d, intrinsics, detection=None):
     """solvePnP -> (T_board_in_cam 4x4, obj_points, reproj_error_px).
 
     reproj_error_px is the RMS reprojection error in pixels — measures how
     well the current intrinsics explain the detected corners.
+
+    Args:
+        corners_2d: Detected corners (Nx1x2 or Nx2)
+        intrinsics: CameraIntrinsics
+        detection: Optional BoardDetection for charuco ID-based obj points
     """
+    global _board_detector
+    if _board_detector is not None and detection is not None:
+        return _board_detector.compute_pose(detection, intrinsics)
+
+    # Legacy fallback (no detector or no detection metadata)
     n = len(corners_2d)
     if n == BOARD_ROWS * BOARD_COLS:
         cols, rows = BOARD_COLS, BOARD_ROWS
@@ -406,10 +437,19 @@ VERIFY_SPEED_PERCENT = 20
 
 
 def _get_board_outer_corners_cam(T_board_in_cam):
-    """Get 4 outer corners of the checkerboard in camera frame (meters)."""
-    half = SQUARE_SIZE_M / 2.0
-    max_x = (BOARD_COLS - 1) * SQUARE_SIZE_M
-    max_y = (BOARD_ROWS - 1) * SQUARE_SIZE_M
+    """Get 4 outer corners of the calibration board in camera frame (meters)."""
+    global _board_detector
+    if _board_detector is not None:
+        sq = _board_detector.square_size_m
+        inner_cols = _board_detector.inner_cols
+        inner_rows = _board_detector.inner_rows
+    else:
+        sq = SQUARE_SIZE_M
+        inner_cols = BOARD_COLS
+        inner_rows = BOARD_ROWS
+    half = sq / 2.0
+    max_x = (inner_cols - 1) * sq
+    max_y = (inner_rows - 1) * sq
     board_corners = [
         np.array([-half, -half, 0, 1]),
         np.array([max_x + half, -half, 0, 1]),
@@ -450,15 +490,18 @@ def run_verify(width, height, dry_run):
             if color_image is None:
                 continue
             gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
-            found, corners = detect_corners(gray)
+            found, corners, detection = detect_corners(gray)
 
             display = color_image.copy()
             if found:
-                cv2.drawChessboardCorners(display, (BOARD_COLS, BOARD_ROWS), corners, found)
+                if _board_detector is not None and detection is not None:
+                    _board_detector.draw_corners(display, detection)
+                else:
+                    cv2.drawChessboardCorners(display, (BOARD_COLS, BOARD_ROWS), corners, found)
                 cv2.putText(display, f"Found {len(corners)} corners - press 'c'",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             else:
-                cv2.putText(display, "No checkerboard",
+                cv2.putText(display, "No board detected",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
             cv2.imshow('Calibration Verify', display)
@@ -475,7 +518,8 @@ def run_verify(width, height, dry_run):
                 return
 
             if key == ord('c') and found:
-                T_board_in_cam, _, _ = compute_board_pose(corners, camera.intrinsics)
+                T_board_in_cam, _, _ = compute_board_pose(
+                    corners, camera.intrinsics, detection)
                 corners_2d = corners
                 break
     finally:
@@ -568,17 +612,22 @@ def main():
     safe_mode = '--safe' in sys.argv
     width, height = (640, 480) if sd else (1280, 720)
 
+    config = load_config()
+
+    # Initialize board detector from config
+    global _board_detector
+    _board_detector = BoardDetector.from_config(config)
+
     if verify:
         run_verify(width, height, dry_run)
         return
 
-    config = load_config()
     rc = config.get('robot', {})
     ip = rc.get('ip', '192.168.5.1')
     port = rc.get('dashboard_port', 29999)
 
     print("=== Interactive Calibration ===")
-    print(f"Board: {BOARD_COLS+1}x{BOARD_ROWS+1} squares, {SQUARE_SIZE_M*100:.0f}cm")
+    print(f"Board: {_board_detector.describe()}")
     print(f"Resolution: {width}x{height}")
     print()
     print("Arm control: GUI panel on right (XY pad, Z, gripper, speed, enable/home)")
@@ -760,11 +809,13 @@ def main():
     # State
     pairs = []  # list of (p_cam_3d_meters, p_robot_3d_meters, corner_2d_px)
     current_corners = None
+    current_detection = None  # BoardDetection (for charuco ID-based ops)
     current_T_board = None
     click_point = None
 
     # Intrinsics calibration state
-    intr_frames = []  # list of (obj_points, img_points) for cv2.calibrateCamera
+    intr_frames = []      # list of (obj_points, img_points) for legacy calibration
+    intr_detections = []  # list of BoardDetection for BoardDetector calibration
     intr_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'camera_intrinsics.yaml')
 
     # Ground plane calibration state
@@ -790,7 +841,7 @@ def main():
                 continue
 
             gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
-            found, corners = detect_corners(gray)
+            found, corners, detection = detect_corners(gray)
 
             # Create canvas (camera + panel)
             canvas_w = width + PANEL_WIDTH
@@ -800,21 +851,18 @@ def main():
             reproj_err = None
             if found:
                 current_corners = corners
+                current_detection = detection
                 current_T_board, _, reproj_err = compute_board_pose(
-                    corners, camera.intrinsics)
+                    corners, camera.intrinsics, detection)
 
-                cv2.drawChessboardCorners(display, (BOARD_COLS, BOARD_ROWS), corners, found)
-
-                n_cols = BOARD_COLS
-                n = len(corners)
-                if n != BOARD_ROWS * BOARD_COLS:
-                    for c, r in [(BOARD_COLS, BOARD_ROWS - 2), (BOARD_COLS - 2, BOARD_ROWS),
-                                 (BOARD_COLS - 2, BOARD_ROWS - 2)]:
-                        if c * r == n:
-                            n_cols = c
-                            break
+                if _board_detector is not None and detection is not None:
+                    _board_detector.draw_corners(display, detection)
+                else:
+                    cv2.drawChessboardCorners(
+                        display, (BOARD_COLS, BOARD_ROWS), corners, found)
             else:
                 current_corners = None
+                current_detection = None
                 current_T_board = None
 
             # Handle click — ray-plane intersection with checkerboard plane
@@ -873,7 +921,8 @@ def main():
 
             # Status bar on camera image
             board_status = f"Board OK reproj:{reproj_err:.2f}px" if found and reproj_err is not None else ("Board OK" if found else "No board")
-            intr_str = f"Intr:{len(intr_frames)}" if intr_frames else ""
+            n_intr = len(intr_detections) if intr_detections else len(intr_frames)
+            intr_str = f"Intr:{n_intr}" if n_intr else ""
             plane_str = f"Plane:{len(plane_samples)}" if plane_samples else ""
             jog_str = " JOG" if panel.jogging else ""
             bar_text = f"{len(pairs)} pts | {intr_str} {plane_str} | Spd:{panel.speed}%{jog_str} | {board_status}"
@@ -935,9 +984,17 @@ def main():
                     msg = "No board detected — can't capture for intrinsics"
                     panel.status_msg = msg
                     print(f"  {msg}")
+                elif _board_detector is not None and current_detection is not None:
+                    # BoardDetector path (charuco or checkerboard)
+                    intr_detections.append(current_detection)
+                    n_corners = len(current_detection.corners)
+                    partial = " (partial)" if current_detection.is_partial else ""
+                    msg = f"Intrinsics frame {len(intr_detections)} captured: {n_corners} corners{partial}"
+                    panel.status_msg = msg
+                    print(f"  {msg}")
                 else:
+                    # Legacy checkerboard fallback
                     n = len(current_corners)
-                    # Determine grid size for this detection
                     i_cols, i_rows = BOARD_COLS, BOARD_ROWS
                     if n != BOARD_ROWS * BOARD_COLS:
                         for cc, rr in [(BOARD_COLS, BOARD_ROWS - 2),
@@ -963,11 +1020,32 @@ def main():
 
             elif key == ord('I'):
                 # Run intrinsics calibration
-                if len(intr_frames) < 5:
-                    msg = f"Need 5+ frames for intrinsics (have {len(intr_frames)})"
+                n_frames = len(intr_detections) if intr_detections else len(intr_frames)
+                if n_frames < 5:
+                    msg = f"Need 5+ frames for intrinsics (have {n_frames})"
                     panel.status_msg = msg
                     print(f"  {msg}")
+                elif intr_detections and _board_detector is not None:
+                    # BoardDetector calibration (charuco or checkerboard)
+                    print(f"\n=== Calibrating intrinsics from {len(intr_detections)} frames ({_board_detector.describe()}) ===")
+                    try:
+                        ret, calib_intr = _board_detector.calibrate_intrinsics(
+                            intr_detections, (width, height))
+                        print(f"  Reprojection error: {ret:.4f} px")
+                        print(f"  Camera matrix:\n{calib_intr.camera_matrix}")
+                        print(f"  Distortion: {calib_intr.dist_coeffs}")
+                        calib_intr.save(intr_path)
+                        print(f"  Saved to {intr_path}")
+                        camera.intrinsics = calib_intr
+                        msg = f"Intrinsics saved! reproj={ret:.3f}px ({len(intr_detections)} frames)"
+                        panel.status_msg = msg
+                        print(f"  {msg}")
+                    except Exception as e:
+                        msg = f"Calibration failed: {e}"
+                        panel.status_msg = msg
+                        print(f"  {msg}")
                 else:
+                    # Legacy calibration
                     obj_points = [f[0] for f in intr_frames]
                     img_points = [f[1] for f in intr_frames]
                     print(f"\n=== Calibrating intrinsics from {len(intr_frames)} frames ===")
@@ -977,7 +1055,6 @@ def main():
                     print(f"  Camera matrix:\n{mtx}")
                     print(f"  Distortion: {dist.ravel()}")
 
-                    # Save
                     calib_intr = CameraIntrinsics(
                         fx=mtx[0, 0], fy=mtx[1, 1],
                         ppx=mtx[0, 2], ppy=mtx[1, 2],
@@ -987,7 +1064,6 @@ def main():
                     calib_intr.save(intr_path)
                     print(f"  Saved to {intr_path}")
 
-                    # Apply immediately
                     camera.intrinsics = calib_intr
                     msg = f"Intrinsics saved! reproj={ret:.3f}px"
                     panel.status_msg = msg

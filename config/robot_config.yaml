@@ -25,6 +25,15 @@ camera:
   depth_min_mm: 6000          # Closest valid depth (workspace ~6-19m from camera)
   depth_max_mm: 19000         # Farthest valid depth (only used for realsense)
 
+# Calibration board
+calibration_board:
+  type: charuco               # 'charuco' or 'checkerboard'
+  cols: 13                    # Number of squares along X
+  rows: 9                     # Number of squares along Y
+  square_size_mm: 20.0        # Checkerboard square side length (mm)
+  marker_size_mm: 15.0        # ArUco marker side length (mm)
+  dictionary: DICT_4X4_250    # ArUco dictionary name
+
 rod:
   diameter_mm: 27.0            # Rod diameter (used to compute centroid height above table)
   length_mm: 175.0             # Rod length
