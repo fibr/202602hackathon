@@ -33,6 +33,7 @@ calibration_board:
   square_size_mm: 20.0        # Checkerboard square side length (mm)
   marker_size_mm: 15.0        # ArUco marker side length (mm)
   dictionary: DICT_4X4_250    # ArUco dictionary name
+  legacy_pattern: true        # true for boards printed before OpenCV 4.7 (incl. calib.io)
 
 rod:
   diameter_mm: 27.0            # Rod diameter (used to compute centroid height above table)

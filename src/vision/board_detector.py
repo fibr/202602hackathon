@@ -66,7 +66,8 @@ class BoardDetector:
                  cols: int = 13, rows: int = 9,
                  square_size_m: float = 0.020,
                  marker_size_m: float = 0.015,
-                 dictionary_name: str = 'DICT_4X4_250'):
+                 dictionary_name: str = 'DICT_4X4_250',
+                 legacy_pattern: bool = False):
         self.board_type = board_type.lower()
         self.square_size_m = square_size_m
         self.marker_size_m = marker_size_m
@@ -84,7 +85,12 @@ class BoardDetector:
             self._dictionary = aruco.getPredefinedDictionary(dict_id)
             self._charuco_board = aruco.CharucoBoard(
                 (cols, rows), square_size_m, marker_size_m, self._dictionary)
+            # Legacy pattern for boards printed before OpenCV 4.7 (incl. calib.io)
+            self._legacy_pattern = legacy_pattern
+            if legacy_pattern:
+                self._charuco_board.setLegacyPattern(True)
             self._detector = aruco.CharucoDetector(self._charuco_board)
+            self._init_detector_params()
         elif self.board_type == 'checkerboard':
             # For checkerboard, cols/rows ARE the inner corners directly
             self.inner_cols = cols
@@ -96,6 +102,20 @@ class BoardDetector:
         else:
             raise ValueError(f"Unknown board type: {board_type!r} "
                              "(expected 'charuco' or 'checkerboard')")
+
+    def _init_detector_params(self):
+        """Configure ArUco detector parameters for real-world conditions."""
+        det_params = self._detector.getDetectorParameters()
+        det_params.adaptiveThreshWinSizeMin = 3
+        det_params.adaptiveThreshWinSizeMax = 23
+        det_params.adaptiveThreshWinSizeStep = 10
+        det_params.adaptiveThreshConstant = 7
+        self._detector.setDetectorParameters(det_params)
+
+    def _rebuild_detector(self):
+        """Rebuild CharucoDetector after changing board settings."""
+        self._detector = aruco.CharucoDetector(self._charuco_board)
+        self._init_detector_params()
 
     @classmethod
     def from_config(cls, config: dict) -> 'BoardDetector':
@@ -121,6 +141,7 @@ class BoardDetector:
                 square_size_m=bc.get('square_size_mm', 20.0) / 1000.0,
                 marker_size_m=bc.get('marker_size_mm', 15.0) / 1000.0,
                 dictionary_name=bc.get('dictionary', 'DICT_4X4_250'),
+                legacy_pattern=bc.get('legacy_pattern', False),
             )
         else:
             # Legacy checkerboard: cols/rows are inner corners
@@ -150,14 +171,39 @@ class BoardDetector:
             return self._detect_checkerboard(gray)
 
     def _detect_charuco(self, gray: np.ndarray) -> Optional[BoardDetection]:
-        """Detect CharucoBoard corners using the CharucoDetector API."""
+        """Detect CharucoBoard corners using the CharucoDetector API.
+
+        Automatically tries legacy marker pattern if the default fails,
+        since many printed boards use the pre-OpenCV-4.7 layout.
+        """
         charuco_corners, charuco_ids, marker_corners, marker_ids = (
             self._detector.detectBoard(gray))
 
-        if charuco_corners is None or len(charuco_corners) < 4:
+        n_markers = len(marker_corners) if marker_corners is not None else 0
+        n_charuco = len(charuco_corners) if charuco_corners is not None else 0
+
+        # Auto-detect legacy pattern if detection fails
+        if n_charuco < 4 and not self._legacy_pattern:
+            self._charuco_board.setLegacyPattern(True)
+            self._legacy_pattern = True
+            self._rebuild_detector()
+            reason = (f"{n_markers} markers but {n_charuco} corners"
+                      if n_markers > 0 else "no markers found")
+            print(f"  CharucoDetector: {reason} — trying legacy pattern")
+            charuco_corners, charuco_ids, marker_corners, marker_ids = (
+                self._detector.detectBoard(gray))
+            n_markers = len(marker_corners) if marker_corners is not None else 0
+            n_charuco = len(charuco_corners) if charuco_corners is not None else 0
+            if n_charuco < 4 and n_markers == 0:
+                # Legacy didn't help either — switch back
+                self._charuco_board.setLegacyPattern(False)
+                self._legacy_pattern = False
+                self._rebuild_detector()
+
+        if n_charuco < 4:
             return None
 
-        is_partial = len(charuco_corners) < self.inner_cols * self.inner_rows
+        is_partial = n_charuco < self.inner_cols * self.inner_rows
         return BoardDetection(
             corners=charuco_corners.reshape(-1, 1, 2).astype(np.float32),
             ids=charuco_ids.flatten() if charuco_ids is not None else None,
