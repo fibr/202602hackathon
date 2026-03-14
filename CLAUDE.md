@@ -91,6 +91,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `config/robot_config.yaml` — Shared config; `robot_type: arm101|nova5` selects active robot
 - `config/settings.yaml` — Local overrides, gitignored (create to override any config value)
 - `config/calibration.yaml` — Generated camera-to-base 4×4 matrix
+- `config/servo_offsets.yaml` — Per-motor zero offsets AND joint signs for arm101
 - `docs/architecture.md` — System design, coordinate frames, risk analysis
 - `docs/hackathon_api_reference.txt` — Hackathon team's ROS2/Docker/FastAPI reference implementation
 
@@ -143,6 +144,21 @@ All public interfaces use mm and degrees. Internal math uses meters and radians.
 ## Git
 
 - Never add `Co-Authored-By` lines to commit messages
+
+## Calibration Workflow (arm101)
+
+Recommended order after assembling the arm:
+
+1. **Camera intrinsics** — `[1] Checkerboard` in calibration menu. Captures checkerboard images, saves intrinsics to `config/cameras.yaml`.
+2. **Servo direction + offset auto-calib** — `[5] Servo Direction Auto-Calib` in calibration menu. Attach yellow tape to gripper TCP, move arm to 8-12+ diverse poses, press SPACE at each. Press S to auto-solve: brute-forces all 32 sign combinations, picks the one with lowest reprojection error. Saves signs + offsets to `config/servo_offsets.yaml`.
+3. **Hand-eye calibration** — `[3] Hand-Eye (Yellow Tape)` in calibration menu. Reuses the corrected signs/offsets. Collect 6+ FK+pixel correspondences, press S to jointly optimize remaining offset refinement + camera extrinsics.
+
+The servo direction auto-calibration (step 2) replaces the old manual "move arm to zero pose" workflow. It automatically determines:
+- **Direction (sign)**: Whether increasing raw servo position matches URDF positive rotation (+1) or is inverted (-1).
+- **Zero offset**: The raw position corresponding to 0 degrees for each joint.
+- **Scale check**: Implicitly verified by reprojection error — if scale were wrong, error would be high.
+
+Joint signs are now stored in `config/servo_offsets.yaml` under `joint_signs:` and loaded automatically by `arm101_ik_solver.py`.
 
 ## Code Conventions
 

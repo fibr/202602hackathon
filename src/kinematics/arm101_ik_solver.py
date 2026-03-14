@@ -22,18 +22,56 @@ verify FK moves the same way.
 import os
 import numpy as np
 import pinocchio as pin
+import yaml
 
 # URDF path relative to this file
 _URDF_PATH = os.path.join(
     os.path.dirname(__file__), '..', '..', 'assets', 'so101', 'so101_new_calib.urdf')
 
-# Per-joint sign correction: +1 = motor and URDF agree, -1 = inverted.
+# Default per-joint sign correction: +1 = motor and URDF agree, -1 = inverted.
 # Order: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
-# Empirical: verify with scripts/test_arm101_fk.py
-JOINT_SIGNS = np.array([+1, -1, -1, -1, -1], dtype=float)
+# These are used if servo_offsets.yaml does not contain a joint_signs section.
+_DEFAULT_JOINT_SIGNS = np.array([+1, -1, -1, -1, -1], dtype=float)
+
+_MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
+                'wrist_flex', 'wrist_roll']
 
 # Per-joint offset in degrees (motor_deg * sign + offset = urdf_deg)
 JOINT_OFFSETS_DEG = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+
+# Servo offsets config path
+_SERVO_OFFSETS_PATH = os.path.join(
+    os.path.dirname(__file__), '..', '..', 'config', 'servo_offsets.yaml')
+
+
+def _load_joint_signs() -> np.ndarray:
+    """Load joint signs from config/servo_offsets.yaml if available.
+
+    Falls back to _DEFAULT_JOINT_SIGNS if the file doesn't exist or
+    doesn't contain a joint_signs section.
+
+    Returns:
+        Array of 5 sign values (+1 or -1).
+    """
+    path = os.path.normpath(_SERVO_OFFSETS_PATH)
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            signs_data = data.get('joint_signs')
+            if signs_data and isinstance(signs_data, dict):
+                signs = np.array([
+                    float(signs_data.get(name, _DEFAULT_JOINT_SIGNS[i]))
+                    for i, name in enumerate(_MOTOR_NAMES)
+                ], dtype=float)
+                return signs
+        except Exception:
+            pass
+    return _DEFAULT_JOINT_SIGNS.copy()
+
+
+# Module-level JOINT_SIGNS loaded from config (or defaults)
+JOINT_SIGNS = _load_joint_signs()
 
 # Number of IK-controlled joints (exclude gripper)
 N_IK_JOINTS = 5

@@ -61,6 +61,8 @@ class CalibrationView(BaseView):
              'Capture FK+pixel poses, joint solve  (arm101)'),
             ('[4] Verify Checkerboard (subprocess)',
              'Move arm above board corners to verify'),
+            ('[5] Servo Direction Auto-Calib',
+             'Auto-detect servo signs + offsets via yellow tape (arm101)'),
         ]
         for i, (label, desc) in enumerate(options):
             # Option 4 is subprocess-only; dim it if subprocess is running
@@ -89,7 +91,7 @@ class CalibrationView(BaseView):
 
         # Footer hint
         cv2.putText(canvas,
-                    '[1-3] open embedded view  |  [4] subprocess (console input required)',
+                    '[1-3,5] open embedded view  |  [4] subprocess (console input)',
                     (20, vh - 15), FONT, 0.32, (80, 80, 80), 1)
 
     def handle_key(self, key):
@@ -105,6 +107,9 @@ class CalibrationView(BaseView):
         if key == ord('4'):
             if not self._verify_running:
                 self._launch_verify()
+            return True
+        if key == ord('5'):
+            self.app.switch_view('servo_direction')
             return True
         return False
 
