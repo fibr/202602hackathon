@@ -194,13 +194,12 @@ class LeRobotArm101:
     def enable_torque(self, motor_ids: Optional[list] = None):
         """Enable torque on specified motors (default: all).
 
-        Always explicitly sets max torque to prevent stale values
-        from previous safe-mode sessions persisting in servo RAM.
+        In safe mode, applies reduced max torque before enabling.
         """
         ids = motor_ids or self.motor_ids
-        torque_val = SAFE_MODE_MAX_TORQUE if self.safe_mode else 1023
-        for mid in ids:
-            self._write2(mid, ADDR_MAX_TORQUE, torque_val)
+        if self.safe_mode:
+            for mid in ids:
+                self._write2(mid, ADDR_MAX_TORQUE, SAFE_MODE_MAX_TORQUE)
         for mid in ids:
             self._write1(mid, ADDR_TORQUE_ENABLE, 1)
         self._enabled = True
@@ -283,7 +282,7 @@ class LeRobotArm101:
             List of 6 angle values in degrees.
         """
         positions = self.read_all_positions()
-        return [self._pos_to_deg(p, mid) for p, mid in zip(positions, self.motor_ids)]
+        return [self._pos_to_deg(p) for p in positions]
 
     # --- Position writing ---
 
@@ -318,7 +317,7 @@ class LeRobotArm101:
             angle_deg: Target angle in degrees (0° = calibrated zero).
             speed: Movement speed. None = use default.
         """
-        pos = self._deg_to_pos(angle_deg, motor_id)
+        pos = self._deg_to_pos(angle_deg)
         self.write_position(motor_id, pos, speed)
 
     def write_all_angles(self, angles: list, speed: int = None):
@@ -353,7 +352,7 @@ class LeRobotArm101:
             except Exception:
                 pass  # Other errors (e.g., bad angles), skip check
 
-        positions = [self._deg_to_pos(a, mid) for a, mid in zip(angles, self.motor_ids)]
+        positions = [self._deg_to_pos(a) for a in angles]
         self.write_all_positions(positions, speed)
 
     # --- Gripper ---
@@ -463,26 +462,67 @@ class LeRobotArm101:
                 f"{self.packet_handler.getTxRxResult(result)}"
             )
 
-    def _pos_to_deg(self, pos: int, motor_id: int = None) -> float:
-        """Convert raw position (0-4095) to degrees using per-motor zero offset.
+    @staticmethod
+    def _pos_to_deg(pos: int) -> float:
+        """Convert raw position (0-4095) to degrees relative to center (2048).
 
         Args:
-            pos: Raw servo position (0-4095).
-            motor_id: Motor ID for offset lookup. None = use default center.
+            pos: Raw servo position (0-4095). Negative values return error sentinel.
+
+        Returns:
+            Angle in degrees (0° = POS_CENTER = 2048), or -999.0 on error.
         """
         if pos < 0:
             return -999.0  # error sentinel
-        center = self._zero_offsets.get(motor_id, POS_CENTER) if motor_id else POS_CENTER
+        return (pos - POS_CENTER) * DEG_PER_POS
+
+    @staticmethod
+    def _deg_to_pos(deg: float) -> int:
+        """Convert degrees to raw position (0-4095) relative to center (2048).
+
+        Args:
+            deg: Angle in degrees (0° = POS_CENTER = 2048).
+
+        Returns:
+            Clamped raw position in [0, 4095].
+        """
+        pos = int(round(deg * POS_PER_DEG + POS_CENTER))
+        return max(0, min(4095, pos))
+
+    def _pos_to_deg_motor(self, pos: int, motor_id: int) -> float:
+        """Convert raw position to degrees using per-motor zero offset.
+
+        Uses the calibrated zero_raw for motor_id (from servo_offsets.yaml)
+        as the baseline instead of POS_CENTER.  Falls back to _pos_to_deg()
+        if no offset is loaded for the motor.
+
+        Args:
+            pos: Raw servo position (0-4095).
+            motor_id: Motor ID for offset lookup.
+
+        Returns:
+            Calibrated angle in degrees, or -999.0 on error.
+        """
+        if pos < 0:
+            return -999.0
+        center = self._zero_offsets.get(motor_id, POS_CENTER)
         return (pos - center) * DEG_PER_POS
 
-    def _deg_to_pos(self, deg: float, motor_id: int = None) -> int:
-        """Convert degrees to raw position (0-4095) using per-motor zero offset.
+    def _deg_to_pos_motor(self, deg: float, motor_id: int) -> int:
+        """Convert degrees to raw position using per-motor zero offset.
+
+        Uses the calibrated zero_raw for motor_id (from servo_offsets.yaml)
+        as the baseline instead of POS_CENTER.  Falls back to _deg_to_pos()
+        if no offset is loaded for the motor.
 
         Args:
             deg: Angle in degrees (0° = calibrated zero position).
-            motor_id: Motor ID for offset lookup. None = use default center.
+            motor_id: Motor ID for offset lookup.
+
+        Returns:
+            Clamped raw position in [0, 4095].
         """
-        center = self._zero_offsets.get(motor_id, POS_CENTER) if motor_id else POS_CENTER
+        center = self._zero_offsets.get(motor_id, POS_CENTER)
         pos = int(round(deg * POS_PER_DEG + center))
         return max(0, min(4095, pos))
 
