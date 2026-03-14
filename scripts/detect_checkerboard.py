@@ -632,9 +632,10 @@ def main():
     print()
     print("Arm control: GUI panel on right (XY pad, Z, gripper, speed, enable/home)")
     print("             Keyboard: 1-6/!@#$%^ jog, space stop, c/o gripper, [/] speed, v enable")
-    print("Intrinsics:  i capture frame | I calibrate & save (need 10+ frames)")
-    print("Plane:       g capture sample | 'Save Plane' button to average & save")
-    print("Hand-eye:    click record point | Enter solve | u undo | n clear")
+    print("Intrinsics:  'i' or button to capture | button to calibrate & save (5+ frames)")
+    print("             button to visualize reprojection errors")
+    print("Plane:       'g' or button to capture | button to save")
+    print("Hand-eye:    click record point | Enter or button to solve | u undo | n clear")
     print("             Esc quit | p print pose")
     print()
 
@@ -791,6 +792,287 @@ def main():
         solve_handeye,
         color=(0, 100, 0))
 
+    # Intrinsics capture callback (GUI button + 'i' key)
+    def capture_intrinsics_frame():
+        if current_corners is None:
+            msg = "No board detected — can't capture"
+            panel.status_msg = msg
+            print(f"  {msg}")
+            return
+        if _board_detector is not None and current_detection is not None:
+            intr_detections.append(current_detection)
+            n_corners = len(current_detection.corners)
+            partial = " (partial)" if current_detection.is_partial else ""
+            msg = f"Intrinsics frame {len(intr_detections)}: {n_corners} corners{partial}"
+            panel.status_msg = msg
+            print(f"  {msg}")
+        else:
+            n = len(current_corners)
+            i_cols, i_rows = BOARD_COLS, BOARD_ROWS
+            if n != BOARD_ROWS * BOARD_COLS:
+                for cc, rr in [(BOARD_COLS, BOARD_ROWS - 2),
+                               (BOARD_COLS - 2, BOARD_ROWS),
+                               (BOARD_COLS - 2, BOARD_ROWS - 2)]:
+                    if cc * rr == n:
+                        i_cols, i_rows = cc, rr
+                        break
+                else:
+                    msg = f"Unexpected corner count {n}, skipping"
+                    panel.status_msg = msg
+                    print(f"  {msg}")
+                    return
+            obj_pts = np.zeros((i_rows * i_cols, 3), dtype=np.float32)
+            for rr in range(i_rows):
+                for cc in range(i_cols):
+                    obj_pts[rr * i_cols + cc] = [
+                        cc * SQUARE_SIZE_M, rr * SQUARE_SIZE_M, 0]
+            intr_frames.append((obj_pts, current_corners.copy()))
+            msg = f"Intrinsics frame {len(intr_frames)} captured"
+            panel.status_msg = msg
+            print(f"  {msg}")
+
+    panel.add_button(
+        lambda: f"Capture Intr ({len(intr_detections) or len(intr_frames)})",
+        capture_intrinsics_frame,
+        color=(100, 80, 0))
+
+    # Intrinsics calibrate callback (GUI button + 'I' key)
+    def calibrate_intrinsics():
+        n_frames = len(intr_detections) if intr_detections else len(intr_frames)
+        if n_frames < 5:
+            msg = f"Need 5+ frames (have {n_frames})"
+            panel.status_msg = msg
+            print(f"  {msg}")
+            return
+        if intr_detections and _board_detector is not None:
+            print(f"\n=== Calibrating intrinsics from {len(intr_detections)} frames ({_board_detector.describe()}) ===")
+            try:
+                ret, calib_intr = _board_detector.calibrate_intrinsics(
+                    intr_detections, (width, height))
+                print(f"  Reprojection error: {ret:.4f} px")
+                print(f"  Camera matrix:\n{calib_intr.camera_matrix}")
+                print(f"  Distortion: {calib_intr.dist_coeffs}")
+                calib_intr.save(intr_path)
+                print(f"  Saved to {intr_path}")
+                camera.intrinsics = calib_intr
+                msg = f"Intrinsics saved! reproj={ret:.3f}px ({len(intr_detections)} frames)"
+                panel.status_msg = msg
+                print(f"  {msg}")
+            except Exception as e:
+                msg = f"Calibration failed: {e}"
+                panel.status_msg = msg
+                print(f"  {msg}")
+        else:
+            obj_points = [f[0] for f in intr_frames]
+            img_points = [f[1] for f in intr_frames]
+            print(f"\n=== Calibrating intrinsics from {len(intr_frames)} frames ===")
+            ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
+                obj_points, img_points, (width, height), None, None)
+            print(f"  Reprojection error: {ret:.4f} px")
+            print(f"  Camera matrix:\n{mtx}")
+            print(f"  Distortion: {dist.ravel()}")
+
+            calib_intr = CameraIntrinsics(
+                fx=mtx[0, 0], fy=mtx[1, 1],
+                ppx=mtx[0, 2], ppy=mtx[1, 2],
+                coeffs=dist.ravel().tolist())
+            calib_intr.width = width
+            calib_intr.height = height
+            calib_intr.save(intr_path)
+            print(f"  Saved to {intr_path}")
+
+            camera.intrinsics = calib_intr
+            msg = f"Intrinsics saved! reproj={ret:.3f}px"
+            panel.status_msg = msg
+            print(f"  {msg}")
+
+    panel.add_button(
+        lambda: f"Calibrate Intr ({len(intr_detections) or len(intr_frames)})",
+        calibrate_intrinsics,
+        color=(0, 100, 100))
+
+    # Ground plane capture callback (GUI button + 'g' key)
+    def capture_plane_sample():
+        if current_T_board is None:
+            panel.status_msg = "No board — can't capture plane sample"
+            return
+        R_board = current_T_board[:3, :3]
+        t_board = current_T_board[:3, 3]
+        normal = R_board[:, 2]
+        d = np.dot(normal, t_board)
+        plane_samples.append((normal, d))
+        msg = f"Plane sample {len(plane_samples)}: d={d*1000:.1f}mm"
+        panel.status_msg = msg
+        print(f"  {msg}  normal=[{normal[0]:.4f},{normal[1]:.4f},{normal[2]:.4f}]")
+
+    panel.add_button(
+        lambda: f"Capture Plane ({len(plane_samples)})",
+        capture_plane_sample,
+        color=(80, 80, 0))
+
+    # Intrinsics visualization callback
+    def visualize_intrinsics():
+        """Show all captured intrinsics frames with reprojection errors."""
+        n_det = len(intr_detections)
+        n_leg = len(intr_frames)
+        if n_det == 0 and n_leg == 0:
+            panel.status_msg = "No intrinsics frames captured yet"
+            return
+
+        # Get current intrinsics for reprojection
+        intr = camera.intrinsics
+        cam_mtx = intr.camera_matrix
+        dist_c = intr.dist_coeffs
+
+        # Build per-frame data: list of (frame_idx, corners_2d, obj_pts, per_pt_errors)
+        frame_data = []
+        if n_det and _board_detector is not None:
+            for i, det in enumerate(intr_detections):
+                obj_pts = _board_detector.get_object_points(det)
+                corners_2d = det.corners.reshape(-1, 2)
+                # Compute per-point reprojection error using current intrinsics
+                ok, rvec, tvec = cv2.solvePnP(
+                    obj_pts, corners_2d.astype(np.float64), cam_mtx, dist_c)
+                if not ok:
+                    continue
+                projected, _ = cv2.projectPoints(obj_pts, rvec, tvec, cam_mtx, dist_c)
+                projected = projected.reshape(-1, 2)
+                errors = np.linalg.norm(corners_2d - projected, axis=1)
+                frame_data.append((i, corners_2d, projected, errors))
+        else:
+            for i, (obj_pts, img_pts) in enumerate(intr_frames):
+                corners_2d = img_pts.reshape(-1, 2)
+                ok, rvec, tvec = cv2.solvePnP(
+                    obj_pts, corners_2d.astype(np.float64), cam_mtx, dist_c)
+                if not ok:
+                    continue
+                projected, _ = cv2.projectPoints(obj_pts, rvec, tvec, cam_mtx, dist_c)
+                projected = projected.reshape(-1, 2)
+                errors = np.linalg.norm(corners_2d - projected, axis=1)
+                frame_data.append((i, corners_2d, projected, errors))
+
+        if not frame_data:
+            panel.status_msg = "No valid frames for visualization"
+            return
+
+        # Collect all errors for color scale
+        all_errors = np.concatenate([fd[3] for fd in frame_data])
+        max_err = max(all_errors.max(), 1.0)
+        mean_err = all_errors.mean()
+        print(f"\n=== Intrinsics Visualization: {len(frame_data)} frames ===")
+        print(f"  Mean reproj error: {mean_err:.3f}px, Max: {max_err:.3f}px")
+        for idx, _, _, errs in frame_data:
+            print(f"  Frame {idx+1}: mean={errs.mean():.3f}px max={errs.max():.3f}px ({len(errs)} pts)")
+
+        # Draw all frames overlaid on a single canvas
+        vis = np.zeros((height, width, 3), dtype=np.uint8)
+        # Color palette for frames
+        frame_colors = [
+            (255, 100, 100), (100, 255, 100), (100, 100, 255),
+            (255, 255, 100), (255, 100, 255), (100, 255, 255),
+            (200, 150, 100), (100, 200, 150), (150, 100, 200),
+            (200, 200, 200),
+        ]
+
+        for fi, (idx, corners, projected, errors) in enumerate(frame_data):
+            base_color = frame_colors[fi % len(frame_colors)]
+            for j in range(len(corners)):
+                # Color by error: green (0px) -> yellow -> red (max_err px)
+                err_ratio = min(errors[j] / max(max_err, 0.5), 1.0)
+                r = int(255 * err_ratio)
+                g = int(255 * (1.0 - err_ratio))
+                color = (0, g, r)  # BGR
+
+                cx, cy = int(corners[j][0]), int(corners[j][1])
+                px, py = int(projected[j][0]), int(projected[j][1])
+
+                # Detected corner: filled circle
+                cv2.circle(vis, (cx, cy), 4, color, -1)
+                # Reprojected position: hollow circle
+                cv2.circle(vis, (px, py), 4, color, 1)
+                # Line from detected to reprojected
+                cv2.line(vis, (cx, cy), (px, py), color, 1)
+
+            # Frame label near the centroid of its corners
+            cx_mean = int(corners[:, 0].mean())
+            cy_mean = int(corners[:, 1].mean())
+            cv2.putText(vis, f"F{idx+1}", (cx_mean - 10, cy_mean),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, base_color, 1)
+
+        # Legend
+        cv2.rectangle(vis, (0, 0), (width, 50), (0, 0, 0), -1)
+        cv2.putText(vis, f"Intrinsics: {len(frame_data)} frames, "
+                    f"mean={mean_err:.2f}px, max={max_err:.2f}px  "
+                    f"[filled=detected, hollow=reprojected, green=low err, red=high]",
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
+        cv2.putText(vis, "Scroll=zoom  Drag=pan  Esc/q=close",
+                    (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
+
+        # Interactive zoom/pan viewer
+        win_name = "Intrinsics Visualization"
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+        zoom = 1.0
+        pan_x, pan_y = 0, 0
+        dragging = False
+        drag_start = (0, 0)
+        pan_start = (0, 0)
+
+        def _vis_mouse(event, x, y, flags, param):
+            nonlocal zoom, pan_x, pan_y, dragging, drag_start, pan_start
+            if event == cv2.EVENT_MOUSEWHEEL:
+                old_zoom = zoom
+                if flags > 0:
+                    zoom = min(zoom * 1.2, 10.0)
+                else:
+                    zoom = max(zoom / 1.2, 0.5)
+                # Zoom toward cursor
+                pan_x = int(x - (x - pan_x) * zoom / old_zoom)
+                pan_y = int(y - (y - pan_y) * zoom / old_zoom)
+            elif event == cv2.EVENT_LBUTTONDOWN:
+                dragging = True
+                drag_start = (x, y)
+                pan_start = (pan_x, pan_y)
+            elif event == cv2.EVENT_MOUSEMOVE and dragging:
+                pan_x = pan_start[0] + (x - drag_start[0])
+                pan_y = pan_start[1] + (y - drag_start[1])
+            elif event == cv2.EVENT_LBUTTONUP:
+                dragging = False
+
+        cv2.setMouseCallback(win_name, _vis_mouse)
+
+        while True:
+            # Apply zoom + pan
+            zh, zw = int(height * zoom), int(width * zoom)
+            zoomed = cv2.resize(vis, (zw, zh), interpolation=cv2.INTER_NEAREST)
+            # Crop to viewport
+            vx = max(0, -pan_x)
+            vy = max(0, -pan_y)
+            vx2 = min(zw, width - pan_x)
+            vy2 = min(zh, height - pan_y)
+            viewport = np.zeros((height, width, 3), dtype=np.uint8)
+            dx = max(0, pan_x)
+            dy = max(0, pan_y)
+            cw = min(vx2 - vx, width - dx)
+            ch = min(vy2 - vy, height - dy)
+            if cw > 0 and ch > 0:
+                viewport[dy:dy+ch, dx:dx+cw] = zoomed[vy:vy+ch, vx:vx+cw]
+            cv2.imshow(win_name, viewport)
+            key = cv2.waitKey(30) & 0xFF
+            if key == 27 or key == ord('q'):
+                break
+            try:
+                if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            except cv2.error:
+                break
+        cv2.destroyWindow(win_name)
+        panel.status_msg = f"Vis closed (mean={mean_err:.2f}px)"
+
+    panel.add_button(
+        lambda: f"Visualize Intr ({len(intr_detections) or len(intr_frames)})",
+        visualize_intrinsics,
+        color=(100, 0, 100))
+
     # Robot overlay (load calibration if available)
     robot_overlay = None
     calibration_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
@@ -936,8 +1218,8 @@ def main():
 
             # Bottom help bar — two lines with dark background
             help_lines = [
-                "[i] capture intrinsics frame  [I] calibrate  [g] capture plane  [Esc] quit",
-                "[click] record hand-eye pt  [Enter] solve  [u] undo  [n] clear  [p] pose",
+                "[i] capture intrinsics  [g] capture plane  [click] hand-eye pt  [p] pose",
+                "[Enter] solve hand-eye  [u] undo  [n] clear  [Esc] quit",
             ]
             line_h = 22
             bar_h = line_h * len(help_lines) + 8
@@ -996,112 +1278,12 @@ def main():
             # --- Intrinsics calibration ---
 
             elif key == ord('i'):
-                # Capture frame for intrinsics calibration
-                if not found or current_corners is None:
-                    msg = "No board detected — can't capture for intrinsics"
-                    panel.status_msg = msg
-                    print(f"  {msg}")
-                elif _board_detector is not None and current_detection is not None:
-                    # BoardDetector path (charuco or checkerboard)
-                    intr_detections.append(current_detection)
-                    n_corners = len(current_detection.corners)
-                    partial = " (partial)" if current_detection.is_partial else ""
-                    msg = f"Intrinsics frame {len(intr_detections)} captured: {n_corners} corners{partial}"
-                    panel.status_msg = msg
-                    print(f"  {msg}")
-                else:
-                    # Legacy checkerboard fallback
-                    n = len(current_corners)
-                    i_cols, i_rows = BOARD_COLS, BOARD_ROWS
-                    if n != BOARD_ROWS * BOARD_COLS:
-                        for cc, rr in [(BOARD_COLS, BOARD_ROWS - 2),
-                                       (BOARD_COLS - 2, BOARD_ROWS),
-                                       (BOARD_COLS - 2, BOARD_ROWS - 2)]:
-                            if cc * rr == n:
-                                i_cols, i_rows = cc, rr
-                                break
-                        else:
-                            msg = f"Unexpected corner count {n}, skipping"
-                            panel.status_msg = msg
-                            print(f"  {msg}")
-                            continue
-                    obj_pts = np.zeros((i_rows * i_cols, 3), dtype=np.float32)
-                    for rr in range(i_rows):
-                        for cc in range(i_cols):
-                            obj_pts[rr * i_cols + cc] = [
-                                cc * SQUARE_SIZE_M, rr * SQUARE_SIZE_M, 0]
-                    intr_frames.append((obj_pts, current_corners.copy()))
-                    msg = f"Intrinsics frame {len(intr_frames)} captured"
-                    panel.status_msg = msg
-                    print(f"  {msg}")
-
-            elif key == ord('I'):
-                # Run intrinsics calibration
-                n_frames = len(intr_detections) if intr_detections else len(intr_frames)
-                if n_frames < 5:
-                    msg = f"Need 5+ frames for intrinsics (have {n_frames})"
-                    panel.status_msg = msg
-                    print(f"  {msg}")
-                elif intr_detections and _board_detector is not None:
-                    # BoardDetector calibration (charuco or checkerboard)
-                    print(f"\n=== Calibrating intrinsics from {len(intr_detections)} frames ({_board_detector.describe()}) ===")
-                    try:
-                        ret, calib_intr = _board_detector.calibrate_intrinsics(
-                            intr_detections, (width, height))
-                        print(f"  Reprojection error: {ret:.4f} px")
-                        print(f"  Camera matrix:\n{calib_intr.camera_matrix}")
-                        print(f"  Distortion: {calib_intr.dist_coeffs}")
-                        calib_intr.save(intr_path)
-                        print(f"  Saved to {intr_path}")
-                        camera.intrinsics = calib_intr
-                        msg = f"Intrinsics saved! reproj={ret:.3f}px ({len(intr_detections)} frames)"
-                        panel.status_msg = msg
-                        print(f"  {msg}")
-                    except Exception as e:
-                        msg = f"Calibration failed: {e}"
-                        panel.status_msg = msg
-                        print(f"  {msg}")
-                else:
-                    # Legacy calibration
-                    obj_points = [f[0] for f in intr_frames]
-                    img_points = [f[1] for f in intr_frames]
-                    print(f"\n=== Calibrating intrinsics from {len(intr_frames)} frames ===")
-                    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
-                        obj_points, img_points, (width, height), None, None)
-                    print(f"  Reprojection error: {ret:.4f} px")
-                    print(f"  Camera matrix:\n{mtx}")
-                    print(f"  Distortion: {dist.ravel()}")
-
-                    calib_intr = CameraIntrinsics(
-                        fx=mtx[0, 0], fy=mtx[1, 1],
-                        ppx=mtx[0, 2], ppy=mtx[1, 2],
-                        coeffs=dist.ravel().tolist())
-                    calib_intr.width = width
-                    calib_intr.height = height
-                    calib_intr.save(intr_path)
-                    print(f"  Saved to {intr_path}")
-
-                    camera.intrinsics = calib_intr
-                    msg = f"Intrinsics saved! reproj={ret:.3f}px"
-                    panel.status_msg = msg
-                    print(f"  {msg}")
+                capture_intrinsics_frame()
 
             # --- Ground plane calibration ---
-            # g = capture sample (board visible) or save via button/fallback
 
             elif key == ord('g'):
-                # Capture ground plane sample (board must be visible)
-                if current_T_board is None:
-                    panel.status_msg = "No board — can't capture plane sample"
-                else:
-                    R_board = current_T_board[:3, :3]
-                    t_board = current_T_board[:3, 3]
-                    normal = R_board[:, 2]  # board Z axis in camera frame
-                    d = np.dot(normal, t_board)
-                    plane_samples.append((normal, d))
-                    msg = f"Plane sample {len(plane_samples)}: d={d*1000:.1f}mm"
-                    panel.status_msg = msg
-                    print(f"  {msg}  normal=[{normal[0]:.4f},{normal[1]:.4f},{normal[2]:.4f}]")
+                capture_plane_sample()
 
             elif key == 13:  # Enter — solve hand-eye (same as button)
                 solve_handeye()
