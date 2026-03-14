@@ -208,6 +208,19 @@ def _brute_force_signs(raw_positions_list, pts_2d, K, dist_coeffs, solver,
         offsets_opt = current_offsets_raw.copy()
         T_c2b = np.eye(4)
 
+    # Identify per-joint confidence by checking which joints differ among
+    # results that are nearly as good as the best.
+    # Use max(1.5x best, best + 3px) to catch genuine ambiguity while
+    # allowing for small numerical noise.
+    threshold = max(best['mean_err_px'] * 1.5,
+                    best['mean_err_px'] + 3.0)
+    near_best = [r for r in all_results if r['mean_err_px'] <= threshold]
+    ambiguous_joints = set()
+    for r in near_best[1:]:
+        for j in range(5):
+            if r['signs'][j] != best['signs'][j]:
+                ambiguous_joints.add(j)
+
     if verbose:
         print(f"\n  === Servo Direction Auto-Calibration Results ===")
         print(f"  Tested all {len(all_combos)} sign combinations with {n} captures")
@@ -216,19 +229,6 @@ def _brute_force_signs(raw_positions_list, pts_2d, K, dist_coeffs, solver,
             marker = ' <-- BEST' if i == 0 else ''
             print(f"    #{i+1}: signs={r['signs_str']}  "
                   f"err={r['mean_err_px']:.1f}px{marker}")
-
-        # Identify per-joint confidence by checking which joints differ
-        # among results that are nearly as good as the best.
-        # Use max(1.5x best, best + 3px) to catch genuine ambiguity
-        # while allowing for small numerical noise.
-        threshold = max(best['mean_err_px'] * 1.5,
-                        best['mean_err_px'] + 3.0)
-        near_best = [r for r in all_results if r['mean_err_px'] <= threshold]
-        ambiguous_joints = set()
-        for r in near_best[1:]:
-            for j in range(5):
-                if r['signs'][j] != best['signs'][j]:
-                    ambiguous_joints.add(j)
 
         if not ambiguous_joints:
             print(f"\n  CLEAR winner — all joints unambiguously determined")
