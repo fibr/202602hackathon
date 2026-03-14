@@ -25,6 +25,7 @@ Usage pattern (in main.py):
         servo.close_camera()
 """
 
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -127,11 +128,63 @@ class VisualServo:
     # ------------------------------------------------------------------
 
     @classmethod
+    def _compute_scale_from_config(cls, config: dict) -> float:
+        """Estimate scale_mm_per_pixel from camera FOV and pre-grasp height.
+
+        Uses the geometry of a pinhole camera looking straight down:
+
+            scale = Z_mm * tan(hfov / 2) / (img_width / 2)
+
+        where:
+          - Z_mm      = ``planner.approach_offset_z`` (mm above the target)
+          - hfov      = ``gripper_camera.hfov_deg`` converted to radians
+          - img_width = ``gripper_camera.width`` in pixels
+
+        Falls back to 0.3 mm/px if neither the planner height nor the
+        camera FOV can be determined from config.
+
+        Args:
+            config: Full config dict returned by load_config().
+
+        Returns:
+            Estimated scale_mm_per_pixel (float, mm per pixel).
+        """
+        gc = config.get('gripper_camera', {})
+        planner = config.get('planner', {})
+
+        z_mm = planner.get('approach_offset_z')
+        hfov_deg = gc.get('hfov_deg')
+        width = gc.get('width', 640)
+
+        if z_mm is None or hfov_deg is None:
+            log.debug(
+                "[SERVO] scale_mm_per_pixel: missing approach_offset_z or hfov_deg "
+                "in config — falling back to default 0.3 mm/px"
+            )
+            return 0.3
+
+        scale = z_mm * math.tan(math.radians(hfov_deg / 2.0)) / (width / 2.0)
+        log.info(
+            f"[SERVO] Auto-computed scale_mm_per_pixel={scale:.4f} "
+            f"(Z={z_mm}mm, hfov={hfov_deg}°, width={width}px)"
+        )
+        return scale
+
+    @classmethod
     def from_config(cls, config: dict) -> "VisualServo":
         """Construct a VisualServo from the project config dict.
 
         Reads the ``visual_servo`` and ``gripper_camera`` sections from
         ``config/robot_config.yaml`` (merged into *config* by load_config).
+
+        ``scale_mm_per_pixel`` is resolved in priority order:
+
+        1. Explicit float in ``visual_servo.scale_mm_per_pixel`` — used as-is.
+        2. ``null`` / missing in config — auto-computed from
+           ``gripper_camera.hfov_deg`` and ``planner.approach_offset_z``
+           using the pinhole formula
+           ``scale = Z_mm * tan(hfov/2) / (width/2)``.
+        3. Neither available — hard-coded fallback of 0.3 mm/px.
 
         Args:
             config: Full config dict returned by load_config().
@@ -142,9 +195,16 @@ class VisualServo:
         gc = config.get('gripper_camera', {})
         vs = config.get('visual_servo', {})
 
+        # Resolve scale: explicit value takes priority; None/missing → auto
+        raw_scale = vs.get('scale_mm_per_pixel')
+        if raw_scale is None:
+            scale = cls._compute_scale_from_config(config)
+        else:
+            scale = float(raw_scale)
+
         return cls(
             cam_index=gc.get('device_index', 8),
-            scale_mm_per_pixel=vs.get('scale_mm_per_pixel', 0.3),
+            scale_mm_per_pixel=scale,
             mount_angle_deg=vs.get('mount_angle_deg', 0.0),
             cam_flip_x=vs.get('cam_flip_x', False),
             cam_flip_y=vs.get('cam_flip_y', False),

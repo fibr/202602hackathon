@@ -52,6 +52,7 @@ def _make_servo(**overrides) -> VisualServo:
 
 class TestFromConfig:
     def test_defaults_when_sections_missing(self):
+        # Empty config: no hfov_deg, no approach_offset_z → falls back to 0.3
         servo = VisualServo.from_config({})
         assert servo.cam_index == 8
         assert servo.scale_mm_per_pixel == pytest.approx(0.3)
@@ -94,6 +95,58 @@ class TestFromConfig:
         assert servo.settle_s == pytest.approx(0.5)
         assert servo.max_correction_mm == pytest.approx(25.0)
         assert servo.save_debug is True
+
+    def test_explicit_null_triggers_auto_compute(self):
+        """scale_mm_per_pixel=None (YAML null) falls through to auto-compute."""
+        import math
+        cfg = {
+            'gripper_camera': {'hfov_deg': 60.0, 'width': 640},
+            'planner': {'approach_offset_z': 100.0},
+            'visual_servo': {'scale_mm_per_pixel': None},
+        }
+        servo = VisualServo.from_config(cfg)
+        # Expected: 100 * tan(30°) / 320 = 100 * 0.5774 / 320 ≈ 0.1804
+        expected = 100.0 * math.tan(math.radians(30.0)) / 320.0
+        assert servo.scale_mm_per_pixel == pytest.approx(expected, rel=1e-4)
+
+    def test_auto_compute_scales_with_height(self):
+        """Doubling approach_offset_z doubles scale_mm_per_pixel."""
+        import math
+        cfg_low = {
+            'gripper_camera': {'hfov_deg': 60.0, 'width': 640},
+            'planner': {'approach_offset_z': 100.0},
+            'visual_servo': {'scale_mm_per_pixel': None},
+        }
+        cfg_high = {
+            'gripper_camera': {'hfov_deg': 60.0, 'width': 640},
+            'planner': {'approach_offset_z': 200.0},
+            'visual_servo': {'scale_mm_per_pixel': None},
+        }
+        servo_low = VisualServo.from_config(cfg_low)
+        servo_high = VisualServo.from_config(cfg_high)
+        assert servo_high.scale_mm_per_pixel == pytest.approx(
+            servo_low.scale_mm_per_pixel * 2.0, rel=1e-4
+        )
+
+    def test_auto_compute_missing_hfov_falls_back(self):
+        """If hfov_deg is missing, auto-compute returns default 0.3."""
+        cfg = {
+            'gripper_camera': {'width': 640},          # no hfov_deg
+            'planner': {'approach_offset_z': 100.0},
+            'visual_servo': {'scale_mm_per_pixel': None},
+        }
+        servo = VisualServo.from_config(cfg)
+        assert servo.scale_mm_per_pixel == pytest.approx(0.3)
+
+    def test_explicit_scale_overrides_auto_compute(self):
+        """An explicit float always wins over auto-compute."""
+        cfg = {
+            'gripper_camera': {'hfov_deg': 60.0, 'width': 640},
+            'planner': {'approach_offset_z': 100.0},
+            'visual_servo': {'scale_mm_per_pixel': 0.42},
+        }
+        servo = VisualServo.from_config(cfg)
+        assert servo.scale_mm_per_pixel == pytest.approx(0.42)
 
 
 # ---------------------------------------------------------------------------

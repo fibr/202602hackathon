@@ -43,16 +43,22 @@ gripper_camera:
   device_index: 8             # V4L2 index for /dev/video8
   width: 640
   height: 480
+  hfov_deg: 60.0              # Horizontal field of view in degrees.
+                              # Used to auto-compute scale_mm_per_pixel below.
+                              # Derived from cameras.yaml fx≈554.3 at 640px:
+                              #   hfov = 2*arctan(320/554.3) ≈ 60°
 
 # Closed-loop visual servoing using the gripper camera
 # Runs after PRE_GRASP to correct residual calibration errors.
 visual_servo:
   enabled: false              # Set to true to activate gripper-cam servoing
   # Pixel-to-mm conversion at the pre-grasp working height.
-  # Formula: scale ≈ height_mm * tan(half_HFOV_rad) / (img_width/2)
+  # Formula: scale = approach_offset_z * tan(hfov_deg/2) / (width/2)
   # Example: 100mm height, 60° HFOV, 640px wide → ~0.18 mm/px
   # Example: 150mm height, 60° HFOV, 640px wide → ~0.27 mm/px
-  scale_mm_per_pixel: 0.25    # Tune to match actual camera FOV + working height
+  # Set to null (or omit) to auto-compute from gripper_camera.hfov_deg and
+  # planner.approach_offset_z.  Set to a float to override explicitly.
+  scale_mm_per_pixel: null    # null = auto-compute from hfov_deg + approach_offset_z
   # Rotation of the camera X-axis relative to the gripper X-axis (degrees).
   # 0 = camera aligned with gripper. Adjust if camera is rotated on the mount.
   mount_angle_deg: 0.0
