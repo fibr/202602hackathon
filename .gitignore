@@ -31,6 +31,9 @@ Thumbs.db
 # Local settings (user-specific overrides)
 # config/settings.yaml
 
+# Auto-generated camera registry (machine-specific device paths)
+config/cameras.yaml
+
 # Dataset images (large binary files)
 data/rod_dataset/*.png
 

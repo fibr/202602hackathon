@@ -1,0 +1,123 @@
+# Camera registry template — copy to cameras.yaml or run discover_cameras.py
+#
+# Auto-populate:  ./run.sh scripts/discover_cameras.py
+# Merge updates:  ./run.sh scripts/discover_cameras.py --merge
+# Preview only:   ./run.sh scripts/discover_cameras.py --dry-run
+#
+# Each entry describes one physical camera. The discovery script fills in
+# device_path, intrinsics, and capabilities automatically. You should then
+# hand-edit mount type, parent_link, T_cam_to_link, and extrinsics.
+#
+# Mount types:
+#   fixed    – stationary camera (eye-to-hand), extrinsics = T_cam_to_base
+#   gripper  – camera on end-effector, linked to a URDF frame via T_cam_to_link
+#   overhead – fixed overhead view (semantic alias of 'fixed')
+#   other    – unclassified
+#
+# Intrinsics source:
+#   factory    – from camera SDK (RealSense factory calibration)
+#   calibrated – from checkerboard calibration (OpenCV calibrateCamera)
+#   estimated  – pinhole estimate from assumed FOV (default for webcams)
+#
+# Extrinsics source:
+#   calibrated – from hand-eye calibration (scripts/detect_checkerboard.py)
+#   estimated  – rough manual measurement
+#   none       – not yet determined
+
+cameras:
+  # --- Intel RealSense D435i (fixed, eye-to-hand) ---
+  realsense_d435i:
+    device_path: "realsense:012345678"
+    serial: "012345678"
+    driver: "Intel RealSense D435i"
+    type: realsense
+    resolution: [640, 480]
+    fps: 15
+    mount:
+      type: fixed
+      parent_link: null
+      T_cam_to_link: null
+      notes: "Eye-to-hand, fixed tripod mount overlooking workspace"
+    intrinsics:
+      camera_matrix: [[615.0, 0, 320.0], [0, 615.0, 240.0], [0, 0, 1]]
+      dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+      image_size: [640, 480]
+      source: factory
+    extrinsics:
+      T_cam_to_base: null    # Populated from config/calibration.yaml
+      source: none
+      calibration_date: null
+    capabilities:
+      depth: true
+      color: true
+      imu: true
+    detected_at: "2026-03-14T00:00:00"
+
+  # --- ARM101 gripper-mounted USB camera (32x32 UVC module) ---
+  gripper_cam_arm101:
+    device_path: "/dev/video8"
+    device_index: 8
+    serial: "unknown"
+    driver: "uvcvideo"
+    type: webcam
+    resolution: [640, 480]
+    fps: 30
+    mount:
+      type: gripper
+      parent_link: "gripper_link"
+      # Camera optical frame relative to gripper_link (from so101_new_calib.urdf).
+      # Rotation: camera Z (into scene) = -gripper Z (downward).
+      # Translation: approximate from CAD, calibrate for precision.
+      T_cam_to_link:
+        - [1.0,  0.0,  0.0, 0.010]   # camera X ~ gripper X, +10mm
+        - [0.0, -1.0,  0.0, -0.020]   # camera Y ~ -gripper Y, -20mm
+        - [0.0,  0.0, -1.0, -0.035]   # camera Z ~ -gripper Z, -35mm
+        - [0.0,  0.0,  0.0, 1.0]
+      notes: >
+        SO-ARM101 32x32 UVC wrist camera mount (snap-on). Camera faces
+        downward (-Z in gripper frame). Translation is approximate from CAD.
+        Run hand-eye calibration (scripts/detect_checkerboard.py) for precision.
+    intrinsics:
+      camera_matrix: [[554.3, 0, 320.0], [0, 554.3, 240.0], [0, 0, 1]]
+      dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+      image_size: [640, 480]
+      source: estimated
+    extrinsics:
+      T_cam_to_base: null      # Computed at runtime from FK(joints) * T_cam_to_link
+      source: none
+      calibration_date: null
+    capabilities:
+      depth: false
+      color: true
+      imu: false
+    detected_at: "2026-03-14T00:00:00"
+
+  # --- Logitech BRIO (external USB webcam) ---
+  logitech_brio:
+    device_path: "/dev/video4"
+    device_index: 4
+    serial: "687CD0B1"
+    driver: "uvcvideo"
+    card: "Logitech BRIO"
+    type: webcam
+    resolution: [640, 480]
+    fps: 30
+    mount:
+      type: other
+      parent_link: null
+      T_cam_to_link: null
+      notes: "External USB webcam — assign mount type after positioning"
+    intrinsics:
+      camera_matrix: [[554.3, 0, 320.0], [0, 554.3, 240.0], [0, 0, 1]]
+      dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+      image_size: [640, 480]
+      source: estimated
+    extrinsics:
+      T_cam_to_base: null
+      source: none
+      calibration_date: null
+    capabilities:
+      depth: false
+      color: true
+      imu: false
+    detected_at: "2026-03-14T00:00:00"
