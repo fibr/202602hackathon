@@ -42,4 +42,9 @@ if ! echo "$@" | grep -q -- '--arm101'; then
     fi
 fi
 
-exec .venv/bin/python "$@"
+# Shell scripts run directly; Python scripts run in venv
+if [[ "$1" == *.sh ]]; then
+    exec bash "$@"
+else
+    exec .venv/bin/python "$@"
+fi
