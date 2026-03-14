@@ -13,7 +13,21 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh src/main.py          # Run full pick-and-stand pipeline (auto-creates venv)
 ```
 
-### Test and debug scripts
+### Unified GUI (recommended entry point)
+```bash
+./run.sh src/unified_gui.py                          # Launch GUI with home view (config editor)
+./run.sh src/unified_gui.py --view control            # Jump to control panel
+./run.sh src/unified_gui.py --view calibration        # Jump to calibration tools
+./run.sh src/unified_gui.py --list                    # List all available views
+./run.sh src/unified_gui.py --headless --view discover # Run camera discovery without GUI
+./run.sh src/unified_gui.py --direct --view demo_cube  # Direct actuation (skip GUI)
+./run.sh src/unified_gui.py --no-camera --view control # Control panel without camera
+./run.sh src/unified_gui.py --safe --view control      # Safe mode (arm101)
+```
+
+Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`. Use `--list` to see all with descriptions.
+
+### Individual scripts (still work standalone)
 ```bash
 ./run.sh scripts/control_panel.py        # Camera + GUI control panel (uses robot_type from config)
 ./run.sh scripts/control_panel.py --safe             # arm101 with reduced torque/speed
@@ -63,7 +77,9 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 
 - `src/main.py` — State machine orchestrator (INIT → DETECT → PLAN → EXECUTE → DONE)
 - `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge); `connect_robot(config)` factory returns connected robot based on `robot_type`
-- `src/gui/` — Shared OpenCV GUI panel for robot arm control (XY jog pad, Z, gripper, speed, enable/home, status)
+- `src/unified_gui.py` — Unified GUI entry point with sidebar navigation and view switching
+- `src/gui/views/` — View registry + per-script view wrappers (home, control, calibration, dataset, etc.)
+- `src/gui/robot_controls.py` — Shared OpenCV GUI panel for robot arm control (XY jog pad, Z, gripper, speed, enable/home, status)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
 - `src/kinematics/ik_solver.py` — Local IK/FK using Pinocchio + Nova5 URDF (~0.8ms per solve)
