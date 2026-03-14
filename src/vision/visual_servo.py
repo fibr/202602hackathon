@@ -106,6 +106,7 @@ class VisualServo:
         cam_height: int = 480,
         max_correction_mm: float = 30.0,
         save_debug: bool = False,
+        autofocus: bool = False,
     ):
         self.cam_index = cam_index
         self.scale_mm_per_pixel = scale_mm_per_pixel
@@ -120,6 +121,7 @@ class VisualServo:
         self.cam_height = cam_height
         self.max_correction_mm = max_correction_mm
         self.save_debug = save_debug
+        self.autofocus = autofocus
 
         self._cap: Optional[cv2.VideoCapture] = None
 
@@ -238,6 +240,7 @@ class VisualServo:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_height)
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.autofocus else 0)
         # Warm up auto-exposure
         for _ in range(8):
             cap.read()

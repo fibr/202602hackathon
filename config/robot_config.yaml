@@ -14,6 +14,7 @@ camera:
   width: 640
   height: 480
   fps: 30
+  autofocus: false            # Lock focus for stable intrinsics (default: off)
   # Webcam-only options (ignored for realsense):
   device_index: 4             # Logitech BRIO (workspace overview)
   assumed_depth_m: 1.0        # Fixed depth for pixel_to_3d (meters); tune to

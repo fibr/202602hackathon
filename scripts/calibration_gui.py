@@ -474,6 +474,8 @@ def main():
         return 1
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    autofocus = cam_cfg.get('autofocus', False)
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if autofocus else 0)
     # Flush initial frames
     for _ in range(10):
         cap.read()

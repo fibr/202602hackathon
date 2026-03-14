@@ -205,12 +205,14 @@ class WebcamCamera:
 
     def __init__(self, device_index: int = 0, width: int = 640,
                  height: int = 480, fps: int = 30,
-                 assumed_depth_m: float = 1.0):
+                 assumed_depth_m: float = 1.0,
+                 autofocus: bool = False):
         self.device_index = device_index
         self.width = width
         self.height = height
         self.fps = fps
         self.assumed_depth_m = assumed_depth_m
+        self.autofocus = autofocus
         self.intrinsics = None
         self._cap = None
 
@@ -235,6 +237,9 @@ class WebcamCamera:
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self._cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+        # Autofocus control (off by default for stable intrinsics)
+        self._cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.autofocus else 0)
 
         # Read back actual resolution
         actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -362,6 +367,7 @@ def create_camera(config: dict):
             height=height,
             fps=fps,
             assumed_depth_m=cam_cfg.get('assumed_depth_m', 1.0),
+            autofocus=cam_cfg.get('autofocus', False),
         )
     else:
         return RealSenseCamera(width=width, height=height, fps=fps)
