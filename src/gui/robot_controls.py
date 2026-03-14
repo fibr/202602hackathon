@@ -21,6 +21,7 @@ Robot connection is duck-typed. Arm101 detected via robot.robot_type == 'arm101'
 import time
 import cv2
 import numpy as np
+from robot.motion_utils import move_to_pose
 
 
 # Layout constants
@@ -620,7 +621,7 @@ class RobotControlPanel:
             self._do_cart_step(axis_idx, sign, step_mm)
 
     def _do_cart_step(self, axis_idx, sign, step_mm):
-        """Fire-and-forget Cartesian step: read pose, offset, send MovL (Dobot)."""
+        """Fire-and-forget Cartesian step: read pose, offset, move to target pose (Dobot/arm101)."""
         if self.robot is None:
             return
         now = time.time()
@@ -640,13 +641,20 @@ class RobotControlPanel:
         target = list(pose)
         target[axis_idx] += sign * step_mm
 
-        tp = target
-        cmd = (f'MovL(pose={{{tp[0]:.2f},{tp[1]:.2f},{tp[2]:.2f},'
-               f'{tp[3]:.2f},{tp[4]:.2f},{tp[5]:.2f}}})')
-        resp = self.robot.send(cmd)
-        code = resp.split(',')[0] if resp else '-1'
-        if code != '0':
-            self.status_msg = f"MovL error: {resp}"
+        # Use unified move_to_pose() for both Nova5 and arm101
+        success = move_to_pose(
+            self.robot,
+            x=target[0],
+            y=target[1],
+            z=target[2],
+            rx=target[3],
+            ry=target[4],
+            rz=target[5],
+            speed=self.speed
+        )
+
+        if not success:
+            self.status_msg = f"Move failed: {axis_name}{dir_ch}"
             return
 
         self.status_msg = f"{axis_name}{dir_ch} {step_mm:.0f}mm"
