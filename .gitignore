@@ -34,6 +34,9 @@ Thumbs.db
 # Auto-generated camera registry (machine-specific device paths)
 config/cameras.yaml
 
+# Calibrated camera intrinsics (machine-specific)
+config/camera_intrinsics.yaml
+
 # Dataset images (large binary files)
 data/rod_dataset/*.png
 
