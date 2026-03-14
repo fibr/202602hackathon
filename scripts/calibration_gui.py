@@ -135,8 +135,8 @@ def draw_handeye_overlay(frame, tcp_pos, yellow_pt, n_collected):
 
     cv2.putText(frame, f"Collected: {n_collected} points (need >= 6)",
                 (10, h - 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-    cv2.putText(frame, "SPACE=capture | S=solve | U=undo | ESC=quit",
-                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+    cv2.putText(frame, "SPACE=capture | S=joint solve (offsets+extrinsics) | U=undo | ESC=quit",
+                (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1)
 
 
 def load_offsets():
@@ -157,7 +157,12 @@ def save_offsets(raw_positions):
             'motor_id': mid,
             'zero_raw': pos,
         }
+    save_offsets_dict(offsets)
+    return offsets
 
+
+def save_offsets_dict(offsets):
+    """Save an offsets dict to servo_offsets.yaml."""
     data = {
         'description': 'Servo zero offsets for SO-ARM101',
         'zero_offsets': offsets,
@@ -169,7 +174,7 @@ def save_offsets(raw_positions):
     os.makedirs(os.path.dirname(OFFSET_FILE), exist_ok=True)
     with open(OFFSET_FILE, 'w') as f:
         yaml.dump(data, f, default_flow_style=False)
-    return offsets
+    print(f"  Saved offsets to {OFFSET_FILE}")
 
 
 def solve_pnp(pts_3d_mm, pts_2d_px, K, dist):
@@ -241,6 +246,150 @@ def solve_and_save_handeye(pts_3d_robot, pts_2d, K, dist):
     return False
 
 
+DEG_PER_POS = 360.0 / 4096.0
+
+
+def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver):
+    """Jointly optimize servo zero offsets + camera extrinsics.
+
+    Instead of trusting FK (which uses potentially wrong offsets), we
+    parameterize the offsets and extrinsic together and minimize
+    reprojection error.
+
+    Parameters to optimize (11 total):
+      - 5 servo zero offsets (raw units, one per joint excl. gripper)
+      - 3 rotation (Rodrigues rvec)
+      - 3 translation (tvec)
+
+    For each observation:
+      raw_pos -> angles(offsets) -> FK -> TCP_robot -> project(T, K) -> pixel
+    Minimize: sum of ||pixel_predicted - pixel_observed||^2
+
+    Args:
+        raw_positions_list: List of dicts {motor_id: raw_pos} per capture.
+        pts_2d: List of [cx, cy] pixel observations.
+        K: 3x3 camera intrinsic matrix.
+        dist_coeffs: Distortion coefficients.
+        solver: Arm101IKSolver instance.
+
+    Returns:
+        (offsets_dict, T_cam2base) or (None, None) on failure.
+    """
+    from scipy.optimize import least_squares
+
+    n = len(pts_2d)
+    if n < 6:
+        print(f"  Need >= 6 points for joint solve (have {n})")
+        return None, None
+
+    # Current offsets as initial guess
+    current_offsets = load_offsets()
+    offset_init = np.array([
+        current_offsets.get(name, {}).get('zero_raw', 2048)
+        for name in MOTOR_NAMES[:5]
+    ], dtype=float)
+
+    # Initial extrinsic guess from standard PnP with current offsets
+    pts_3d_init = []
+    for raw_pos in raw_positions_list:
+        angles = np.array([
+            (raw_pos[mid] - offset_init[mid - 1]) * DEG_PER_POS
+            for mid in range(1, 6)
+        ])
+        tcp, _ = solver.forward_kin(angles)
+        pts_3d_init.append(tcp)
+
+    T_init = solve_pnp(pts_3d_init, pts_2d, K, dist_coeffs)
+    if T_init is None:
+        print("  Initial PnP failed, using identity as seed")
+        rvec_init = np.zeros(3)
+        tvec_init = np.array([0.0, 0.0, 500.0])
+    else:
+        # T_init is cam2base, PnP needs base2cam
+        T_b2c = np.linalg.inv(T_init)
+        rvec_init, _ = cv2.Rodrigues(T_b2c[:3, :3])
+        rvec_init = rvec_init.flatten()
+        tvec_init = T_b2c[:3, 3]
+
+    # Pack: [5 offsets, 3 rvec, 3 tvec]
+    x0 = np.concatenate([offset_init, rvec_init, tvec_init])
+
+    pts_2d_arr = np.array(pts_2d, dtype=np.float64)
+
+    def residuals(x):
+        offsets_raw = x[:5]
+        rvec = x[5:8]
+        tvec = x[8:11]
+
+        R_b2c, _ = cv2.Rodrigues(rvec)
+
+        errs = []
+        for i in range(n):
+            # raw -> angles using candidate offsets
+            angles = np.array([
+                (raw_positions_list[i][mid] - offsets_raw[mid - 1]) * DEG_PER_POS
+                for mid in range(1, 6)
+            ])
+            # FK -> TCP in robot frame (mm)
+            tcp, _ = solver.forward_kin(angles)
+
+            # Project to pixel: p = K @ (R @ tcp + t)
+            p_cam = R_b2c @ tcp + tvec
+            if p_cam[2] <= 0:
+                errs.extend([1000.0, 1000.0])
+                continue
+            px = K[0, 0] * p_cam[0] / p_cam[2] + K[0, 2]
+            py = K[1, 1] * p_cam[1] / p_cam[2] + K[1, 2]
+
+            errs.append(px - pts_2d_arr[i, 0])
+            errs.append(py - pts_2d_arr[i, 1])
+
+        return np.array(errs)
+
+    print(f"\n  Joint optimization: {n} observations, 11 parameters")
+    print(f"  Initial offsets: {offset_init.astype(int).tolist()}")
+
+    result = least_squares(residuals, x0, method='lm', max_nfev=5000)
+
+    offsets_opt = result.x[:5]
+    rvec_opt = result.x[5:8]
+    tvec_opt = result.x[8:11]
+
+    # Compute final reprojection error
+    res = result.fun.reshape(-1, 2)
+    errs_px = np.linalg.norm(res, axis=1)
+    print(f"  Result: cost={result.cost:.2f}, mean_err={np.mean(errs_px):.2f}px, "
+          f"max_err={np.max(errs_px):.2f}px")
+
+    # Show offset changes
+    print(f"  Optimized offsets:")
+    for i, name in enumerate(MOTOR_NAMES[:5]):
+        old = int(offset_init[i])
+        new = int(round(offsets_opt[i]))
+        delta_deg = (new - old) * DEG_PER_POS
+        print(f"    {name:<16}: {old} -> {new}  (Δ={delta_deg:+.1f}°)")
+
+    # Build T_cam2base
+    R_b2c, _ = cv2.Rodrigues(rvec_opt)
+    T_b2c = np.eye(4)
+    T_b2c[:3, :3] = R_b2c
+    T_b2c[:3, 3] = tvec_opt
+    T_c2b = np.linalg.inv(T_b2c)
+
+    pos = T_c2b[:3, 3]
+    print(f"  Camera in robot frame: [{pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}] mm")
+
+    # Build offsets dict
+    offsets_dict = {}
+    for i, name in enumerate(MOTOR_NAMES[:5]):
+        offsets_dict[name] = {
+            'motor_id': i + 1,
+            'zero_raw': int(round(offsets_opt[i])),
+        }
+
+    return offsets_dict, T_c2b
+
+
 def main():
     parser = argparse.ArgumentParser(description="GUI calibration tool for arm101")
     parser.add_argument('--handeye', action='store_true',
@@ -307,6 +456,7 @@ def main():
     # Hand-eye state
     pts_3d_robot = []
     pts_2d = []
+    raw_positions_list = []  # raw servo positions per capture (for joint solve)
 
     mode_name = "Hand-Eye Calibration" if args.handeye else "Servo Calibration"
     win = f"arm101 {mode_name}"
@@ -363,10 +513,11 @@ def main():
 
             if key == ord(' '):
                 if args.handeye:
-                    # Capture hand-eye point
+                    # Capture hand-eye point (raw positions + pixel)
                     if tcp_pos is not None and cx is not None:
                         pts_3d_robot.append(tcp_pos.copy())
                         pts_2d.append([float(cx), float(cy)])
+                        raw_positions_list.append(dict(raw_positions))
                         status_msg = f"Captured #{len(pts_2d)}: TCP=[{tcp_pos[0]:.0f},{tcp_pos[1]:.0f},{tcp_pos[2]:.0f}] px=({cx},{cy})"
                         status_time = time.time()
                         print(f"  {status_msg}")
@@ -384,17 +535,22 @@ def main():
                         print(f"    {name}: raw={pos}")
 
             elif key == ord('s') and args.handeye:
-                # Solve hand-eye
-                if len(pts_2d) < 4:
-                    status_msg = f"Need at least 4 points (have {len(pts_2d)})"
+                # Joint solve: optimize servo offsets + camera extrinsics together
+                if len(pts_2d) < 6:
+                    status_msg = f"Need >= 6 points for joint solve (have {len(pts_2d)})"
                     status_time = time.time()
                 else:
-                    print(f"\nSolving PnP with {len(pts_2d)} points...")
-                    ok = solve_and_save_handeye(pts_3d_robot, pts_2d, K, dist_coeffs)
-                    if ok:
-                        status_msg = f"Calibration saved to {os.path.basename(HANDEYE_FILE)}"
+                    print(f"\nJoint solve: {len(pts_2d)} points, optimizing offsets + extrinsics...")
+                    opt_offsets, T_c2b = joint_solve(
+                        raw_positions_list, pts_2d, K, dist_coeffs, solver)
+                    if opt_offsets is not None:
+                        # Save both servo offsets and hand-eye calibration
+                        save_offsets_dict(opt_offsets)
+                        save_handeye_calibration(T_c2b, HANDEYE_FILE)
+                        offsets = load_offsets()  # reload for display
+                        status_msg = "Joint solve OK — saved offsets + extrinsics"
                     else:
-                        status_msg = "PnP solve FAILED"
+                        status_msg = "Joint solve FAILED"
                     status_time = time.time()
                     print(f"  {status_msg}")
 
@@ -403,6 +559,7 @@ def main():
                 if pts_2d:
                     pts_2d.pop()
                     pts_3d_robot.pop()
+                    raw_positions_list.pop()
                     status_msg = f"Undone — {len(pts_2d)} points remaining"
                     status_time = time.time()
 
