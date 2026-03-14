@@ -336,6 +336,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # ── Step simulation ────────────────────────────────────────
             scene.write_data_to_sim()
             sim.step()
+            sim.render()
             sim_time += sim_dt
             count += 1
             scene.update(sim_dt)
@@ -404,11 +405,10 @@ def main():
     """Main function."""
     sim_cfg = sim_utils.SimulationCfg(
         dt=0.01,
+        render_interval=1,
         device=args_cli.device,
     )
     sim = sim_utils.SimulationContext(sim_cfg)
-    # Viewport camera: slightly above and to the side, looking at the arm
-    sim.set_camera_view(eye=[0.6, 0.6, 0.9], target=[0.0, 0.0, 0.45])
 
     # Create scene (with or without cameras based on --enable_cameras flag)
     if args_cli.enable_cameras:
@@ -419,6 +419,15 @@ def main():
 
     # Start simulation
     sim.reset()
+
+    # Set viewport camera AFTER reset (reset clears camera state)
+    sim.set_camera_view(eye=[0.6, 0.6, 0.9], target=[0.0, 0.0, 0.45])
+
+    # Warm-up: run a few render frames so the RTX renderer initializes
+    for _ in range(10):
+        sim.step()
+        sim.render()
+
     print("[INFO]: Isaac Sim setup complete")
     print(f"[INFO]: URDF loaded from: {URDF_PATH}")
     print(f"[INFO]: Cameras enabled: {args_cli.enable_cameras}")
