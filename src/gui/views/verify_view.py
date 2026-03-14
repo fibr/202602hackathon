@@ -32,6 +32,9 @@ Supported robots
 * **arm101** — uses Arm101IKSolver to convert the Cartesian target to joint
   angles, then ``robot.move_joints(angles)``.  Falls back gracefully if IK
   fails.
+
+Motion dispatch is handled by :func:`robot.motion_utils.move_to_pose`, which
+is the shared utility for all Cartesian moves across the codebase.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ import numpy as np
 
 from gui.views.base import BaseView, ViewRegistry
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
+from robot.motion_utils import move_to_pose
 from vision.board_detector import BoardDetector, BoardDetection
 from calibration.calib_helpers import (
     BOARD_COLS,
@@ -650,7 +654,6 @@ class VerifyCalibView(BaseView):
     def _move_worker(self, idx: int, target_mm: np.ndarray, label: str):
         """Background thread: move arm, record result."""
         robot = self.app.robot
-        robot_type = self.app.config.get('robot_type', 'nova5')
 
         try:
             rx, ry, rz = (self._robot_orientation
@@ -660,10 +663,8 @@ class VerifyCalibView(BaseView):
             print(f'  Target: [{target_mm[0]:.1f}, {target_mm[1]:.1f}, '
                   f'{target_mm[2]:.1f}] mm')
 
-            if robot_type == 'arm101':
-                ok = self._move_arm101(robot, target_mm, rx, ry, rz)
-            else:
-                ok = self._move_nova5(robot, target_mm, rx, ry, rz)
+            ok = move_to_pose(robot, target_mm[0], target_mm[1], target_mm[2],
+                              rx, ry, rz, speed=VERIFY_SPEED_PERCENT)
 
             if not ok:
                 self._corner_results.append({
@@ -702,58 +703,6 @@ class VerifyCalibView(BaseView):
         except Exception as exc:
             self._move_error = f'Movement error at corner {idx}: {exc}'
             print(f'  [VerifyCalib] ERROR: {exc}')
-
-    def _move_nova5(self, robot, target_mm, rx, ry, rz) -> bool:
-        """Move Nova5 to the target pose using MovJ (V4 firmware)."""
-        # Set speed
-        try:
-            robot.set_speed(VERIFY_SPEED_PERCENT)
-        except Exception:
-            pass
-
-        if hasattr(robot, 'movj'):
-            return robot.movj(
-                target_mm[0], target_mm[1], target_mm[2],
-                rx, ry, rz)
-        # Fallback: raw V4 command via send()
-        cmd = (f'MovJ(pose={{{target_mm[0]:.3f},{target_mm[1]:.3f},'
-               f'{target_mm[2]:.3f},{rx:.3f},{ry:.3f},{rz:.3f}}})')
-        resp = robot.send(cmd)
-        print(f'  MovJ resp: {resp}')
-        return '0,' in (resp or '')
-
-    def _move_arm101(self, robot, target_mm, rx, ry, rz) -> bool:
-        """Move arm101 to a Cartesian target via IK + joint move."""
-        try:
-            from kinematics.arm101_ik_solver import Arm101IKSolver
-        except ImportError:
-            try:
-                from kinematics.ik_solver import IKSolver as Arm101IKSolver
-            except ImportError:
-                print('  [VerifyCalib] WARNING: No IK solver found for arm101')
-                return False
-
-        try:
-            ik = Arm101IKSolver(self.app.config)
-        except Exception as exc:
-            print(f'  [VerifyCalib] IK solver init failed: {exc}')
-            return False
-
-        target_rpy = np.array([rx, ry, rz], dtype=float)
-        seed = None
-        try:
-            angles = robot.get_angles()
-            if angles:
-                seed = np.array(angles, dtype=float)
-        except Exception:
-            pass
-
-        joint_angles = ik.solve_ik(target_mm, target_rpy, seed_joints=seed)
-        if joint_angles is None:
-            print(f'  [VerifyCalib] IK failed for target {target_mm}')
-            return False
-
-        return robot.move_joints(list(joint_angles))
 
     # ------------------------------------------------------------------
     # Drawing utilities
