@@ -43,7 +43,7 @@ class ServoCalibView(BaseView):
 
     Requires arm101 robot (torque is disabled so you can backdrive the arm).
     Camera is used for live visual feedback but is optional.
-    Keys: SPACE = save offsets | R = reload offsets | ESC = leave view
+    Keys: SPACE = save offsets | R = reload offsets | ESC = back to Calibration
     """
 
     view_id = 'servo_calib'
@@ -52,7 +52,8 @@ class ServoCalibView(BaseView):
     needs_camera = False
     needs_robot = True
     headless_ok = False
-    show_in_sidebar = False  # reached via the Calibration menu
+    show_in_sidebar = False   # reached via the Calibration menu
+    parent_view_id = 'calibration'  # ESC / Back button returns here
 
     def __init__(self, app):
         super().__init__(app)
@@ -110,7 +111,7 @@ class ServoCalibView(BaseView):
                         FONT, 0.6, (255, 200, 100), 1)
             cv2.putText(canvas, self._error_msg, (20, 80),
                         FONT, 0.5, (0, 80, 220), 1)
-            cv2.putText(canvas, 'Press ESC or click another view to go back.',
+            cv2.putText(canvas, 'Press ESC to return to Calibration menu.',
                         (20, 110), FONT, 0.38, (130, 130, 130), 1)
             return
 
@@ -139,20 +140,29 @@ class ServoCalibView(BaseView):
         # Draw calibration overlay
         self._cg.draw_servo_overlay(frame, raw_positions, self._offsets, angles)
 
+        # Breadcrumb / back hint at the bottom of the frame
+        fh, fw = frame.shape[:2]
+        hint = 'Calibration > Servo Calib  |  ESC = back  |  SPACE = save  |  R = reload'
+        cv2.putText(frame, hint, (10, fh - 10),
+                    FONT, 0.32, (160, 160, 100), 1)
+
         # Temporary status message (fades after 4 s)
         if self._status_msg and time.time() - self._status_time < 4.0:
             cv2.putText(frame, self._status_msg,
-                        (10, frame.shape[0] - 50),
+                        (10, fh - 50),
                         FONT, 0.6, (0, 255, 0), 2)
 
         # Blit frame onto canvas
-        fh, fw = frame.shape[:2]
         ch = min(fh, vh)
         cw = min(fw, vw)
         canvas[0:ch, 0:cw] = frame[0:ch, 0:cw]
 
     # ------------------------------------------------------------------
     def handle_key(self, key):
+        if key == 27:  # ESC → back to Calibration menu
+            self.app.switch_view('calibration')
+            return True
+
         if self._arm is None or self._cg is None:
             return False
 
@@ -209,7 +219,7 @@ class HandEyeYellowView(BaseView):
     Press SPACE to capture FK+pixel correspondence.  Press S to jointly
     optimise servo offsets and extrinsics (≥ 6 points required).
 
-    Keys: SPACE = capture | S = solve | U = undo last | ESC = leave view
+    Keys: SPACE = capture | S = solve | U = undo last | ESC = back to Calibration
     """
 
     view_id = 'handeye_yellow'
@@ -218,7 +228,8 @@ class HandEyeYellowView(BaseView):
     needs_camera = True
     needs_robot = True
     headless_ok = False
-    show_in_sidebar = False  # reached via the Calibration menu
+    show_in_sidebar = False   # reached via the Calibration menu
+    parent_view_id = 'calibration'  # ESC / Back button returns here
 
     def __init__(self, app):
         super().__init__(app)
@@ -319,7 +330,7 @@ class HandEyeYellowView(BaseView):
                         (20, 35), FONT, 0.6, (255, 200, 100), 1)
             cv2.putText(canvas, self._error_msg, (20, 80),
                         FONT, 0.5, (0, 80, 220), 1)
-            cv2.putText(canvas, 'Press ESC or click another view to go back.',
+            cv2.putText(canvas, 'Press ESC to return to Calibration menu.',
                         (20, 110), FONT, 0.38, (130, 130, 130), 1)
             return
 
@@ -354,10 +365,16 @@ class HandEyeYellowView(BaseView):
         mask_bgr = cv2.cvtColor(mask_small, cv2.COLOR_GRAY2BGR)
         frame[0:120, fw - 160:fw] = mask_bgr
 
+        # Breadcrumb / back hint at the bottom of the frame
+        hint = ('Calibration > Hand-Eye Yellow  |  '
+                'ESC = back  |  SPACE = capture  |  S = solve  |  U = undo')
+        cv2.putText(frame, hint, (10, fh - 10),
+                    FONT, 0.32, (160, 160, 100), 1)
+
         # Temporary status message
         if self._status_msg and time.time() - self._status_time < 4.0:
             cv2.putText(frame, self._status_msg,
-                        (10, fh - 50), FONT, 0.55, (0, 255, 0), 2)
+                        (10, fh - 30), FONT, 0.55, (0, 255, 0), 2)
 
         # Store per-frame state for handle_key()
         self._current_tcp = tcp_pos
@@ -375,6 +392,10 @@ class HandEyeYellowView(BaseView):
 
     # ------------------------------------------------------------------
     def handle_key(self, key):
+        if key == 27:  # ESC → back to Calibration menu
+            self.app.switch_view('calibration')
+            return True
+
         if self._arm is None or self._cg is None:
             return False
 

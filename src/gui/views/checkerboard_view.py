@@ -65,7 +65,8 @@ class CheckerboardCalibView(BaseView):
     needs_camera = True
     needs_robot = False   # camera-only mode is supported
     headless_ok = False
-    show_in_sidebar = False  # reached via the Calibration menu
+    show_in_sidebar = False   # reached via the Calibration menu
+    parent_view_id = 'calibration'  # ESC / Back button returns here
 
     def __init__(self, app):
         super().__init__(app)
@@ -212,7 +213,7 @@ class CheckerboardCalibView(BaseView):
                         FONT, 0.6, (255, 200, 100), 1)
             cv2.putText(canvas, self._error_msg, (20, 80),
                         FONT, 0.5, (0, 80, 220), 1)
-            cv2.putText(canvas, 'Press ESC or click another view to go back.',
+            cv2.putText(canvas, 'Press ESC to return to Calibration menu.',
                         (20, 110), FONT, 0.38, (130, 130, 130), 1)
             return
 
@@ -300,7 +301,7 @@ class CheckerboardCalibView(BaseView):
         # Bottom help bar
         help_lines = [
             '[i] capture intrinsics  [g] capture plane  [click] hand-eye pt  [p] pose',
-            '[Enter] solve hand-eye  [u] undo  [n] clear  [Esc] quit',
+            '[Enter] solve hand-eye  [u] undo  [n] clear  [Esc] back to Calibration',
         ]
         line_h = 22
         bar_h = line_h * len(help_lines) + 8
@@ -316,6 +317,10 @@ class CheckerboardCalibView(BaseView):
 
     # ------------------------------------------------------------------
     def handle_key(self, key):
+        if key == 27:  # ESC → back to Calibration menu
+            self.app.switch_view('calibration')
+            return True
+
         # Panel keys take priority (jogging, speed, gripper …)
         if self._panel and self._panel.handle_key(key):
             return True

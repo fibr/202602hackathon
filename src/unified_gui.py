@@ -184,14 +184,31 @@ class UnifiedApp:
 
         self._active_view = view
         self._active_view_id = view_id
+        # Rebuild sidebar so back button appears/disappears for sub-views
+        self._build_sidebar_items()
         return True
 
     # --- Sidebar ---
 
     def _build_sidebar_items(self):
-        """Build sidebar item list from registry."""
+        """Build sidebar item list from registry.
+
+        If the active view declares a ``parent_view_id``, a '< Back' entry is
+        prepended so the user can return to the parent with a single click.
+        """
         self._sidebar_items = []
-        # Home is always first
+
+        # Back button for sub-views (e.g. calibration sub-tools)
+        if self._active_view_id:
+            view_cls = ViewRegistry.get(self._active_view_id)
+            parent_id = getattr(view_cls, 'parent_view_id', None) if view_cls else None
+            if parent_id:
+                parent_cls = ViewRegistry.get(parent_id)
+                parent_name = parent_cls.view_name if parent_cls else parent_id
+                self._sidebar_items.append(
+                    (parent_id, f'< {parent_name}', 'Back  (or press ESC)'))
+
+        # Home is always first (after any back button)
         self._sidebar_items.append(('home', 'Home', 'Config & utilities'))
         for vcls in ViewRegistry.list_views():
             if vcls.view_id != 'home' and getattr(vcls, 'show_in_sidebar', True):
@@ -260,7 +277,11 @@ class UnifiedApp:
                     (sx + 10, status_y + 20), FONT, 0.33, SB_TEXT_DIM, 1)
         cv2.putText(canvas, f'Camera: {cam_status}',
                     (sx + 10, status_y + 38), FONT, 0.33, SB_TEXT_DIM, 1)
-        cv2.putText(canvas, 'ESC=quit  TAB=sidebar',
+        # ESC navigates back in sub-views; quits from top-level views
+        parent_id = (getattr(self._active_view, 'parent_view_id', None)
+                     if self._active_view else None)
+        esc_hint = 'ESC=back' if parent_id else 'ESC=quit'
+        cv2.putText(canvas, f'{esc_hint}  TAB=sidebar',
                     (sx + 10, status_y + 54), FONT, 0.28, SB_TEXT_DIM, 1)
 
     def _sidebar_click(self, x: int, y: int) -> bool:
@@ -346,9 +367,6 @@ class UnifiedApp:
                 cv2.imshow(WINDOW_NAME, canvas)
                 key = cv2.waitKey(30) & 0xFF
 
-                # Global keys
-                if key == 27:  # ESC
-                    break
                 try:
                     if cv2.getWindowProperty(WINDOW_NAME,
                                              cv2.WND_PROP_VISIBLE) < 1:
@@ -356,9 +374,15 @@ class UnifiedApp:
                 except cv2.error:
                     break
 
-                # Forward key to active view
+                # Forward key to active view first (views can intercept ESC to
+                # navigate back to a parent view instead of quitting the app).
+                key_consumed = False
                 if key != 255 and self._active_view is not None:
-                    self._active_view.handle_key(key)
+                    key_consumed = self._active_view.handle_key(key)
+
+                # ESC quits the app only when not consumed by the active view
+                if key == 27 and not key_consumed:
+                    break
 
         except KeyboardInterrupt:
             pass

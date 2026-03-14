@@ -343,7 +343,8 @@ class ServoDirectionCalibView(BaseView):
     needs_camera = True
     needs_robot = True
     headless_ok = False
-    show_in_sidebar = False  # reached via calibration menu
+    show_in_sidebar = False   # reached via calibration menu
+    parent_view_id = 'calibration'  # ESC / Back button returns here
 
     def __init__(self, app):
         super().__init__(app)
@@ -441,7 +442,7 @@ class ServoDirectionCalibView(BaseView):
                         (20, 35), FONT, 0.6, (255, 200, 100), 1)
             cv2.putText(canvas, self._error_msg, (20, 80),
                         FONT, 0.5, (0, 80, 220), 1)
-            cv2.putText(canvas, 'Press ESC or click another view.',
+            cv2.putText(canvas, 'Press ESC to return to Calibration menu.',
                         (20, 110), FONT, 0.38, (130, 130, 130), 1)
             return
 
@@ -528,8 +529,10 @@ class ServoDirectionCalibView(BaseView):
         if cx is None:
             cv2.putText(frame, 'No yellow tape detected!',
                         (10, fh - 30), FONT, 0.45, (0, 0, 255), 1)
-        cv2.putText(frame, 'SPACE=capture | S=solve | U=undo | R=reset | ESC=back',
-                    (10, fh - 10), FONT, 0.35, (150, 150, 150), 1)
+        cv2.putText(frame,
+                    'Calibration > Servo Direction  |  '
+                    'SPACE=capture | S=solve | U=undo | R=reset | ESC=back',
+                    (10, fh - 10), FONT, 0.32, (160, 160, 100), 1)
 
         # Blit onto canvas
         ch = min(fh, vh)
@@ -583,6 +586,10 @@ class ServoDirectionCalibView(BaseView):
                         (10, y + 5), FONT, 0.35, (0, 200, 255), 1)
 
     def handle_key(self, key):
+        if key == 27:  # ESC → back to Calibration menu
+            self.app.switch_view('calibration')
+            return True
+
         if self._arm is None or self._cg is None:
             return False
 
