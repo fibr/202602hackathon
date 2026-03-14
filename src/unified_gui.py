@@ -194,7 +194,7 @@ class UnifiedApp:
         # Home is always first
         self._sidebar_items.append(('home', 'Home', 'Config & utilities'))
         for vcls in ViewRegistry.list_views():
-            if vcls.view_id != 'home':
+            if vcls.view_id != 'home' and getattr(vcls, 'show_in_sidebar', True):
                 self._sidebar_items.append(
                     (vcls.view_id, vcls.view_name, vcls.description))
 

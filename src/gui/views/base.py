@@ -33,6 +33,7 @@ class BaseView:
     needs_camera: bool = False
     needs_robot: bool = False
     headless_ok: bool = False
+    show_in_sidebar: bool = True  # set to False for sub-views reached via menu
 
     def __init__(self, app: 'UnifiedApp'):
         """Initialize with a reference to the unified app.
