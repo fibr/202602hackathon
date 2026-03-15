@@ -3,6 +3,8 @@
 import os
 import yaml
 
+from rig_lock import RigLock, RigLockError
+
 # Shared config directory: ~/.config/202602hackathon/
 # Falls back to the local config/ directory in the repo if the shared one
 # doesn't exist (e.g. fresh clone without setup).
@@ -56,8 +58,34 @@ def load_config(cfg_path: str = None) -> dict:
     return config
 
 
+def acquire_rig_lock(holder: str = "", force: bool = False) -> RigLock:
+    """Acquire the host-wide rig lock for exclusive hardware access.
+
+    Call this before connecting to the robot or cameras.  The returned
+    RigLock instance must be released when done (or used as a context
+    manager).
+
+    Args:
+        holder: Optional label (e.g. Forge task ID, user name).
+        force:  Steal the lock even if the current holder is alive.
+
+    Returns:
+        An acquired RigLock instance.
+
+    Raises:
+        RigLockError: If the rig is already locked by another live process.
+    """
+    lock = RigLock(holder=holder)
+    lock.acquire(force=force)
+    return lock
+
+
 def connect_robot(config: dict, safe_mode: bool = False):
     """Create and connect the robot specified by config['robot_type'].
+
+    IMPORTANT: Callers should acquire the rig lock (via ``acquire_rig_lock``
+    or ``RigLock``) before calling this function to prevent concurrent
+    hardware access from multiple workbenches.
 
     Args:
         config: Config dict from load_config().

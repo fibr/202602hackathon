@@ -13,6 +13,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config_loader import load_config, config_path
+from rig_lock import RigLock
 from logger import get_logger, get_log_file
 from vision import RodDetector, create_camera, VisualServo, make_green_cube_detector
 from calibration import CoordinateTransform
@@ -196,6 +197,11 @@ def main():
     log.info("=== Rod Pick-and-Stand System ===")
     log.info(f"Log file: {get_log_file()}")
 
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='main')
+    rig_lock.acquire()
+    log.info("[INIT] Rig lock acquired.")
+
     # Load config
     config = load_config()
     robot_cfg = config.get('robot', {})
@@ -368,6 +374,7 @@ def main():
             robot.disconnect()
         except Exception:
             pass
+        rig_lock.release()
         log.info("[CLEANUP] Done.")
 
 

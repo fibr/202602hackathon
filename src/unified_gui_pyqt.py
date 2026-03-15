@@ -3745,6 +3745,7 @@ class UnifiedPyQtApp(QMainWindow):
         self.camera = None
         self._robot_connected = False
         self._camera_started = False
+        self._rig_lock = None  # RigLock instance, acquired on first HW access
 
         self._views = {}  # view_id -> widget instance
         self._active_view_id = ''
@@ -3923,10 +3924,31 @@ class UnifiedPyQtApp(QMainWindow):
         self.statusBar().showMessage(f'View: {widget.view_name}')
         print(f'  Switched to: {widget.view_name}')
 
+    def _ensure_rig_lock(self) -> bool:
+        """Acquire the rig lock if not already held. Returns True on success."""
+        if self._rig_lock is not None:
+            return True
+        try:
+            from rig_lock import RigLock, RigLockError
+            lock = RigLock(holder='gui')
+            lock.acquire()
+            self._rig_lock = lock
+            return True
+        except RigLockError as e:
+            print(f'  WARNING: Cannot acquire rig lock: {e}')
+            return False
+        except Exception as e:
+            print(f'  WARNING: Rig lock error: {e}')
+            return False
+
     def ensure_camera(self) -> bool:
         if self._camera_started:
             return self.camera is not None
         if getattr(self.args, 'no_camera', False):
+            self._camera_started = True
+            return False
+        if not self._ensure_rig_lock():
+            print('  WARNING: Camera skipped — rig is locked by another process.')
             self._camera_started = True
             return False
         try:
@@ -3951,6 +3973,10 @@ class UnifiedPyQtApp(QMainWindow):
         if self._robot_connected:
             return self.robot is not None
         if getattr(self.args, 'no_robot', False):
+            self._robot_connected = True
+            return False
+        if not self._ensure_rig_lock():
+            print('  WARNING: Robot skipped — rig is locked by another process.')
             self._robot_connected = True
             return False
         try:
@@ -4028,6 +4054,13 @@ class UnifiedPyQtApp(QMainWindow):
             try:
                 if hasattr(self.robot, 'close'):
                     self.robot.close()
+            except Exception:
+                pass
+
+        # Release rig lock
+        if self._rig_lock:
+            try:
+                self._rig_lock.release()
             except Exception:
                 pass
 
