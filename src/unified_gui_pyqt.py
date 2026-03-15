@@ -45,7 +45,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QListWidget, QListWidgetItem, QPushButton,
     QLabel, QFrame, QSplitter, QGroupBox, QGridLayout, QScrollArea,
-    QTextEdit, QLineEdit, QComboBox, QSlider, QSpinBox, QCheckBox,
+    QTextEdit, QLineEdit, QComboBox, QSlider, QSpinBox, QDoubleSpinBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy,
     QTreeWidget, QTreeWidgetItem, QProgressBar, QToolButton,
     QMessageBox, QStatusBar,
@@ -2465,6 +2465,12 @@ class ServoDirectionCalibView(BaseViewWidget):
         self._current_detection = None
         self._current_raw = None
         self._error_msg = ''
+
+        # Constraint weights (from sign_solver.py defaults)
+        self._orientation_weight = 0.1
+        self._offset_reg_weight = 1e-5
+        self._tcam_prior_weight = 0.01
+
         self._build_ui()
 
     def _build_ui(self):
@@ -2521,6 +2527,58 @@ class ServoDirectionCalibView(BaseViewWidget):
                                           'Remove last capture', '#644832'))
         ctrl_layout.addWidget(make_button('Reset All', self._reset,
                                           'Clear all captures', '#643232'))
+
+        # Constraint Weights
+        ctrl_layout.addWidget(section_label('Constraint Weights (Advanced)'))
+        ctrl_layout.addWidget(QLabel('Tune optimization constraints:'))
+
+        # Orientation weight (default 0.1)
+        ori_layout = QHBoxLayout()
+        ori_layout.addWidget(QLabel('Orientation:'), stretch=0)
+        self._ori_weight_spin = QDoubleSpinBox()
+        self._ori_weight_spin.setValue(self._orientation_weight)
+        self._ori_weight_spin.setRange(0.0, 1.0)
+        self._ori_weight_spin.setSingleStep(0.01)
+        self._ori_weight_spin.setDecimals(3)
+        self._ori_weight_spin.setMaximumWidth(100)
+        self._ori_weight_spin.setToolTip('Orientation consistency weight (m/rad). Higher = stricter rotation matching.')
+        self._ori_weight_spin.valueChanged.connect(
+            lambda v: setattr(self, '_orientation_weight', v))
+        ori_layout.addWidget(self._ori_weight_spin, stretch=1)
+        ctrl_layout.addLayout(ori_layout)
+
+        # Offset regularization weight (default 1e-5)
+        offset_layout = QHBoxLayout()
+        offset_layout.addWidget(QLabel('Offset Reg:'), stretch=0)
+        self._offset_weight_spin = QDoubleSpinBox()
+        self._offset_weight_spin.setValue(self._offset_reg_weight)
+        self._offset_weight_spin.setRange(0.0, 0.001)
+        self._offset_weight_spin.setSingleStep(0.000001)
+        self._offset_weight_spin.setDecimals(7)
+        self._offset_weight_spin.setMaximumWidth(100)
+        self._offset_weight_spin.setToolTip('Offset regularization weight (m/raw-unit). Higher = closer to current offsets.')
+        self._offset_weight_spin.valueChanged.connect(
+            lambda v: setattr(self, '_offset_reg_weight', v))
+        offset_layout.addWidget(self._offset_weight_spin, stretch=1)
+        ctrl_layout.addLayout(offset_layout)
+
+        # T_cam_tcp prior weight (default 0.01)
+        tcam_layout = QHBoxLayout()
+        tcam_layout.addWidget(QLabel('T_cam Prior:'), stretch=0)
+        self._tcam_weight_spin = QDoubleSpinBox()
+        self._tcam_weight_spin.setValue(self._tcam_prior_weight)
+        self._tcam_weight_spin.setRange(0.0, 1.0)
+        self._tcam_weight_spin.setSingleStep(0.001)
+        self._tcam_weight_spin.setDecimals(4)
+        self._tcam_weight_spin.setMaximumWidth(100)
+        self._tcam_weight_spin.setToolTip('T_cam_tcp distance prior weight. Higher = camera stays closer to expected mount distance.')
+        self._tcam_weight_spin.valueChanged.connect(
+            lambda v: setattr(self, '_tcam_prior_weight', v))
+        tcam_layout.addWidget(self._tcam_weight_spin, stretch=1)
+        ctrl_layout.addLayout(tcam_layout)
+
+        ctrl_layout.addWidget(make_button('Reset to Defaults', self._reset_weights,
+                                          'Restore default constraint weights', '#444832'))
 
         # Results area
         ctrl_layout.addWidget(section_label('Results'))
@@ -2798,7 +2856,10 @@ class ServoDirectionCalibView(BaseViewWidget):
 
         print(f'\n  Starting auto-calibration with {n} captures...')
         result = _brute_force_signs(
-            self._captures, self._solver, current_offsets_raw, verbose=True)
+            self._captures, self._solver, current_offsets_raw, verbose=True,
+            orientation_weight=self._orientation_weight,
+            offset_reg_weight=self._offset_reg_weight,
+            tcam_prior_weight=self._tcam_prior_weight)
         self._result = result
 
         # Display results
@@ -2865,6 +2926,16 @@ class ServoDirectionCalibView(BaseViewWidget):
         self._status.setText(
             f'Captures: 0 (need >= {self.MIN_CAPTURES}, '
             f'{self.GOOD_CAPTURES}+ recommended)')
+
+    def _reset_weights(self):
+        """Reset constraint weights to defaults."""
+        self._orientation_weight = 0.1
+        self._offset_reg_weight = 1e-5
+        self._tcam_prior_weight = 0.01
+        self._ori_weight_spin.setValue(self._orientation_weight)
+        self._offset_weight_spin.setValue(self._offset_reg_weight)
+        self._tcam_weight_spin.setValue(self._tcam_prior_weight)
+        self._status.setText('Constraint weights reset to defaults')
 
 
 class _SimpleIntrinsics:
