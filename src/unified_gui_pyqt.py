@@ -3748,6 +3748,172 @@ class LiveTwinView(BaseViewWidget):
 
 
 # ---------------------------------------------------------------------------
+# CUBE TRACKER VIEW
+# ---------------------------------------------------------------------------
+
+class CubeTrackerView(BaseViewWidget):
+    view_id = 'cube_tracker'
+    view_name = 'Cube Tracker'
+    description = 'Hover arm above green cube'
+
+    def __init__(self, app, parent=None):
+        super().__init__(app, parent)
+        self._cam_thread = None
+        self._tracking = False
+        self._hover_height = 30.0  # mm above cube
+        self._speed = 200
+        self._solver = None
+        self._transform = None
+        self._last_target = None
+        self._status_text = ''
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+
+        self._cam_label = QLabel('Camera')
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setMinimumSize(400, 300)
+        self._cam_label.setStyleSheet('background-color: #1a1a1a;')
+        layout.addWidget(self._cam_label, stretch=3)
+
+        ctrl = QWidget()
+        ctrl_layout = QVBoxLayout(ctrl)
+
+        ctrl_layout.addWidget(section_label('Cube Tracker'))
+        self._track_btn = make_button('Start Tracking', self._toggle_tracking,
+                                       color='#006400')
+        ctrl_layout.addWidget(self._track_btn)
+
+        ctrl_layout.addWidget(QLabel('Hover height (mm):'))
+        height_row = QHBoxLayout()
+        height_row.addWidget(make_button('-10', lambda: self._adjust_height(-10)))
+        self._height_label = QLabel(f'{self._hover_height:.0f}')
+        self._height_label.setAlignment(Qt.AlignCenter)
+        self._height_label.setStyleSheet('color: #0af; font-size: 14px; font-weight: bold;')
+        height_row.addWidget(self._height_label)
+        height_row.addWidget(make_button('+10', lambda: self._adjust_height(+10)))
+        ctrl_layout.addLayout(height_row)
+
+        self._status_label = QLabel('')
+        self._status_label.setStyleSheet('color: #aaa; font-size: 11px;')
+        self._status_label.setWordWrap(True)
+        ctrl_layout.addWidget(self._status_label)
+
+        ctrl_layout.addStretch()
+        ctrl.setMaximumWidth(200)
+        layout.addWidget(ctrl, stretch=0)
+
+    def on_activate(self):
+        self.app.ensure_camera()
+        self.app.ensure_robot()
+
+        # Load calibration
+        cal_path = config_path('calibration.yaml')
+        if os.path.exists(cal_path):
+            from calibration import CoordinateTransform
+            self._transform = CoordinateTransform()
+            self._transform.load(cal_path)
+        else:
+            self._status_label.setText('ERROR: No calibration.yaml')
+
+        try:
+            from kinematics.arm101_ik_solver import Arm101IKSolver
+            self._solver = Arm101IKSolver()
+        except Exception as e:
+            self._status_label.setText(f'IK error: {e}')
+
+        if self.app.camera:
+            self._cam_thread = CameraThread(self.app.camera)
+            self._cam_thread.frame_ready.connect(self._on_frame)
+            self._cam_thread.start()
+
+    def on_deactivate(self):
+        self._tracking = False
+        if self._cam_thread:
+            self._cam_thread.stop()
+            self._cam_thread = None
+
+    def _on_frame(self, frame):
+        from vision.green_cube_detector import detect_green_cubes, annotate_frame
+
+        cubes, info = detect_green_cubes(frame)
+        display = annotate_frame(frame, cubes)
+        h, w = display.shape[:2]
+
+        if cubes and self._transform:
+            cube = cubes[0]
+            p_cam = self.app.camera.pixel_to_3d(cube.cx, cube.cy, None)
+            p_base_m = self._transform.camera_to_base(p_cam)
+            p_base_mm = p_base_m * 1000.0
+
+            target_mm = p_base_mm.copy()
+            target_mm[2] += self._hover_height
+
+            cv2.putText(display,
+                        f'Cube: ({p_base_mm[0]:.0f},{p_base_mm[1]:.0f},'
+                        f'{p_base_mm[2]:.0f})mm',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0), 1)
+            cv2.putText(display,
+                        f'Target: ({target_mm[0]:.0f},{target_mm[1]:.0f},'
+                        f'{target_mm[2]:.0f})mm  +{self._hover_height:.0f}',
+                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 200, 255), 1)
+
+            if self._tracking and self.app.robot and self._solver:
+                should_move = True
+                if self._last_target is not None:
+                    if np.linalg.norm(target_mm - self._last_target) < 3.0:
+                        should_move = False
+
+                if should_move:
+                    angles = self.app.robot.get_angles()
+                    seed = np.array(angles[:5]) if angles else None
+                    solution = self._solver.solve_ik_position(
+                        target_mm, seed_motor_deg=seed)
+                    if solution is not None:
+                        cmd = list(solution) + [angles[5] if angles else 0]
+
+                        def _move():
+                            self.app.robot.move_joints(cmd, speed=self._speed)
+                        threading.Thread(target=_move, daemon=True).start()
+                        self._last_target = target_mm.copy()
+                        cv2.putText(display, 'TRACKING',
+                                    (10, 75), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.6, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(display, 'IK FAILED',
+                                    (10, 75), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.6, (0, 0, 255), 2)
+        else:
+            cv2.putText(display, 'No cube detected',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 0, 255), 1)
+
+        img = cv_to_qimage(display)
+        pix = QPixmap.fromImage(img).scaled(
+            self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.setPixmap(pix)
+
+    def _toggle_tracking(self):
+        self._tracking = not self._tracking
+        self._last_target = None
+        if self._tracking:
+            self._track_btn.setText('Stop Tracking')
+            self._track_btn.setStyleSheet(
+                'background-color: #640000; color: white; padding: 4px;')
+        else:
+            self._track_btn.setText('Start Tracking')
+            self._track_btn.setStyleSheet(
+                'background-color: #006400; color: white; padding: 4px;')
+
+    def _adjust_height(self, delta):
+        self._hover_height = max(0, self._hover_height + delta)
+        self._height_label.setText(f'{self._hover_height:.0f}')
+
+
+# ---------------------------------------------------------------------------
 # CAMERA OVERLAY VIEW
 # ---------------------------------------------------------------------------
 
@@ -4049,6 +4215,7 @@ class UnifiedPyQtApp(QMainWindow):
             ExtrasView,
             DigitalTwinView,
             LiveTwinView,
+            CubeTrackerView,
             CameraOverlayView,
             # Sub-views (not in sidebar)
             CheckerboardCalibView,
