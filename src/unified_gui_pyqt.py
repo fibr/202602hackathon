@@ -970,7 +970,51 @@ class CheckerboardCalibView(BaseViewWidget):
             print(f'  Intrinsics calibration error: {e}')
 
     def _visualize_intr(self):
-        print('  Visualize intrinsics (not yet implemented in PyQt)')
+        """Visualize intrinsics by undistorting a captured frame."""
+        import yaml as _yaml
+        intr_path = config_path('camera_intrinsics.yaml')
+        if not os.path.exists(intr_path):
+            print('  No intrinsics file found — run Calibrate Intrinsics first')
+            return
+        try:
+            with open(intr_path) as f:
+                d = _yaml.safe_load(f)
+            K = np.array([
+                [d['fx'], 0, d['ppx']],
+                [0, d['fy'], d['ppy']],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            dist = np.array(d.get('dist', [0]*5), dtype=np.float64)
+            w, h = d.get('width', 640), d.get('height', 480)
+        except Exception as e:
+            print(f'  Error loading intrinsics: {e}')
+            return
+        # Grab a live frame (or use last captured frame)
+        frame = None
+        if self.app.camera:
+            color, _, _ = self.app.camera.get_frames()
+            if color is not None:
+                frame = color.copy()
+        if frame is None and self._intr_frames:
+            frame = self._intr_frames[-1].copy()
+        if frame is None:
+            print('  No frame available for visualisation')
+            return
+        # Undistort and show side by side
+        new_K, roi = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
+        undistorted = cv2.undistort(frame, K, dist, None, new_K)
+        # Draw grid lines on both to make distortion visible
+        for img, label in [(frame, 'Original'), (undistorted, 'Undistorted')]:
+            cv2.putText(img, label, (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        combined = np.hstack([frame, undistorted])
+        # Show in the camera label
+        img_q = cv_to_qimage(combined)
+        pix = QPixmap.fromImage(img_q).scaled(
+            self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.setPixmap(pix)
+        print(f'  Visualised intrinsics: fx={K[0,0]:.1f} fy={K[1,1]:.1f} '
+              f'ppx={K[0,2]:.1f} ppy={K[1,2]:.1f}')
 
     def _capture_ground(self):
         if self.app.camera is None:
@@ -981,7 +1025,82 @@ class CheckerboardCalibView(BaseViewWidget):
             print(f'  Captured ground sample #{len(self._ground_samples)}')
 
     def _save_ground(self):
-        print('  Save ground plane (not yet reimplemented)')
+        """Compute and save ground plane from captured board samples."""
+        import yaml as _yaml
+        if len(self._ground_samples) < 1:
+            print('  Need at least 1 ground plane sample')
+            return
+        try:
+            from calibration.calib_helpers import detect_corners, compute_board_pose
+            # Load intrinsics
+            intr_path = config_path('camera_intrinsics.yaml')
+            intrinsics = None
+            if os.path.exists(intr_path):
+                with open(intr_path) as f:
+                    d = _yaml.safe_load(f)
+                K = np.array([
+                    [d['fx'], 0, d['ppx']],
+                    [0, d['fy'], d['ppy']],
+                    [0, 0, 1],
+                ], dtype=np.float64)
+                dist = np.array(d.get('dist', [0]*5), dtype=np.float64)
+                intrinsics = {'camera_matrix': K, 'dist_coeffs': dist}
+            if intrinsics is None:
+                print('  No intrinsics available — calibrate intrinsics first')
+                return
+
+            # Try to load BoardDetector from config
+            board_detector = None
+            try:
+                from vision.board_detector import BoardDetector
+                board_detector = BoardDetector.from_config(self.app.config)
+            except Exception:
+                pass
+
+            # Detect board in each sample and compute pose
+            planes = []
+            for i, frame in enumerate(self._ground_samples):
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                found, corners, detection = detect_corners(gray, board_detector)
+                if not found:
+                    print(f'  Sample {i+1}: no board detected — skipped')
+                    continue
+                T_board_in_cam, obj_pts, err = compute_board_pose(
+                    corners, intrinsics, detection, board_detector)
+                if T_board_in_cam is not None:
+                    # Ground plane normal = z-axis of board in camera frame
+                    normal = T_board_in_cam[:3, 2]
+                    origin = T_board_in_cam[:3, 3]
+                    planes.append({
+                        'normal': normal.tolist(),
+                        'origin_m': origin.tolist(),
+                        'reproj_err_px': float(err),
+                    })
+                    print(f'  Sample {i+1}: board at z={origin[2]*1000:.0f}mm, err={err:.2f}px')
+
+            if not planes:
+                print('  No valid board detections in ground samples')
+                return
+
+            # Average the plane parameters
+            avg_normal = np.mean([p['normal'] for p in planes], axis=0)
+            avg_normal /= np.linalg.norm(avg_normal)
+            avg_origin = np.mean([p['origin_m'] for p in planes], axis=0)
+
+            ground_data = {
+                'ground_plane': {
+                    'normal': avg_normal.tolist(),
+                    'origin_m': avg_origin.tolist(),
+                    'n_samples': len(planes),
+                },
+                'samples': planes,
+            }
+            out_path = config_path('ground_plane.yaml')
+            with open(out_path, 'w') as f:
+                _yaml.dump(ground_data, f, default_flow_style=False)
+            print(f'  Saved ground plane to {out_path} ({len(planes)} samples)')
+        except Exception as e:
+            print(f'  Ground plane error: {e}')
 
     def _solve_handeye(self):
         if len(self._he_points) < 3:
@@ -1191,40 +1310,121 @@ class HandEyeYellowView(BaseViewWidget):
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self._cam_thread = None
+        # Capture data: list of dicts with 'raw', 'tcp', 'pixel'
         self._captures = []
+        self._raw_positions_list = []
+        self._pts_2d = []
+        self._pts_3d_robot = []
+        self._solver = None
+        self._K = None
+        self._dist_coeffs = None
+        self._last_frame = None
+        self._last_yellow = (None, None)
+        self._last_tcp = None
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Camera feed (left)
+        self._cam_label = QLabel('Camera')
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setMinimumSize(480, 360)
+        self._cam_label.setStyleSheet('background-color: #1a1a1a;')
+        layout.addWidget(self._cam_label, stretch=3)
+
+        # Controls (right)
+        ctrl = QWidget()
+        ctrl_layout = QVBoxLayout(ctrl)
 
         title = QLabel('Hand-Eye Calibration (Yellow Tape)')
-        title.setStyleSheet('font-size: 16px; font-weight: bold; color: #ffc864;')
-        layout.addWidget(title)
-        layout.addWidget(QLabel(
-            'Move arm to diverse poses with yellow tape visible.\n'
-            'Capture FK+pixel correspondences, then solve.'))
+        title.setStyleSheet('font-size: 14px; font-weight: bold; color: #ffc864;')
+        ctrl_layout.addWidget(title)
+        ctrl_layout.addWidget(QLabel(
+            'Move arm to diverse poses with\n'
+            'yellow tape visible in camera.\n'
+            'Capture FK+pixel, then solve.'))
 
         self._status = QLabel('Captures: 0 (need >= 6)')
         self._status.setStyleSheet('color: #aaa; font-family: monospace;')
-        layout.addWidget(self._status)
+        ctrl_layout.addWidget(self._status)
 
-        self._cam_label = QLabel('Camera')
-        self._cam_label.setAlignment(Qt.AlignCenter)
-        self._cam_label.setMinimumSize(320, 240)
-        self._cam_label.setStyleSheet('background-color: #1a1a1a;')
-        layout.addWidget(self._cam_label)
+        self._detail = QLabel('')
+        self._detail.setStyleSheet('color: #888; font-family: monospace; font-size: 11px;')
+        self._detail.setWordWrap(True)
+        ctrl_layout.addWidget(self._detail)
 
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(make_button('Capture Pose', self._capture,
-                                      'Capture FK + yellow tape position', '#506430'))
-        btn_row.addWidget(make_button('Solve', self._solve,
-                                      'Run joint solve (>= 6 captures)', '#3c705a'))
-        btn_row.addWidget(make_button('Undo', self._undo, 'Remove last capture', '#644832'))
-        btn_row.addWidget(make_button('< Back', lambda: self.app.switch_view('calibration'),
-                                      color='#444'))
-        layout.addLayout(btn_row)
-        layout.addStretch()
+        ctrl_layout.addWidget(make_button('Capture Pose', self._capture,
+                                          'Capture FK + yellow tape position', '#506430'))
+        ctrl_layout.addWidget(make_button('Solve', self._solve,
+                                          'Run joint solve (>= 6 captures)', '#3c705a'))
+        ctrl_layout.addWidget(make_button('Undo', self._undo, 'Remove last capture', '#644832'))
+        ctrl_layout.addWidget(make_button('Clear All', self._clear_all,
+                                          'Remove all captures', '#643232'))
+        ctrl_layout.addWidget(make_button('< Back', lambda: self.app.switch_view('calibration'),
+                                          color='#444'))
+        ctrl_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumWidth(280)
+        scroll.setWidget(ctrl)
+        layout.addWidget(scroll, stretch=1)
+
+    def _init_solver_and_intrinsics(self):
+        """Lazily initialise IK solver and load camera intrinsics."""
+        if self._solver is None:
+            try:
+                from kinematics.arm101_ik_solver import Arm101IKSolver
+                self._solver = Arm101IKSolver()
+            except Exception as e:
+                print(f'  ERROR: Cannot init IK solver: {e}')
+                return False
+        if self._K is None:
+            self._K, self._dist_coeffs = self._load_intrinsics()
+        return self._solver is not None and self._K is not None
+
+    def _load_intrinsics(self):
+        """Load camera intrinsics from cameras.yaml or use defaults."""
+        import yaml as _yaml
+        cam_yaml = config_path('cameras.yaml')
+        cam_cfg = self.app.config.get('camera', {})
+        cam_idx = cam_cfg.get('device_index', 4)
+        if os.path.exists(cam_yaml):
+            try:
+                with open(cam_yaml) as f:
+                    cdata = _yaml.safe_load(f)
+                for cname, cinfo in cdata.get('cameras', {}).items():
+                    if cinfo.get('device_index') == cam_idx:
+                        intr = cinfo['intrinsics']
+                        K = np.array(intr['camera_matrix'], dtype=np.float64)
+                        dist = np.array(intr['dist_coeffs'], dtype=np.float64)
+                        print(f'  Intrinsics from {cname}: fx={K[0,0]:.1f}')
+                        return K, dist
+            except Exception as e:
+                print(f'  Warning: failed to load intrinsics: {e}')
+        # Also try camera_intrinsics.yaml (saved by checkerboard calib)
+        intr_yaml = config_path('camera_intrinsics.yaml')
+        if os.path.exists(intr_yaml):
+            try:
+                with open(intr_yaml) as f:
+                    d = _yaml.safe_load(f)
+                K = np.array([
+                    [d['fx'], 0, d['ppx']],
+                    [0, d['fy'], d['ppy']],
+                    [0, 0, 1],
+                ], dtype=np.float64)
+                dist = np.array(d.get('dist', [0]*5), dtype=np.float64)
+                print(f'  Intrinsics from camera_intrinsics.yaml: fx={K[0,0]:.1f}')
+                return K, dist
+            except Exception as e:
+                print(f'  Warning: failed to load camera_intrinsics.yaml: {e}')
+        # Fallback defaults
+        K = np.array([[554.3, 0, 320], [0, 554.3, 240], [0, 0, 1]], dtype=np.float64)
+        dist = np.zeros(5, dtype=np.float64)
+        print('  Using default intrinsics (estimated)')
+        return K, dist
 
     def on_activate(self):
         self.app.ensure_camera()
@@ -1238,6 +1438,8 @@ class HandEyeYellowView(BaseViewWidget):
             self._cam_thread = CameraThread(self.app.camera)
             self._cam_thread.frame_ready.connect(self._on_frame)
             self._cam_thread.start()
+        # Pre-init solver/intrinsics
+        self._init_solver_and_intrinsics()
 
     def on_deactivate(self):
         if self._cam_thread:
@@ -1250,27 +1452,141 @@ class HandEyeYellowView(BaseViewWidget):
                 pass
 
     def _on_frame(self, frame):
+        """Show camera feed with yellow tape overlay."""
+        from calibration.calib_helpers import find_yellow_tape, draw_handeye_overlay
+        self._last_frame = frame.copy()
+        # Detect yellow tape for live overlay
+        cx, cy, mask = find_yellow_tape(frame)
+        self._last_yellow = (cx, cy)
+        # Compute FK for overlay
+        tcp_pos = None
+        if self.app.robot and self._solver:
+            try:
+                angles = self.app.robot.get_angles()
+                if angles is not None:
+                    tcp_pos, _ = self._solver.forward_kin(np.array(angles[:5]))
+                    self._last_tcp = tcp_pos
+            except Exception:
+                pass
+        # Draw overlay
+        draw_handeye_overlay(frame, tcp_pos, (cx, cy), len(self._pts_2d))
+        # Show small yellow mask in corner
+        if mask is not None:
+            try:
+                mask_small = cv2.resize(mask, (160, 120))
+                mask_bgr = cv2.cvtColor(mask_small, cv2.COLOR_GRAY2BGR)
+                frame[0:120, frame.shape[1]-160:frame.shape[1]] = mask_bgr
+            except Exception:
+                pass
         img = cv_to_qimage(frame)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cam_label.setPixmap(pix)
 
     def _capture(self):
-        self._captures.append(time.time())  # placeholder
-        self._status.setText(f'Captures: {len(self._captures)} (need >= 6)')
-        print(f'  Captured pose #{len(self._captures)}')
+        """Capture FK + yellow tape pixel + raw servo positions."""
+        from calibration.calib_helpers import read_all_raw, find_yellow_tape
+        if not self._init_solver_and_intrinsics():
+            self._status.setText('ERROR: solver or intrinsics not available')
+            return
+        arm = self.app.robot
+        if arm is None or getattr(arm, 'robot_type', None) != 'arm101':
+            self._status.setText('ERROR: arm101 robot not connected')
+            return
+        # Read raw servo positions
+        raw_positions = read_all_raw(arm)
+        # Compute FK from current angles
+        angles = arm.get_angles()
+        tcp_pos = None
+        if angles is not None:
+            try:
+                tcp_pos, _ = self._solver.forward_kin(np.array(angles[:5]))
+            except Exception as e:
+                print(f'  FK error: {e}')
+        if tcp_pos is None:
+            self._status.setText('SKIP: cannot compute FK')
+            return
+        # Yellow tape detection from last frame
+        cx, cy = self._last_yellow
+        if cx is None:
+            self._status.setText('SKIP: no yellow tape detected')
+            return
+        # Store capture
+        self._raw_positions_list.append(dict(raw_positions))
+        self._pts_2d.append([float(cx), float(cy)])
+        self._pts_3d_robot.append(tcp_pos.copy())
+        self._captures.append({
+            'raw': dict(raw_positions),
+            'tcp': tcp_pos.copy(),
+            'pixel': (cx, cy),
+        })
+        n = len(self._pts_2d)
+        msg = (f'Captures: {n} (need >= 6)')
+        self._status.setText(msg)
+        detail = (f'#{n}: TCP=[{tcp_pos[0]:.0f},{tcp_pos[1]:.0f},{tcp_pos[2]:.0f}] '
+                  f'px=({cx},{cy})')
+        self._detail.setText(detail)
+        print(f'  Captured pose {detail}')
 
     def _solve(self):
-        if len(self._captures) < 6:
-            self._status.setText(f'Need >= 6 captures, have {len(self._captures)}')
+        """Run joint_solve to optimise servo offsets + camera extrinsics."""
+        from calibration.calib_helpers import joint_solve, save_offsets_dict, \
+            save_handeye_calibration, load_offsets, HANDEYE_FILE
+        n = len(self._pts_2d)
+        if n < 6:
+            self._status.setText(f'Need >= 6 captures, have {n}')
             return
-        print('  Running joint solve...')
+        if not self._init_solver_and_intrinsics():
+            self._status.setText('ERROR: solver or intrinsics not available')
+            return
         self._status.setText('Solving...')
+        print(f'\n  Joint solve: {n} points, optimising offsets + extrinsics...')
+        # Run in thread to avoid blocking GUI
+        threading.Thread(target=self._run_joint_solve, daemon=True).start()
+
+    def _run_joint_solve(self):
+        """Worker thread for joint solve."""
+        from calibration.calib_helpers import joint_solve, save_offsets_dict, \
+            save_handeye_calibration, load_offsets, HANDEYE_FILE
+        try:
+            opt_offsets, T_c2b = joint_solve(
+                self._raw_positions_list, self._pts_2d,
+                self._K, self._dist_coeffs, self._solver)
+            if opt_offsets is not None:
+                save_offsets_dict(opt_offsets)
+                save_handeye_calibration(T_c2b, HANDEYE_FILE)
+                msg = 'Joint solve OK — saved offsets + extrinsics'
+                print(f'  {msg}')
+                # Update status from main thread
+                QTimer.singleShot(0, lambda: self._status.setText(msg))
+                QTimer.singleShot(0, lambda: self._detail.setText(
+                    f'Saved to servo_offsets.yaml + {os.path.basename(HANDEYE_FILE)}'))
+            else:
+                msg = 'Joint solve FAILED — check captures'
+                print(f'  {msg}')
+                QTimer.singleShot(0, lambda: self._status.setText(msg))
+        except Exception as e:
+            msg = f'Solve error: {e}'
+            print(f'  {msg}')
+            QTimer.singleShot(0, lambda: self._status.setText(msg))
 
     def _undo(self):
         if self._captures:
             self._captures.pop()
-        self._status.setText(f'Captures: {len(self._captures)} (need >= 6)')
+            self._raw_positions_list.pop()
+            self._pts_2d.pop()
+            self._pts_3d_robot.pop()
+        n = len(self._pts_2d)
+        self._status.setText(f'Captures: {n} (need >= 6)')
+        self._detail.setText(f'Undone — {n} points remaining')
+
+    def _clear_all(self):
+        self._captures.clear()
+        self._raw_positions_list.clear()
+        self._pts_2d.clear()
+        self._pts_3d_robot.clear()
+        self._status.setText('Captures: 0 (need >= 6)')
+        self._detail.setText('All captures cleared')
 
 
 class GripperCameraThread(QThread):
@@ -1740,11 +2056,20 @@ class VerifyCalibView(BaseViewWidget):
     show_in_sidebar = False
     parent_view_id = 'calibration'
 
+    HOVER_HEIGHT_MM = 50.0  # hover 50mm above each corner
+
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self._cam_thread = None
         self._state = 'detect'  # detect, review, moving, at_corner, done
         self._dry_run = getattr(app.args, 'dry_run', False)
+        self._transform = None
+        self._board_detector = None
+        self._corners_base = []  # list of [x,y,z] mm in robot base frame
+        self._corner_labels = []
+        self._corner_idx = -1
+        self._last_frame = None
+        self._T_board_in_cam = None
         self._build_ui()
 
     def _build_ui(self):
@@ -1765,14 +2090,20 @@ class VerifyCalibView(BaseViewWidget):
         title.setStyleSheet('font-size: 14px; font-weight: bold; color: #ffc864;')
         ctrl_layout.addWidget(title)
 
-        self._state_label = QLabel('State: DETECT')
+        self._state_label = QLabel('State: DETECT\nCapture board, then step through corners')
         self._state_label.setStyleSheet('color: #aaa; font-family: monospace;')
+        self._state_label.setWordWrap(True)
         ctrl_layout.addWidget(self._state_label)
+
+        self._detail_label = QLabel('')
+        self._detail_label.setStyleSheet('color: #888; font-family: monospace; font-size: 11px;')
+        self._detail_label.setWordWrap(True)
+        ctrl_layout.addWidget(self._detail_label)
 
         ctrl_layout.addWidget(make_button('Capture Board', self._capture_board,
                                           'Detect checkerboard in current frame', '#3c5a70'))
-        ctrl_layout.addWidget(make_button('Start / Next', self._advance,
-                                          'Advance to next step', '#506430'))
+        ctrl_layout.addWidget(make_button('Move to Next Corner', self._advance,
+                                          'Move arm above next board corner', '#506430'))
         self._dryrun_btn = make_button(
             f'Dry-Run: {"ON" if self._dry_run else "OFF"}', self._toggle_dryrun,
             'Toggle dry-run mode (no arm movement)')
@@ -1802,6 +2133,27 @@ class VerifyCalibView(BaseViewWidget):
         scroll.setWidget(ctrl)
         layout.addWidget(scroll, stretch=1)
 
+    def _load_calibration(self):
+        """Load the camera-to-base transform."""
+        if self._transform is not None:
+            return True
+        try:
+            from calibration.transform import CoordinateTransform
+            calib_path = config_path('calibration.yaml')
+            # Also check arm101-specific calibration
+            arm101_path = config_path('calibration_arm101.yaml')
+            path = arm101_path if os.path.exists(arm101_path) else calib_path
+            if not os.path.exists(path):
+                print(f'  No calibration file found')
+                return False
+            self._transform = CoordinateTransform()
+            self._transform.load(path)
+            print(f'  Loaded calibration from {os.path.basename(path)}')
+            return True
+        except Exception as e:
+            print(f'  Error loading calibration: {e}')
+            return False
+
     def on_activate(self):
         self.app.ensure_camera()
         self.app.ensure_robot()
@@ -1809,6 +2161,17 @@ class VerifyCalibView(BaseViewWidget):
             self._cam_thread = CameraThread(self.app.camera)
             self._cam_thread.frame_ready.connect(self._on_frame)
             self._cam_thread.start()
+        # Try to load board detector
+        try:
+            from vision.board_detector import BoardDetector
+            self._board_detector = BoardDetector.from_config(self.app.config)
+        except Exception:
+            pass
+        self._load_calibration()
+        self._state = 'detect'
+        self._corners_base = []
+        self._corner_idx = -1
+        self._state_label.setText('State: DETECT\nCapture board to begin')
 
     def on_deactivate(self):
         if self._cam_thread:
@@ -1816,21 +2179,178 @@ class VerifyCalibView(BaseViewWidget):
             self._cam_thread = None
 
     def _on_frame(self, frame):
+        self._last_frame = frame.copy()
+        # Live board detection overlay
+        from calibration.calib_helpers import detect_corners
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        found, corners, detection = detect_corners(gray, self._board_detector)
+        if found:
+            if self._board_detector and detection:
+                self._board_detector.draw_corners(frame, detection)
+            else:
+                cv2.drawChessboardCorners(frame, (7, 9), corners, found)
+            cv2.putText(frame, f'{len(corners)} corners detected',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, 'No board detected',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        # Show current corner target info
+        if self._state in ('at_corner', 'moving') and 0 <= self._corner_idx < len(self._corners_base):
+            tgt = self._corners_base[self._corner_idx]
+            label = self._corner_labels[self._corner_idx] if self._corner_idx < len(self._corner_labels) else ''
+            cv2.putText(frame, f'Corner {self._corner_idx}: {label}  target=[{tgt[0]:.0f},{tgt[1]:.0f},{tgt[2]:.0f}]mm',
+                        (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
         img = cv_to_qimage(frame)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cam_label.setPixmap(pix)
 
     def _capture_board(self):
-        print('  Capturing board...')
+        """Detect board in current frame, compute corner positions in robot base frame."""
+        from calibration.calib_helpers import detect_corners, compute_board_pose, \
+            _get_board_outer_corners_cam
+        if not self._load_calibration():
+            self._state_label.setText('ERROR: No calibration loaded')
+            return
+        if self._last_frame is None:
+            self._state_label.setText('ERROR: No camera frame')
+            return
+        # Get camera intrinsics
+        intrinsics = None
+        if self.app.camera and hasattr(self.app.camera, 'intrinsics'):
+            intrinsics = self.app.camera.intrinsics
+        if intrinsics is None:
+            self._state_label.setText('ERROR: No camera intrinsics')
+            return
+
+        gray = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2GRAY)
+        found, corners, detection = detect_corners(gray, self._board_detector)
+        if not found:
+            self._state_label.setText('State: DETECT\nNo board found — reposition and retry')
+            return
+
+        T_board_in_cam, obj_pts, reproj_err = compute_board_pose(
+            corners, intrinsics, detection, self._board_detector)
+        if T_board_in_cam is None:
+            self._state_label.setText('State: DETECT\nBoard pose solve failed')
+            return
+        self._T_board_in_cam = T_board_in_cam
+
+        # Get outer corners in camera frame
+        corners_cam, labels = _get_board_outer_corners_cam(
+            T_board_in_cam, board_detector=self._board_detector)
+
+        # Transform to robot base frame
+        self._corners_base = []
+        self._corner_labels = labels
+        detail_lines = []
+        for i, (p_cam, label) in enumerate(zip(corners_cam, labels)):
+            p_base = self._transform.camera_to_base(p_cam)
+            p_base_mm = p_base * 1000.0
+            hover_mm = p_base_mm.copy()
+            hover_mm[2] += self.HOVER_HEIGHT_MM
+            self._corners_base.append(hover_mm)
+            detail_lines.append(
+                f'{label}: [{hover_mm[0]:.0f},{hover_mm[1]:.0f},{hover_mm[2]:.0f}]')
+
+        self._corner_idx = -1
         self._state = 'review'
-        self._state_label.setText('State: REVIEW')
+        n = len(self._corners_base)
+        self._state_label.setText(
+            f'State: REVIEW\n{n} corners found (reproj: {reproj_err:.2f}px)\n'
+            f'Click "Move to Next Corner" to begin')
+        self._detail_label.setText('Hover targets (mm):\n' + '\n'.join(detail_lines))
+        print(f'  Board captured: {n} outer corners, reproj={reproj_err:.2f}px')
 
     def _advance(self):
-        transitions = {'review': 'moving', 'at_corner': 'moving', 'moving': 'at_corner'}
-        if self._state in transitions:
-            self._state = transitions[self._state]
-            self._state_label.setText(f'State: {self._state.upper()}')
+        """Move arm to next corner (or report position if dry-run)."""
+        if self._state == 'detect':
+            self._state_label.setText('State: DETECT\nCapture board first')
+            return
+        if not self._corners_base:
+            self._state_label.setText('No corners — capture board first')
+            return
+
+        self._corner_idx += 1
+        if self._corner_idx >= len(self._corners_base):
+            self._state = 'done'
+            self._state_label.setText('State: DONE\nAll corners visited!')
+            self._detail_label.setText('Verification complete')
+            print('  Verification complete — all corners visited')
+            return
+
+        tgt = self._corners_base[self._corner_idx]
+        label = self._corner_labels[self._corner_idx] if self._corner_idx < len(self._corner_labels) else ''
+        i = self._corner_idx
+
+        if self._dry_run:
+            self._state = 'at_corner'
+            self._state_label.setText(
+                f'State: AT_CORNER (dry-run)\n'
+                f'Corner {i} ({label})\n'
+                f'Target: [{tgt[0]:.1f}, {tgt[1]:.1f}, {tgt[2]:.1f}] mm')
+            print(f'  [DRY RUN] Corner {i} ({label}): [{tgt[0]:.1f},{tgt[1]:.1f},{tgt[2]:.1f}]mm')
+            return
+
+        # Actually move the robot
+        self._state = 'moving'
+        self._state_label.setText(
+            f'State: MOVING\nCorner {i} ({label})...')
+        print(f'  Moving to corner {i} ({label}): [{tgt[0]:.1f},{tgt[1]:.1f},{tgt[2]:.1f}]mm')
+        threading.Thread(target=self._move_to_corner, args=(i, tgt, label),
+                         daemon=True).start()
+
+    def _move_to_corner(self, idx, target_mm, label):
+        """Worker thread: move robot to target position."""
+        robot = self.app.robot
+        if robot is None:
+            QTimer.singleShot(0, lambda: self._state_label.setText('ERROR: No robot'))
+            return
+        try:
+            robot_type = getattr(robot, 'robot_type', None)
+            if robot_type == 'arm101':
+                # For arm101, use IK solver to compute joint angles
+                from kinematics.arm101_ik_solver import Arm101IKSolver
+                solver = Arm101IKSolver()
+                target_m = target_mm / 1000.0
+                angles = robot.get_angles()
+                seed = np.array(angles[:5]) if angles else None
+                result = solver.solve_ik_position(target_m, seed_motor_deg=seed)
+                if result is not None and result.success:
+                    robot.move_to_angles(result.joint_angles_deg.tolist())
+                    time.sleep(1.0)
+                else:
+                    QTimer.singleShot(0, lambda: self._state_label.setText(
+                        f'IK failed for corner {idx}'))
+                    return
+            else:
+                # Nova5: use MovJ with pose
+                pose = robot.get_pose()
+                rx, ry, rz = (pose[3], pose[4], pose[5]) if pose else (180, 0, 0)
+                ok = robot.movj(target_mm[0], target_mm[1], target_mm[2], rx, ry, rz)
+                if not ok:
+                    QTimer.singleShot(0, lambda: self._state_label.setText(
+                        f'Move failed for corner {idx}'))
+                    return
+                time.sleep(0.5)
+
+            # Read actual position and compute error
+            actual = robot.get_pose() if hasattr(robot, 'get_pose') else None
+            err_str = ''
+            if actual:
+                err = np.linalg.norm(np.array(actual[:3]) - target_mm)
+                err_str = f'\nPosition error: {err:.1f}mm'
+
+            def _update():
+                self._state = 'at_corner'
+                self._state_label.setText(
+                    f'State: AT_CORNER\nCorner {idx} ({label}){err_str}')
+            QTimer.singleShot(0, _update)
+        except Exception as e:
+            msg = f'Move error: {e}'
+            print(f'  {msg}')
+            QTimer.singleShot(0, lambda: self._state_label.setText(msg))
 
     def _toggle_dryrun(self):
         self._dry_run = not self._dry_run
