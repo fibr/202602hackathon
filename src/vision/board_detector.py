@@ -194,8 +194,8 @@ class BoardDetector:
                 self._detector.detectBoard(gray))
             n_markers = len(marker_corners) if marker_corners is not None else 0
             n_charuco = len(charuco_corners) if charuco_corners is not None else 0
-            if n_charuco < 4 and n_markers == 0:
-                # Legacy didn't help either — switch back
+            if n_charuco < 4:
+                # Legacy didn't help — switch back to non-legacy
                 self._charuco_board.setLegacyPattern(False)
                 self._legacy_pattern = False
                 self._rebuild_detector()
