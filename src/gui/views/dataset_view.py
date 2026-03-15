@@ -27,11 +27,25 @@ class DatasetView(BaseView):
     needs_robot = False
     headless_ok = False
 
+    OPTIONS = [
+        ('Live Collection',
+         'Camera + robot, capture frames interactively',
+         []),
+        ('Camera Only (no robot)',
+         'Capture frames without robot connection',
+         ['--no-robot']),
+        ('Snapshot Debug',
+         'Single-frame detection with 6-stage debug images',
+         ['--snapshot']),
+    ]
+
     def __init__(self, app):
         super().__init__(app)
         self._status = 'Ready'
         self._running = False
         self._output = ''
+        self._buttons = []      # [(x1, y1, x2, y2, option_idx), ...]
+        self._hover_pos = (-1, -1)
 
     def setup(self):
         pass
@@ -40,6 +54,7 @@ class DatasetView(BaseView):
         vw = self.app.view_width
         vh = self.app.canvas_height
         canvas[:vh, :vw] = (30, 30, 35)
+        self._buttons = []
 
         cv2.putText(canvas, 'Dataset Collection', (20, 35),
                     FONT, 0.6, (255, 200, 100), 1)
@@ -47,23 +62,45 @@ class DatasetView(BaseView):
                     (20, 58), FONT, 0.38, (150, 150, 150), 1)
         cv2.line(canvas, (10, 68), (vw - 10, 68), (60, 60, 70), 1)
 
-        y = 95
-        options = [
-            ('[1] Live Collection',
-             'Camera + robot, capture frames interactively'),
-            ('[2] Camera Only (no robot)',
-             'Capture frames without robot connection'),
-            ('[3] Snapshot Debug',
-             'Single-frame detection with 6-stage debug images'),
-        ]
-        for label, desc in options:
-            color = (100, 100, 100) if self._running else (180, 220, 255)
-            cv2.putText(canvas, label, (30, y), FONT, 0.42, color, 1)
-            cv2.putText(canvas, desc, (50, y + 18), FONT, 0.32, (120, 120, 120), 1)
-            y += 48
+        btn_h = 52
+        btn_w = vw - 40
+        hx, hy = self._hover_pos
+        y = 82
+
+        for idx, (label, desc, _args) in enumerate(self.OPTIONS):
+            x1, y1 = 20, y
+            x2, y2 = x1 + btn_w, y + btn_h
+
+            disabled = self._running
+            is_hover = (not disabled) and (x1 <= hx <= x2 and y1 <= hy <= y2)
+
+            if disabled:
+                bg = (35, 35, 38)
+                border_col = (55, 55, 60)
+                text_col = (100, 100, 100)
+                desc_col = (80, 80, 85)
+            elif is_hover:
+                bg = (55, 50, 65)
+                border_col = (120, 160, 220)
+                text_col = (230, 245, 255)
+                desc_col = (160, 160, 170)
+            else:
+                bg = (40, 40, 50)
+                border_col = (70, 70, 90)
+                text_col = (180, 220, 255)
+                desc_col = (120, 120, 130)
+
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, -1)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), border_col, 1)
+            cv2.putText(canvas, label, (x1 + 14, y1 + 22), FONT, 0.42, text_col, 1)
+            cv2.putText(canvas, desc, (x1 + 14, y1 + 40), FONT, 0.32, desc_col, 1)
+
+            if not disabled:
+                self._buttons.append((x1, y1, x2, y2, idx))
+            y += btn_h + 8
 
         # Status
-        y += 10
+        y += 6
         status_color = (0, 200, 255) if self._running else (200, 200, 200)
         cv2.putText(canvas, f'Status: {self._status}', (20, y),
                     FONT, 0.4, status_color, 1)
@@ -81,17 +118,29 @@ class DatasetView(BaseView):
                     (20, vh - 15), FONT, 0.32, (80, 80, 80), 1)
 
     def handle_key(self, key):
+        # Legacy key shortcuts kept for backwards compatibility
         if self._running:
             return False
         if key == ord('1'):
-            self._launch([])
+            self._launch(self.OPTIONS[0][2])
             return True
         if key == ord('2'):
-            self._launch(['--no-robot'])
+            self._launch(self.OPTIONS[1][2])
             return True
         if key == ord('3'):
-            self._launch(['--snapshot'])
+            self._launch(self.OPTIONS[2][2])
             return True
+        return False
+
+    def handle_mouse(self, event, x, y, flags):
+        if event == cv2.EVENT_MOUSEMOVE:
+            self._hover_pos = (x, y)
+            return False
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for x1, y1, x2, y2, idx in self._buttons:
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    self._launch(self.OPTIONS[idx][2])
+                    return True
         return False
 
     def _launch(self, extra_args):

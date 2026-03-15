@@ -1,7 +1,7 @@
 """Extra Scripts view: launcher for miscellaneous utility scripts.
 
-Provides a menu to launch less-common scripts like visual servo test,
-green cube point, visit cubes, ROI selection, etc.
+Provides a menu of clickable buttons to launch less-common scripts like
+visual servo test, green cube point, visit cubes, ROI selection, etc.
 """
 
 import os
@@ -28,21 +28,21 @@ class ExtrasView(BaseView):
     needs_robot = False
     headless_ok = False
 
-    # Script entries: (key, label, description, script_path, extra_args)
+    # Script entries: (label, description, script_path, extra_args)
     SCRIPTS = [
-        ('1', 'Visual Servo Test', 'Test gripper camera visual servoing',
+        ('Visual Servo Test', 'Test gripper camera visual servoing',
          'scripts/test_visual_servo.py', []),
-        ('2', 'Green Cube Point', 'Point robot at green cube',
+        ('Green Cube Point', 'Point robot at green cube',
          'scripts/green_cube_point.py', []),
-        ('3', 'Visit Cubes', 'Demo: visit colored cubes',
+        ('Visit Cubes', 'Demo: visit colored cubes',
          'scripts/visit_cubes.py', []),
-        ('4', 'Visit Cubes (calibrated)', 'Calibrated cube visitation',
+        ('Visit Cubes (calibrated)', 'Calibrated cube visitation',
          'scripts/visit_cubes_calibrated.py', []),
-        ('5', 'Select ROI', 'Interactive region-of-interest selection',
+        ('Select ROI', 'Interactive region-of-interest selection',
          'scripts/select_roi.py', []),
-        ('6', 'Evaluate Dataset', 'Run detection on saved dataset',
+        ('Evaluate Dataset', 'Run detection on saved dataset',
          'scripts/eval_dataset.py', []),
-        ('7', 'Test arm101 FK', 'Forward kinematics validation',
+        ('Test arm101 FK', 'Forward kinematics validation',
          'scripts/test_arm101_fk.py', []),
     ]
 
@@ -51,6 +51,8 @@ class ExtrasView(BaseView):
         self._status = 'Ready'
         self._running = False
         self._output = ''
+        self._buttons = []      # [(x1, y1, x2, y2, idx), ...]
+        self._hover_pos = (-1, -1)
 
     def setup(self):
         pass
@@ -59,6 +61,7 @@ class ExtrasView(BaseView):
         vw = self.app.view_width
         vh = self.app.canvas_height
         canvas[:vh, :vw] = (30, 30, 35)
+        self._buttons = []
 
         cv2.putText(canvas, 'Extra Scripts', (20, 35),
                     FONT, 0.6, (255, 200, 100), 1)
@@ -66,31 +69,63 @@ class ExtrasView(BaseView):
                     (20, 58), FONT, 0.38, (150, 150, 150), 1)
         cv2.line(canvas, (10, 68), (vw - 10, 68), (60, 60, 70), 1)
 
-        y = 90
-        for key_char, label, desc, script, _ in self.SCRIPTS:
-            # Check if script exists
+        btn_h = 44
+        btn_w = vw - 40
+        hx, hy = self._hover_pos
+        y = 78
+
+        for idx, (label, desc, script, _) in enumerate(self.SCRIPTS):
             script_path = os.path.join(_PROJECT_ROOT, script)
             exists = os.path.exists(script_path)
-            color = (100, 100, 100) if (self._running or not exists) else (180, 220, 255)
-            marker = '' if exists else ' (missing)'
+            disabled = self._running or not exists
 
-            cv2.putText(canvas, f'[{key_char}] {label}{marker}',
-                        (30, y), FONT, 0.4, color, 1)
-            cv2.putText(canvas, desc, (50, y + 16),
-                        FONT, 0.3, (120, 120, 120), 1)
-            y += 40
+            x1, y1 = 20, y
+            x2, y2 = x1 + btn_w, y + btn_h
+
+            is_hover = (not disabled) and (x1 <= hx <= x2 and y1 <= hy <= y2)
+
+            if disabled:
+                bg = (35, 35, 38)
+                border_col = (55, 55, 60)
+                text_col = (90, 90, 90)
+                desc_col = (70, 70, 75)
+            elif is_hover:
+                bg = (55, 50, 65)
+                border_col = (120, 160, 220)
+                text_col = (230, 245, 255)
+                desc_col = (160, 160, 170)
+            else:
+                bg = (40, 40, 50)
+                border_col = (70, 70, 90)
+                text_col = (180, 220, 255)
+                desc_col = (110, 110, 120)
+
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, -1)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), border_col, 1)
+
+            label_display = label if exists else f'{label} (missing)'
+            cv2.putText(canvas, label_display, (x1 + 14, y1 + 18),
+                        FONT, 0.4, text_col, 1)
+            cv2.putText(canvas, desc, (x1 + 14, y1 + 34),
+                        FONT, 0.3, desc_col, 1)
+
+            if not disabled:
+                self._buttons.append((x1, y1, x2, y2, idx))
+            y += btn_h + 5
 
         # Status
-        y += 10
+        y += 6
         status_color = (0, 200, 255) if self._running else (200, 200, 200)
         cv2.putText(canvas, f'Status: {self._status}', (20, y),
                     FONT, 0.4, status_color, 1)
 
         # Output tail
-        y += 25
-        lines = self._output.split('\n')[-8:]
+        y += 22
+        lines = self._output.split('\n')[-6:]
         for line in lines:
             y += 14
+            if y > vh - 20:
+                break
             cv2.putText(canvas, line[:80], (25, y),
                         FONT, 0.28, (150, 150, 150), 1)
 
@@ -99,13 +134,27 @@ class ExtrasView(BaseView):
                     (20, vh - 15), FONT, 0.32, (80, 80, 80), 1)
 
     def handle_key(self, key):
+        # Legacy single-digit shortcuts kept for backwards compatibility
         if self._running:
             return False
-
-        for key_char, label, _desc, script, extra_args in self.SCRIPTS:
-            if key == ord(key_char):
+        if ord('1') <= key <= ord('7'):
+            idx = key - ord('1')
+            if idx < len(self.SCRIPTS):
+                label, _desc, script, extra_args = self.SCRIPTS[idx]
                 self._launch(label, script, extra_args)
                 return True
+        return False
+
+    def handle_mouse(self, event, x, y, flags):
+        if event == cv2.EVENT_MOUSEMOVE:
+            self._hover_pos = (x, y)
+            return False
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for x1, y1, x2, y2, idx in self._buttons:
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    label, _desc, script, extra_args = self.SCRIPTS[idx]
+                    self._launch(label, script, extra_args)
+                    return True
         return False
 
     def _launch(self, label, script, extra_args):

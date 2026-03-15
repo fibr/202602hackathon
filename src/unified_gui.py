@@ -236,6 +236,12 @@ class UnifiedApp:
         cv2.line(canvas, (sx, header_h), (sx + SIDEBAR_WIDTH, header_h),
                  (60, 60, 70), 1)
 
+        # Determine parent view (when in a sub-view, highlight the parent)
+        parent_view_id = None
+        if self._active_view_id:
+            view_cls = ViewRegistry.get(self._active_view_id)
+            parent_view_id = getattr(view_cls, 'parent_view_id', None) if view_cls else None
+
         # View items
         item_h = 48
         y = header_h + 4
@@ -246,26 +252,44 @@ class UnifiedApp:
 
             # Background
             is_active = (vid == self._active_view_id)
+            is_parent = (not is_active and vid == parent_view_id)
             is_hover = (i == self._hover_idx)
             if is_active:
                 bg = SB_ITEM_ACTIVE
+            elif is_parent:
+                bg = (50, 45, 35)  # subtle warm tint for parent
             elif is_hover:
                 bg = SB_ITEM_HOVER
             else:
                 bg = SB_ITEM_BG
             canvas[iy:iy + item_h - 2, sx + 4:sx + SIDEBAR_WIDTH - 4] = bg
 
-            # Active indicator bar
+            # Active indicator bar (solid for active, dim for parent/in-sub-view)
             if is_active:
                 cv2.rectangle(canvas, (sx, iy), (sx + 3, iy + item_h - 2),
                               SB_ACCENT, -1)
+            elif is_parent:
+                cv2.rectangle(canvas, (sx, iy), (sx + 3, iy + item_h - 2),
+                              (0, 100, 180), -1)
 
             # Text
-            text_col = SB_TEXT_ACTIVE if is_active else SB_TEXT
+            if is_active:
+                text_col = SB_TEXT_ACTIVE
+            elif is_parent:
+                text_col = (200, 190, 140)
+            else:
+                text_col = SB_TEXT
             cv2.putText(canvas, vname, (sx + 14, iy + 20),
                         FONT, 0.42, text_col, 1)
-            cv2.putText(canvas, vdesc[:28], (sx + 14, iy + 36),
-                        FONT, 0.32, SB_TEXT_DIM, 1)
+            # Show sub-view indicator on parent item
+            if is_parent and self._active_view_id:
+                sub_cls = ViewRegistry.get(self._active_view_id)
+                sub_name = sub_cls.view_name if sub_cls else self._active_view_id
+                desc_text = f'> {sub_name}'
+            else:
+                desc_text = vdesc[:28]
+            cv2.putText(canvas, desc_text, (sx + 14, iy + 36),
+                        FONT, 0.32, SB_TEXT_DIM if not is_parent else (120, 140, 100), 1)
 
         # Bottom status
         status_y = h - 60

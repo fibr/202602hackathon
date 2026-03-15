@@ -1,8 +1,8 @@
 """Calibration menu view: navigate to embedded calibration sub-views.
 
-Pressing a number key switches directly to the corresponding embedded view
-(servo_calib, handeye_yellow, checkerboard, verify_calib) via
-app.switch_view().  All tools are now fully embedded — no subprocess needed.
+Clicking a button (or pressing the legacy number key) switches directly to
+the corresponding embedded view via app.switch_view().  All tools are fully
+embedded — no subprocess needed.
 """
 
 import os
@@ -26,8 +26,24 @@ class CalibrationView(BaseView):
     needs_robot = False
     headless_ok = False
 
+    # (view_id, label, description)
+    OPTIONS = [
+        ('checkerboard', 'Checkerboard Calibration',
+         'Intrinsics + click TCP on board, ray-plane solve'),
+        ('servo_calib', 'Servo Calibration',
+         'Move arm to zero pose, save offsets  (arm101)'),
+        ('handeye_yellow', 'Hand-Eye Calibration (Yellow Tape)',
+         'Capture FK+pixel poses, joint solve  (arm101)'),
+        ('verify_calib', 'Verify Checkerboard',
+         'Move arm above board corners to verify calibration'),
+        ('servo_direction', 'Servo Direction Auto-Calib',
+         'Auto-detect servo signs + offsets via yellow tape (arm101)'),
+    ]
+
     def __init__(self, app):
         super().__init__(app)
+        self._buttons = []      # [(x1, y1, x2, y2, view_id), ...]
+        self._hover_pos = (-1, -1)
 
     def setup(self):
         pass
@@ -36,51 +52,63 @@ class CalibrationView(BaseView):
         vw = self.app.view_width
         vh = self.app.canvas_height
         canvas[:vh, :vw] = (30, 30, 35)
+        self._buttons = []
 
         cv2.putText(canvas, 'Calibration Tools', (20, 35),
                     FONT, 0.6, (255, 200, 100), 1)
-        cv2.putText(canvas, 'Select a tool to open it in the same window',
+        cv2.putText(canvas, 'Click a tool to open it in the same window',
                     (20, 58), FONT, 0.38, (150, 150, 150), 1)
         cv2.line(canvas, (10, 68), (vw - 10, 68), (60, 60, 70), 1)
 
-        y = 95
-        options = [
-            ('[1] Checkerboard Calibration',
-             'Intrinsics + click TCP on board, ray-plane solve'),
-            ('[2] Servo Calibration',
-             'Move arm to zero pose, save offsets  (arm101)'),
-            ('[3] Hand-Eye Calibration (Yellow Tape)',
-             'Capture FK+pixel poses, joint solve  (arm101)'),
-            ('[4] Verify Checkerboard',
-             'Move arm above board corners to verify calibration'),
-            ('[5] Servo Direction Auto-Calib',
-             'Auto-detect servo signs + offsets via yellow tape (arm101)'),
-        ]
-        for label, desc in options:
-            cv2.putText(canvas, label, (30, y), FONT, 0.42, (180, 220, 255), 1)
-            cv2.putText(canvas, desc, (50, y + 18), FONT, 0.32,
-                        (120, 120, 120), 1)
-            y += 54
+        btn_h = 52
+        btn_w = vw - 40
+        hx, hy = self._hover_pos
+        y = 82
 
-        # Footer hint
-        cv2.putText(canvas,
-                    '[1-5] open embedded view',
-                    (20, vh - 15), FONT, 0.32, (80, 80, 80), 1)
+        for view_id, label, desc in self.OPTIONS:
+            x1, y1 = 20, y
+            x2, y2 = x1 + btn_w, y + btn_h
+
+            is_hover = (x1 <= hx <= x2 and y1 <= hy <= y2)
+
+            bg = (55, 50, 65) if is_hover else (40, 40, 50)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, -1)
+            border_col = (120, 160, 220) if is_hover else (70, 70, 90)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), border_col, 1)
+
+            text_col = (230, 245, 255) if is_hover else (180, 220, 255)
+            cv2.putText(canvas, label, (x1 + 14, y1 + 22),
+                        FONT, 0.42, text_col, 1)
+            cv2.putText(canvas, desc, (x1 + 14, y1 + 40),
+                        FONT, 0.32, (130, 130, 140) if not is_hover else (160, 160, 170), 1)
+
+            self._buttons.append((x1, y1, x2, y2, view_id))
+            y += btn_h + 8
 
     def handle_key(self, key):
-        if key == ord('1'):
-            self.app.switch_view('checkerboard')
-            return True
-        if key == ord('2'):
-            self.app.switch_view('servo_calib')
-            return True
-        if key == ord('3'):
-            self.app.switch_view('handeye_yellow')
-            return True
-        if key == ord('4'):
-            self.app.switch_view('verify_calib')
-            return True
-        if key == ord('5'):
-            self.app.switch_view('servo_direction')
+        # Legacy number-key shortcuts (kept for backwards compatibility)
+        key_map = {
+            ord('1'): 'checkerboard',
+            ord('2'): 'servo_calib',
+            ord('3'): 'handeye_yellow',
+            ord('4'): 'verify_calib',
+            ord('5'): 'servo_direction',
+        }
+        if key in key_map:
+            self.app.switch_view(key_map[key])
             return True
         return False
+
+    def handle_mouse(self, event, x, y, flags):
+        if event == cv2.EVENT_MOUSEMOVE:
+            self._hover_pos = (x, y)
+            return False
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for x1, y1, x2, y2, view_id in self._buttons:
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    self.app.switch_view(view_id)
+                    return True
+        return False
+
+    def cleanup(self):
+        pass
