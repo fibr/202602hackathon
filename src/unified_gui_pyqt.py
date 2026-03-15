@@ -1566,10 +1566,23 @@ class HandEyeYellowView(BaseViewWidget):
         self._status.setStyleSheet('color: #aaa; font-family: monospace;')
         ctrl_layout.addWidget(self._status)
 
-        self._detail = QLabel('')
-        self._detail.setStyleSheet('color: #888; font-family: monospace; font-size: 11px;')
-        self._detail.setWordWrap(True)
-        ctrl_layout.addWidget(self._detail)
+        # Scrollable table of all captures
+        self._capture_table = QTableWidget(0, 6)
+        self._capture_table.setHorizontalHeaderLabels(
+            ['#', 'TCP X', 'TCP Y', 'TCP Z', 'Px', 'Py'])
+        self._capture_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._capture_table.verticalHeader().setVisible(False)
+        self._capture_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._capture_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._capture_table.setMinimumHeight(160)
+        self._capture_table.setMaximumHeight(260)
+        self._capture_table.setStyleSheet(
+            'QTableWidget { background-color: #1a1a1a; color: #ccc;'
+            '  font-family: monospace; font-size: 10px; gridline-color: #444; }'
+            'QHeaderView::section { background-color: #333; color: #ffc864;'
+            '  font-size: 10px; padding: 2px; }'
+            'QTableWidget::item:selected { background-color: #3a5a8a; }')
+        ctrl_layout.addWidget(self._capture_table)
 
         # Progress bar for joint solve optimization
         self._progress_bar = QProgressBar()
@@ -1608,9 +1621,79 @@ class HandEyeYellowView(BaseViewWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumWidth(280)
+        scroll.setMaximumWidth(300)
         scroll.setWidget(ctrl)
         layout.addWidget(scroll, stretch=1)
+
+    def _refresh_table(self):
+        """Rebuild the capture table from self._captures with colour-coded rows."""
+        t = self._capture_table
+        t.setRowCount(0)
+
+        # Collect all pixels to detect duplicates
+        all_pixels = [c.get('pixel') for c in self._captures]
+
+        for i, cap in enumerate(self._captures):
+            tcp = cap.get('tcp')
+            px, py = cap.get('pixel', (None, None))
+            fk_ok = cap.get('fk_ok', True)
+
+            # Duplicate pixel detection: same pixel as any earlier capture
+            is_duplicate = (px, py) in all_pixels[:i]
+
+            # Build row values
+            if tcp is not None:
+                vals = [
+                    str(i + 1),
+                    f'{tcp[0]:.0f}',
+                    f'{tcp[1]:.0f}',
+                    f'{tcp[2]:.0f}',
+                    str(int(px)) if px is not None else '?',
+                    str(int(py)) if py is not None else '?',
+                ]
+            else:
+                vals = [str(i + 1), '?', '?', '?',
+                        str(int(px)) if px is not None else '?',
+                        str(int(py)) if py is not None else '?']
+
+            row = t.rowCount()
+            t.insertRow(row)
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignCenter)
+
+                # Colour coding: red=FK fail, yellow=duplicate pixel, green=good
+                if not fk_ok:
+                    item.setForeground(QColor('#ff6060'))
+                    item.setToolTip('FK solve failed for this pose')
+                elif is_duplicate:
+                    item.setForeground(QColor('#ffcc44'))
+                    item.setToolTip('Duplicate pixel — same as an earlier capture')
+                else:
+                    item.setForeground(QColor('#88dd88'))
+
+                t.setItem(row, col, item)
+
+        # Scroll to last row so newest capture is always visible
+        if t.rowCount() > 0:
+            t.scrollToBottom()
+
+        # Update status colour based on readiness
+        n = len(self._captures)
+        fk_fails = sum(1 for c in self._captures if not c.get('fk_ok', True))
+        dups = sum(1 for i, c in enumerate(self._captures)
+                   if c.get('pixel') in [self._captures[j].get('pixel') for j in range(i)])
+        issues = fk_fails + dups
+        status_txt = f'Captures: {n} (need >= 6)'
+        if issues:
+            status_txt += f'  ⚠ {issues} issue(s)'
+        self._status.setText(status_txt)
+        if n >= 6 and issues == 0:
+            self._status.setStyleSheet('color: #88dd88; font-family: monospace;')
+        elif n >= 6:
+            self._status.setStyleSheet('color: #ffcc44; font-family: monospace;')
+        else:
+            self._status.setStyleSheet('color: #aaa; font-family: monospace;')
 
     def _init_solver_and_intrinsics(self):
         """Lazily initialise IK solver and load camera intrinsics."""
@@ -1775,14 +1858,13 @@ class HandEyeYellowView(BaseViewWidget):
             'raw': dict(raw_positions),
             'tcp': tcp_pos.copy(),
             'pixel': (cx, cy),
+            'fk_ok': True,
         })
         n = len(self._pts_2d)
-        msg = (f'Captures: {n} (need >= 6)')
-        self._status.setText(msg)
         detail = (f'#{n}: TCP=[{tcp_pos[0]:.0f},{tcp_pos[1]:.0f},{tcp_pos[2]:.0f}] '
                   f'px=({cx},{cy})')
-        self._detail.setText(detail)
         print(f'  Captured pose {detail}')
+        self._refresh_table()
 
     def _on_cam_click(self, img_x: int, img_y: int):
         """Store a manual pixel override when the user clicks the camera feed."""
@@ -1837,19 +1919,25 @@ class HandEyeYellowView(BaseViewWidget):
                 msg = 'Joint solve OK — saved offsets + extrinsics'
                 print(f'  {msg}')
                 # Update status from main thread
-                QTimer.singleShot(0, lambda: self._status.setText(msg))
-                QTimer.singleShot(0, lambda: self._detail.setText(
-                    f'Saved to servo_offsets.yaml + {os.path.basename(HANDEYE_FILE)}'))
+                saved_fname = os.path.basename(HANDEYE_FILE)
+                status_msg = f'Joint solve OK — saved offsets + {saved_fname}'
+                QTimer.singleShot(0, lambda m=status_msg: self._status.setText(m))
+                QTimer.singleShot(0, lambda: self._status.setStyleSheet(
+                    'color: #88dd88; font-family: monospace;'))
                 QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
             else:
                 msg = 'Joint solve FAILED — check captures'
                 print(f'  {msg}')
-                QTimer.singleShot(0, lambda: self._status.setText(msg))
+                QTimer.singleShot(0, lambda m=msg: self._status.setText(m))
+                QTimer.singleShot(0, lambda: self._status.setStyleSheet(
+                    'color: #ff6060; font-family: monospace;'))
                 QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
         except Exception as e:
             msg = f'Solve error: {e}'
             print(f'  {msg}')
-            QTimer.singleShot(0, lambda: self._status.setText(msg))
+            QTimer.singleShot(0, lambda m=msg: self._status.setText(m))
+            QTimer.singleShot(0, lambda: self._status.setStyleSheet(
+                'color: #ff6060; font-family: monospace;'))
             QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
 
     def _undo(self):
@@ -1858,17 +1946,14 @@ class HandEyeYellowView(BaseViewWidget):
             self._raw_positions_list.pop()
             self._pts_2d.pop()
             self._pts_3d_robot.pop()
-        n = len(self._pts_2d)
-        self._status.setText(f'Captures: {n} (need >= 6)')
-        self._detail.setText(f'Undone — {n} points remaining')
+        self._refresh_table()
 
     def _clear_all(self):
         self._captures.clear()
         self._raw_positions_list.clear()
         self._pts_2d.clear()
         self._pts_3d_robot.clear()
-        self._status.setText('Captures: 0 (need >= 6)')
-        self._detail.setText('All captures cleared')
+        self._refresh_table()
 
     def _on_progress_update(self, current, total):
         """Slot to update progress bar from worker thread signal."""
