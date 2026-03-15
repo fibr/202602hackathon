@@ -270,17 +270,22 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     if args_cli.mirror:
         try:
             sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+            print(f"[INFO]: Importing arm101 driver...", flush=True)
             from robot.lerobot_arm101 import LeRobotArm101
+            print(f"[INFO]: Importing IK solver...", flush=True)
             from kinematics.arm101_ik_solver import Arm101IKSolver
             port = LeRobotArm101.find_port()
+            print(f"[INFO]: Found port {port}, connecting...", flush=True)
             real_arm = LeRobotArm101(port=port)
             real_arm.connect()
             ik_solver = Arm101IKSolver()
-            print(f"[INFO]: Connected to real arm on {port} for mirroring")
-            print(f"[INFO]: Joint signs: {ik_solver.signs}")
+            print(f"[INFO]: Connected to real arm on {port} for mirroring", flush=True)
+            print(f"[INFO]: Joint signs: {ik_solver.signs}", flush=True)
         except Exception as e:
-            print(f"[WARN]: Could not connect to real arm: {e}")
-            print("[INFO]: Running without mirroring")
+            import traceback
+            print(f"[WARN]: Could not connect to real arm: {e}", flush=True)
+            traceback.print_exc()
+            print("[INFO]: Running without mirroring", flush=True)
             real_arm = None
 
     # Prepare image output directory

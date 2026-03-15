@@ -30,4 +30,14 @@ if [ -e /dev/ttyACM0 ] || [ -e /dev/ttyUSB0 ]; then
     fi
 fi
 
+# Install servo SDK into Isaac Lab's Python if Isaac Lab is available.
+# Isaac Lab uses its own Python, so deps like feetech-servo-sdk must be
+# installed there separately for the digital twin mirror mode to work.
+ISAACLAB_DIR="${ISAACLAB_DIR:-$HOME/src/IsaacLab}"
+ISAACLAB_PY="$ISAACLAB_DIR/_isaac_sim/python.sh"
+if [ -x "$ISAACLAB_PY" ]; then
+    echo "Installing servo deps into Isaac Lab Python..."
+    "$ISAACLAB_PY" -m pip install feetech-servo-sdk pyserial pyyaml --quiet 2>/dev/null || true
+fi
+
 echo "✓ venv ready — run:  source .venv/bin/activate"
