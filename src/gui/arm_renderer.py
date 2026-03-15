@@ -88,9 +88,10 @@ class ArmRenderer:
         # Camera parameters for 3D->2D projection
         # Viewpoint: azimuth and elevation in degrees
         self.azimuth = -45.0   # degrees around Y axis
-        self.elevation = 25.0  # degrees above horizontal
+        self.elevation = 30.0  # degrees above horizontal
         self.zoom = 1200.0     # scale factor (pixels per meter)
         self.center_offset = np.array([0.0, 0.08, 0.0])  # world offset to center arm
+        self.depth_shading = True  # darken links further from camera
 
     def _motor_to_urdf(self, motor_deg: np.ndarray) -> np.ndarray:
         """Convert motor angles (deg) to URDF joint angles (rad)."""
@@ -121,30 +122,29 @@ class ArmRenderer:
             positions.append(pos)
         return positions
 
-    def project_3d_to_2d(self, points_3d: list[np.ndarray]) -> list[tuple[int, int]]:
-        """Project 3D points to 2D screen coordinates.
+    def project_3d_to_2d(self, points_3d: list[np.ndarray]):
+        """Project 3D points to 2D screen coordinates with depth info.
 
-        Uses an isometric-style projection with configurable viewpoint.
+        Uses a mild perspective projection with configurable viewpoint.
 
         Args:
             points_3d: List of 3D positions in meters.
 
         Returns:
-            List of (x, y) pixel coordinates.
+            List of (x, y, depth) tuples. depth is the camera-space Y
+            coordinate (larger = further from camera).
         """
         az = math.radians(self.azimuth)
         el = math.radians(self.elevation)
 
-        # Rotation: first around Y (azimuth), then around X (elevation)
         cos_az, sin_az = math.cos(az), math.sin(az)
         cos_el, sin_el = math.cos(el), math.sin(el)
 
-        points_2d = []
+        results = []
         cx = self.width // 2
         cy = int(self.height * 0.75)  # base near bottom
 
         for p in points_3d:
-            # Shift to center
             x, y, z = p - self.center_offset
 
             # Rotate around Z (vertical) axis by azimuth
@@ -155,12 +155,15 @@ class ArmRenderer:
             y3 = y2 * cos_el - z * sin_el
             z3 = y2 * sin_el + z * cos_el
 
-            # Project: x2 -> screen x, z3 -> screen y (inverted)
-            sx = int(cx + x2 * self.zoom)
-            sy = int(cy - z3 * self.zoom)
-            points_2d.append((sx, sy))
+            # Mild perspective: scale by distance from virtual camera
+            persp = 1.0 + y3 * 0.8  # subtle foreshortening
+            persp = max(persp, 0.3)
 
-        return points_2d
+            sx = int(cx + x2 * self.zoom * persp)
+            sy = int(cy - z3 * self.zoom * persp)
+            results.append((sx, sy, y3))
+
+        return results
 
     def render(self, canvas: np.ndarray,
                motor_angles_deg: np.ndarray,
@@ -188,20 +191,20 @@ class ArmRenderer:
             The modified canvas.
         """
         positions_3d = self.get_joint_positions(motor_angles_deg)
-        points_2d = self.project_3d_to_2d(positions_3d)
+        projected = self.project_3d_to_2d(positions_3d)
 
-        # Offset
-        points_2d = [(x + offset_x, y + offset_y) for x, y in points_2d]
+        # Split into 2D coords and depths
+        points_2d = [(x + offset_x, y + offset_y) for x, y, _ in projected]
+        depths = [d for _, _, d in projected]
 
         lw = thickness or _LINK_THICKNESS
 
         if alpha < 1.0:
-            # Draw on overlay for alpha blending
             overlay = canvas.copy()
-            self._draw_skeleton(overlay, points_2d, color_override, lw, draw_joints)
+            self._draw_skeleton(overlay, points_2d, depths, color_override, lw, draw_joints)
             cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0, canvas)
         else:
-            self._draw_skeleton(canvas, points_2d, color_override, lw, draw_joints)
+            self._draw_skeleton(canvas, points_2d, depths, color_override, lw, draw_joints)
 
         # Draw base marker
         if len(points_2d) > 0:
@@ -218,20 +221,44 @@ class ArmRenderer:
 
         return canvas
 
-    def _draw_skeleton(self, canvas, points_2d, color_override, thickness, draw_joints):
-        """Draw line segments and joint circles."""
+    def _draw_skeleton(self, canvas, points_2d, depths, color_override, thickness, draw_joints):
+        """Draw line segments and joint circles with depth-based shading."""
+        # Depth range for shading
+        if depths:
+            d_min = min(depths)
+            d_range = max(depths) - d_min
+            if d_range < 0.001:
+                d_range = 1.0
+        else:
+            d_min, d_range = 0, 1.0
+
+        def _shade(color, depth):
+            """Darken color based on depth (further = darker)."""
+            if not self.depth_shading:
+                return color
+            t = (depth - d_min) / d_range  # 0=near, 1=far
+            factor = 1.0 - 0.4 * t  # near=100%, far=60%
+            return tuple(int(c * factor) for c in color)
+
+        def _thick(depth):
+            """Thicker for near links, thinner for far."""
+            t = (depth - d_min) / d_range
+            return max(2, int(thickness + 2 * (1 - t)))
+
         for i in range(len(points_2d) - 1):
             color = color_override or _LINK_COLORS[min(i, len(_LINK_COLORS) - 1)]
-            cv2.line(canvas, points_2d[i], points_2d[i + 1], color, thickness)
+            avg_depth = (depths[i] + depths[i + 1]) / 2 if depths else 0
+            cv2.line(canvas, points_2d[i], points_2d[i + 1],
+                     _shade(color, avg_depth), _thick(avg_depth))
 
         if draw_joints:
             for i, pt in enumerate(points_2d):
+                d = depths[i] if depths else 0
+                r = max(3, int(6 * (1 - (d - d_min) / d_range)))  # near=6px, far=3px
                 if i == 0:
-                    # Base: square (drawn separately)
-                    continue
+                    continue  # base drawn separately
                 elif i == len(points_2d) - 1:
-                    # End-effector: diamond
-                    size = 5
+                    size = r + 1
                     pts = np.array([
                         [pt[0], pt[1] - size],
                         [pt[0] + size, pt[1]],
@@ -239,12 +266,11 @@ class ArmRenderer:
                         [pt[0] - size, pt[1]],
                     ], dtype=np.int32)
                     cv2.fillPoly(canvas, [pts],
-                                 color_override or (0, 200, 255))
+                                 _shade(color_override or (0, 200, 255), d))
                 else:
-                    # Regular joint: circle
-                    cv2.circle(canvas, pt, 4,
-                               color_override or (255, 255, 255), -1)
-                    cv2.circle(canvas, pt, 4, (80, 80, 80), 1)
+                    cv2.circle(canvas, pt, r,
+                               _shade(color_override or (255, 255, 255), d), -1)
+                    cv2.circle(canvas, pt, r, (60, 60, 60), 1)
 
     def render_comparison(self, canvas: np.ndarray,
                           actual_angles: np.ndarray,
