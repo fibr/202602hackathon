@@ -501,30 +501,57 @@ ARM101_GRIPPER_CAM_MOUNT = {
 }
 
 
+OVERVIEW_CAM_MOUNT = {
+    'type': 'fixed',
+    'parent_link': None,
+    'T_cam_to_link': None,
+    'notes': 'Overview camera (eye-to-hand, fixed mount)',
+}
+
+# Patterns for cameras that should be skipped (built-in laptop cameras)
+_BUILTIN_PATTERNS = re.compile(
+    r'integrated|built.?in|laptop|notebook|ir.?camera|dell\s+m',
+    re.IGNORECASE)
+
+# Patterns for known overview / external cameras (not gripper-mounted)
+_OVERVIEW_PATTERNS = re.compile(
+    r'logitech|brio|c920|c922|c930|c270|streamcam|razer|elgato',
+    re.IGNORECASE)
+
+
 def _apply_arm101_heuristic(cameras: dict) -> dict:
-    """Try to identify which webcam is the ARM101 gripper camera.
+    """Classify webcams into built-in (skip), overview, and gripper.
 
-    Heuristic: if there is exactly one webcam with device_index >= 4,
-    it is likely the gripper camera.  Otherwise, leave mount as 'other'.
+    Heuristics:
+      - Built-in laptop cameras (Integrated, Dell, IR) → type 'builtin', skipped
+      - Known brands (Logitech, Razer, Elgato, ...) → overview (fixed mount)
+      - Generic 'USB Camera' → likely the arm101 gripper camera
     """
-    webcams = [(name, cam) for name, cam in cameras.items()
-               if cam['type'] == 'webcam']
+    for name, cam in cameras.items():
+        if cam['type'] != 'webcam':
+            continue
 
-    # If only one webcam, assume it could be the gripper camera
-    # If multiple, pick the one with highest device index (usually the
-    # external USB camera plugged in after built-in)
-    if not webcams:
-        return cameras
+        card = cam.get('card', '') or ''
 
-    # Sort by device index descending
-    webcams.sort(key=lambda nc: nc[1].get('device_index', 0), reverse=True)
+        # Built-in laptop cameras — mark and skip
+        if _BUILTIN_PATTERNS.search(card):
+            cam['type'] = 'builtin'
+            cam['mount'] = _default_mount()
+            cam['mount']['notes'] = 'Built-in laptop camera (ignored)'
+            print(f"  Skipped '{name}': built-in camera")
+            continue
 
-    # Only auto-tag if device index >= 4 (avoid tagging built-in laptop cam)
-    candidate_name, candidate_cam = webcams[0]
-    if candidate_cam.get('device_index', 0) >= 4:
-        candidate_cam['mount'] = dict(ARM101_GRIPPER_CAM_MOUNT)
-        print(f"  Auto-tagged '{candidate_name}' as ARM101 gripper camera "
-              f"(device_index={candidate_cam['device_index']})")
+        # Known overview camera brands
+        if _OVERVIEW_PATTERNS.search(card):
+            cam['mount'] = dict(OVERVIEW_CAM_MOUNT)
+            print(f"  Auto-tagged '{name}' as overview camera")
+            continue
+
+        # Generic USB camera → likely the gripper camera
+        if 'usb camera' in card.lower():
+            cam['mount'] = dict(ARM101_GRIPPER_CAM_MOUNT)
+            print(f"  Auto-tagged '{name}' as ARM101 gripper camera")
+            continue
 
     return cameras
 
