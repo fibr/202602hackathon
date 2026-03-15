@@ -557,6 +557,76 @@ def _apply_arm101_heuristic(cameras: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Update robot_config.yaml with discovered device indices
+# ---------------------------------------------------------------------------
+
+def _update_robot_config(cameras: dict):
+    """Update camera.device_index and gripper_camera.device_index in robot_config.yaml.
+
+    Finds the overview camera (mount.type == 'fixed') and gripper camera
+    (mount.type == 'gripper') from the discovery results and patches the
+    config file so all scripts use the correct devices.
+    """
+    cfg_path = config_path('robot_config.yaml')
+    if not os.path.exists(cfg_path):
+        return
+
+    overview_idx = None
+    gripper_idx = None
+    for cam in cameras.values():
+        mount_type = cam.get('mount', {}).get('type', '')
+        idx = cam.get('device_index')
+        if idx is None:
+            continue
+        if mount_type == 'fixed' and overview_idx is None:
+            overview_idx = idx
+        elif mount_type == 'gripper' and gripper_idx is None:
+            gripper_idx = idx
+
+    if overview_idx is None and gripper_idx is None:
+        return
+
+    with open(cfg_path, 'r') as f:
+        lines = f.readlines()
+
+    changed = False
+    in_camera = False
+    in_gripper_camera = False
+
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+
+        # Track which top-level section we're in
+        if stripped and not stripped.startswith('#') and not stripped.startswith('-'):
+            if line[0] not in (' ', '\t'):
+                in_camera = stripped.startswith('camera:')
+                in_gripper_camera = stripped.startswith('gripper_camera:')
+
+        if 'device_index:' in stripped and not stripped.startswith('#'):
+            # Extract the comment portion if any
+            parts = line.split('#', 1)
+            indent = len(line) - len(line.lstrip())
+
+            if in_camera and not in_gripper_camera and overview_idx is not None:
+                comment = f'  # overview camera (auto-detected)'
+                lines[i] = f"{' ' * indent}device_index: {overview_idx}{comment}\n"
+                changed = True
+            elif in_gripper_camera and gripper_idx is not None:
+                comment = f'  # gripper camera (auto-detected)'
+                lines[i] = f"{' ' * indent}device_index: {gripper_idx}{comment}\n"
+                changed = True
+
+    if changed:
+        with open(cfg_path, 'w') as f:
+            f.writelines(lines)
+        print(f"\nUpdated device indices in {cfg_path}")
+        if overview_idx is not None:
+            print(f"  camera.device_index: {overview_idx} (overview)")
+        if gripper_idx is not None:
+            print(f"  gripper_camera.device_index: {gripper_idx} (gripper)")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -627,6 +697,9 @@ def main():
         mount_type = cam.get('mount', {}).get('type', 'other')
         intr_src = cam.get('intrinsics', {}).get('source', '?')
         print(f"  {name}: {cam['type']}, mount={mount_type}, intrinsics={intr_src}")
+
+    # Update robot_config.yaml device indices to match discovered cameras
+    _update_robot_config(cameras)
 
 
 if __name__ == '__main__':
