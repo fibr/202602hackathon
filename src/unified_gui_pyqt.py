@@ -572,6 +572,8 @@ class ControlPanelView(BaseViewWidget):
         self._enable_btn = make_button('Enable', self._do_enable, color='#006400')
         eh_row.addWidget(self._enable_btn)
         eh_row.addWidget(make_button('Home', self._do_home, color='#644800'))
+        eh_row.addWidget(make_button('Set Home', self._set_home, color='#4a3200',
+                                     tooltip='Save current position as home'))
         ctrl_layout.addLayout(eh_row)
 
         self._safe_btn = make_button('Safe: OFF', self._toggle_safe, color='#503232')
@@ -788,6 +790,43 @@ class ControlPanelView(BaseViewWidget):
                 time.sleep(3)
                 self.app.robot.send(f'SpeedFactor({self._speed})')
         threading.Thread(target=_home, daemon=True).start()
+
+    def _set_home(self):
+        """Save current joint angles as the home position in robot_config.yaml."""
+        if self.app.robot is None:
+            return
+        angles = self.app.robot.get_angles()
+        if not angles or len(angles) < 6:
+            return
+        home = [round(a, 1) for a in angles]
+
+        # Update in-memory config
+        if 'arm101' not in self.app.config:
+            self.app.config['arm101'] = {}
+        self.app.config['arm101']['home_angles'] = home
+
+        # Write to config file
+        import yaml
+        from config_loader import config_path
+        cfg_path = config_path('robot_config.yaml')
+        with open(cfg_path, 'r') as f:
+            lines = f.readlines()
+
+        # Find and replace home_angles line
+        found = False
+        for i, line in enumerate(lines):
+            if 'home_angles:' in line and not line.lstrip().startswith('#'):
+                indent = len(line) - len(line.lstrip())
+                lines[i] = f"{' ' * indent}home_angles: {home}  # Safe home position\n"
+                found = True
+                break
+
+        if found:
+            with open(cfg_path, 'w') as f:
+                f.writelines(lines)
+            print(f'  Set home position: {home}')
+        else:
+            print(f'  WARNING: home_angles not found in {cfg_path}')
 
     def _j1_rotate(self):
         if self.app.robot is None:
