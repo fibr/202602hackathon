@@ -113,6 +113,67 @@ def section_label(text):
 
 
 # ---------------------------------------------------------------------------
+# Clickable camera label
+# ---------------------------------------------------------------------------
+
+class ClickableLabel(QLabel):
+    """A QLabel camera feed that emits clicked(x, y) in source-image coordinates.
+
+    When the user left-clicks anywhere on the displayed image (not the
+    letterbox bars), the widget converts the label-local click position to
+    the corresponding pixel in the *original* camera frame and emits
+    ``clicked(img_x, img_y)``.
+
+    Usage::
+
+        label = ClickableLabel('Camera')
+        label.clicked.connect(self._on_cam_click)
+
+        # In _on_frame, tell the label the source resolution so the
+        # coordinate mapping stays accurate:
+        def _on_frame(self, frame):
+            h, w = frame.shape[:2]
+            pix = QPixmap.fromImage(cv_to_qimage(frame)).scaled(
+                label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            label.set_source_size(w, h)
+            label.setPixmap(pix)
+    """
+
+    # Emits (image_x, image_y) in original source-frame pixel coordinates.
+    clicked = pyqtSignal(int, int)
+
+    def __init__(self, text: str = '', parent=None):
+        super().__init__(text, parent)
+        self._source_w: int = 0
+        self._source_h: int = 0
+        # Show a crosshair to hint the widget is interactive.
+        self.setCursor(Qt.CrossCursor)
+
+    def set_source_size(self, w: int, h: int) -> None:
+        """Record the original image resolution for coordinate mapping."""
+        self._source_w = w
+        self._source_h = h
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton and self._source_w > 0:
+            pix = self.pixmap()
+            if pix is not None and not pix.isNull():
+                # The pixmap is drawn centred inside the label (AlignCenter).
+                lw, lh = self.width(), self.height()
+                pw, ph = pix.width(), pix.height()
+                ox = (lw - pw) // 2  # horizontal offset of pixmap within label
+                oy = (lh - ph) // 2  # vertical offset
+                px = event.x() - ox   # x inside the pixmap
+                py = event.y() - oy   # y inside the pixmap
+                if 0 <= px < pw and 0 <= py < ph:
+                    # Scale from displayed-pixmap coords → original frame coords.
+                    ix = int(px * self._source_w / pw)
+                    iy = int(py * self._source_h / ph)
+                    self.clicked.emit(ix, iy)
+        super().mousePressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Camera feed thread
 # ---------------------------------------------------------------------------
 
@@ -833,20 +894,28 @@ class CheckerboardCalibView(BaseViewWidget):
         super().__init__(app, parent)
         self._cam_thread = None
         self._poll_thread = None
-        self._he_points = []  # hand-eye correspondences
+        self._he_points = []  # hand-eye correspondences: list of (p_robot_m, p_cam)
         self._intr_frames = []
         self._ground_samples = []
+        self._last_frame = None  # most recent camera frame (for click handler)
         self._build_ui()
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
 
-        # Camera feed
-        self._cam_label = QLabel('Camera')
+        # Camera feed — ClickableLabel so users can click to record H-E points
+        cam_col = QVBoxLayout()
+        self._cam_label = ClickableLabel('Camera')
         self._cam_label.setAlignment(Qt.AlignCenter)
         self._cam_label.setMinimumSize(320, 240)
         self._cam_label.setStyleSheet('background-color: #1a1a1a;')
-        layout.addWidget(self._cam_label, stretch=3)
+        self._cam_label.clicked.connect(self._on_cam_click)
+        cam_col.addWidget(self._cam_label)
+        hint = QLabel('Left-click image to record hand-eye point (board must be visible)')
+        hint.setStyleSheet('color: #666; font-size: 10px;')
+        hint.setAlignment(Qt.AlignCenter)
+        cam_col.addWidget(hint)
+        layout.addLayout(cam_col, stretch=3)
 
         # Controls
         ctrl = QWidget()
@@ -918,10 +987,103 @@ class CheckerboardCalibView(BaseViewWidget):
             self._cam_thread = None
 
     def _on_frame(self, frame):
+        h, w = frame.shape[:2]
         img = cv_to_qimage(frame)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.set_source_size(w, h)
         self._cam_label.setPixmap(pix)
+        self._last_frame = frame.copy()
+
+    def _on_cam_click(self, x: int, y: int) -> None:
+        """Handle left-click on the camera image: record a hand-eye correspondence.
+
+        Grabs the most recent camera frame, runs board detection to get the
+        board-in-camera transform, then casts a ray through the clicked pixel
+        and intersects it with the checkerboard plane.  The 3-D point in camera
+        frame is paired with the current robot TCP position (in metres) and
+        appended to ``self._he_points``.
+        """
+        import yaml as _yaml
+        frame = getattr(self, '_last_frame', None)
+        if frame is None and self.app.camera is not None:
+            color, _, _ = self.app.camera.get_frames()
+            frame = color
+        if frame is None:
+            print('  [HE click] No frame available')
+            return
+        if self.app.robot is None:
+            print('  [HE click] No robot connected')
+            return
+
+        try:
+            from calibration.calib_helpers import detect_corners, compute_board_pose, ray_plane_intersect
+
+            # Load camera intrinsics (camera_intrinsics.yaml written by checkerboard calib).
+            intr_yaml = config_path('camera_intrinsics.yaml')
+            if not os.path.exists(intr_yaml):
+                print('  [HE click] No camera_intrinsics.yaml — calibrate intrinsics first')
+                return
+            with open(intr_yaml) as f:
+                d = _yaml.safe_load(f)
+
+            # Build a lightweight intrinsics object matching the calib_helpers API.
+            class _Intr:
+                pass
+            intr = _Intr()
+            intr.fx = float(d['fx'])
+            intr.fy = float(d['fy'])
+            intr.ppx = float(d['ppx'])
+            intr.ppy = float(d['ppy'])
+            intr.coeffs = list(d.get('dist', [0.0] * 5))
+
+            # Try to load a BoardDetector from config (supports ChArUco/ArUco).
+            board_detector = None
+            try:
+                from vision.board_detector import BoardDetector as _BD
+                board_detector = _BD.from_config(self.app.config)
+            except Exception:
+                pass
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            found, corners, detection = detect_corners(gray, board_detector)
+            if not found:
+                print(f'  [HE click] No board detected — make sure the checkerboard is visible')
+                self._he_status.setText(
+                    f'Points: {len(self._he_points)} (no board at last click)')
+                return
+
+            T_board, _, reproj_err = compute_board_pose(
+                corners, intr, detection, board_detector)
+            if T_board is None:
+                print('  [HE click] Could not compute board pose')
+                return
+
+            p_cam = ray_plane_intersect((x, y), intr, T_board)
+            if p_cam is None:
+                print('  [HE click] Ray is parallel to the board plane — try a different angle')
+                return
+
+            # Read the current robot TCP pose (mm → m).
+            pose = self.app.robot.get_pose()
+            if pose is None:
+                print('  [HE click] Cannot read robot pose')
+                return
+            p_robot_m = np.array(pose[:3], dtype=float) / 1000.0
+
+            self._he_points.append((p_robot_m, p_cam))
+            self._he_status.setText(f'Points: {len(self._he_points)}')
+            print(
+                f'  [HE click] Point {len(self._he_points)}: '
+                f'cam=[{p_cam[0]:.4f}, {p_cam[1]:.4f}, {p_cam[2]:.4f}] '
+                f'robot=[{pose[0]:.1f}, {pose[1]:.1f}, {pose[2]:.1f}] mm  '
+                f'(reproj {reproj_err:.2f} px)'
+            )
+
+        except Exception as exc:
+            import traceback
+            print(f'  [HE click] Error: {exc}')
+            traceback.print_exc()
 
     def _capture_intr(self):
         if self.app.camera is None:
