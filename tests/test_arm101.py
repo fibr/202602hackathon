@@ -110,8 +110,28 @@ def _max_torque_calls(pkt, value):
 
 
 @pytest.fixture
-def arm():
-    """LeRobotArm101 with mock serial port; all motors at center (0°)."""
+def clear_servo_offsets():
+    """Fixture that clears servo_offsets during test execution.
+
+    This isolates tests from hardware calibration config by mocking
+    the _load_servo_offsets function to return an empty dict, ensuring
+    all motors use the default POS_CENTER (2048) instead of calibrated values.
+
+    Usage:
+        def test_foo(clear_servo_offsets):
+            robot = LeRobotArm101('/dev/ttyACM0')  # No calibration coupled
+            ...
+    """
+    with mock.patch('robot.lerobot_arm101._load_servo_offsets', return_value={}):
+        yield
+
+
+@pytest.fixture
+def arm(clear_servo_offsets):
+    """LeRobotArm101 with mock serial port; all motors at center (0°).
+
+    Uses clear_servo_offsets fixture to isolate from hardware calibration.
+    """
     robot = LeRobotArm101('/dev/ttyACM0')
     robot.port_handler = _ph()
     robot.packet_handler = _pkt(read_pos=POS_CENTER)
@@ -840,3 +860,62 @@ class TestInitialisation:
 
     def test_port_path_stored(self, arm):
         assert arm.port_path == '/dev/ttyACM0'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Hardware config isolation (servo_offsets fixture)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestServoOffsetsIsolation:
+    """Verify that clear_servo_offsets fixture isolates tests from hardware config.
+
+    The fixture mocks _load_servo_offsets() to return {}, ensuring all motors
+    use default POS_CENTER (2048) instead of calibrated values from disk.
+    """
+
+    def test_clear_servo_offsets_fixture_returns_empty_dict(self, clear_servo_offsets):
+        """Verify the fixture mocks _load_servo_offsets to return empty dict."""
+        from robot.lerobot_arm101 import _load_servo_offsets
+        offsets = _load_servo_offsets()
+        assert offsets == {}
+
+    def test_arm_with_fixture_has_no_nondefault_offsets(self, arm):
+        """Verify arm created with fixture has no custom offsets (all default)."""
+        assert arm._zero_offsets == {}
+
+    def test_arm_without_fixture_loads_from_disk(self):
+        """Without clear_servo_offsets, real servo_offsets.yaml is loaded."""
+        # This test does NOT use clear_servo_offsets, so servo_offsets.yaml is loaded from disk
+        robot = LeRobotArm101('/dev/ttyACM0')
+        # If servo_offsets.yaml exists and has content, _zero_offsets should not be empty
+        # (or empty if the file doesn't exist or is empty)
+        # We just verify the fixture effect by contrast
+        assert isinstance(robot._zero_offsets, dict)
+
+    def test_position_conversion_uses_pos_center_when_no_offsets(self, arm):
+        """When offsets are empty, _pos_to_deg_motor should use default POS_CENTER."""
+        # All motors should use POS_CENTER as the zero baseline
+        for motor_id in range(1, 7):
+            pos = POS_CENTER
+            deg = arm._pos_to_deg_motor(pos, motor_id)
+            assert deg == pytest.approx(0.0, abs=1e-6)
+
+    def test_angle_conversion_uses_pos_center_when_no_offsets(self, arm):
+        """When offsets are empty, _deg_to_pos_motor should use default POS_CENTER."""
+        for motor_id in range(1, 7):
+            pos = arm._deg_to_pos_motor(0.0, motor_id)
+            assert pos == POS_CENTER
+
+    def test_fixture_prevents_nondefault_offset_printout(self, capsys, clear_servo_offsets):
+        """Verify that with cleared offsets, no "Servo offsets loaded" message appears."""
+        robot = LeRobotArm101('/dev/ttyACM0')
+        captured = capsys.readouterr()
+        # With empty offsets, no custom-offset message should appear
+        assert "Servo offsets loaded:" not in captured.out
+
+    def test_multiple_arms_with_fixture_all_cleared(self, clear_servo_offsets):
+        """Verify multiple arm instances created within fixture all have cleared offsets."""
+        robot1 = LeRobotArm101('/dev/ttyACM0')
+        robot2 = LeRobotArm101('/dev/ttyUSB0')
+        assert robot1._zero_offsets == {}
+        assert robot2._zero_offsets == {}
