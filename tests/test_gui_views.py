@@ -83,8 +83,8 @@ class TestWidgetCreation:
         assert expected.issubset(set(app_window._views.keys()))
 
     def test_sidebar_shows_top_level_views(self, app_window):
-        """Sidebar list contains exactly the 11 top-level (show_in_sidebar=True) views."""
-        assert app_window._nav_list.count() == 11
+        """Sidebar list contains exactly the top-level (show_in_sidebar=True) views."""
+        assert app_window._nav_list.count() == 13
 
     def test_stacked_widget_has_all_views(self, app_window):
         """QStackedWidget has one page per registered view."""

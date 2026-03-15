@@ -3852,6 +3852,390 @@ class LiveTwinView(BaseViewWidget):
 
 
 # ---------------------------------------------------------------------------
+# FETCH GAME VIEW
+# ---------------------------------------------------------------------------
+
+class FetchGameView(BaseViewWidget):
+    """Fetch Game — detect, refine, grasp, transport, and place a cube.
+
+    Full pick-and-place pipeline with multi-cube selection, gripper camera
+    refinement, and step-by-step or automatic execution.
+
+    Left panel: overview camera with cube detection overlay (click to select target).
+    Right panel: state machine controls, 3D position indicators, and status.
+    """
+    view_id = 'fetch_game'
+    view_name = 'Fetch Game'
+    description = 'Pick up and place cubes'
+
+    def __init__(self, app, parent=None):
+        super().__init__(app, parent)
+        self._cam_thread = None
+        self._controller = None
+        self._last_frame = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setSpacing(8)
+
+        # --- Left: camera feed with clickable label ---
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(4, 4, 4, 4)
+
+        self._cam_label = ClickableLabel('Camera')
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setMinimumSize(480, 360)
+        self._cam_label.setStyleSheet('background-color: #1a1a1a;')
+        self._cam_label.clicked.connect(self._on_click)
+        left_layout.addWidget(self._cam_label, stretch=1)
+
+        # Info bar below camera
+        self._detection_info = QLabel('No detection')
+        self._detection_info.setStyleSheet(
+            'color: #aaa; font-size: 11px; font-family: monospace; padding: 4px;')
+        self._detection_info.setWordWrap(True)
+        left_layout.addWidget(self._detection_info)
+
+        layout.addWidget(left, stretch=3)
+
+        # --- Right: controls ---
+        right = QWidget()
+        right.setMaximumWidth(280)
+        right.setMinimumWidth(220)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(4, 4, 4, 4)
+        right_layout.setSpacing(6)
+
+        right_layout.addWidget(section_label('FETCH GAME'))
+
+        # State display
+        self._state_label = QLabel('IDLE')
+        self._state_label.setStyleSheet(
+            'color: #0af; font-size: 18px; font-weight: bold; '
+            'padding: 8px; background: #222; border-radius: 4px;')
+        self._state_label.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self._state_label)
+
+        # Status text
+        self._status_label = QLabel('Ready')
+        self._status_label.setStyleSheet(
+            'color: #ccc; font-size: 11px; padding: 4px;')
+        self._status_label.setWordWrap(True)
+        right_layout.addWidget(self._status_label)
+
+        # Action buttons
+        right_layout.addWidget(section_label('Controls'))
+
+        btn_row1 = QHBoxLayout()
+        self._step_btn = make_button('Step >', self._on_step, color='#1a5c1a')
+        btn_row1.addWidget(self._step_btn)
+        self._auto_btn = make_button('Auto Run', self._on_auto, color='#0a3a6a')
+        btn_row1.addWidget(self._auto_btn)
+        right_layout.addLayout(btn_row1)
+
+        btn_row2 = QHBoxLayout()
+        self._stop_btn = make_button('Stop', self._on_stop, color='#6a1a1a')
+        btn_row2.addWidget(self._stop_btn)
+        self._reset_btn = make_button('Reset', self._on_reset)
+        btn_row2.addWidget(self._reset_btn)
+        right_layout.addLayout(btn_row2)
+
+        # Selection mode
+        right_layout.addWidget(section_label('Cube Selection'))
+        mode_row = QHBoxLayout()
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(['largest', 'closest_to_center', 'closest_to_click'])
+        self._mode_combo.setStyleSheet(
+            'QComboBox { background: #333; color: #ddd; padding: 4px; border: 1px solid #555; }')
+        self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        mode_row.addWidget(QLabel('Mode:'))
+        mode_row.addWidget(self._mode_combo)
+        right_layout.addLayout(mode_row)
+
+        # Position indicators
+        right_layout.addWidget(section_label('Positions (mm)'))
+
+        self._pos_table = QTableWidget(4, 3)
+        self._pos_table.setHorizontalHeaderLabels(['X', 'Y', 'Z'])
+        self._pos_table.setVerticalHeaderLabels(['Detected', 'Refined', 'Place', 'Arm'])
+        self._pos_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._pos_table.setMaximumHeight(140)
+        self._pos_table.setStyleSheet(
+            'QTableWidget { background: #222; color: #ddd; font-size: 10px; }'
+            'QHeaderView::section { background: #333; color: #aaa; font-size: 10px; }')
+        self._pos_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        right_layout.addWidget(self._pos_table)
+
+        # Parameters
+        right_layout.addWidget(section_label('Parameters'))
+
+        params_grid = QGridLayout()
+        params_grid.setSpacing(4)
+
+        params_grid.addWidget(QLabel('Hover Z:'), 0, 0)
+        self._hover_spin = QDoubleSpinBox()
+        self._hover_spin.setRange(10, 150)
+        self._hover_spin.setValue(40.0)
+        self._hover_spin.setSuffix(' mm')
+        self._hover_spin.setStyleSheet('background: #333; color: #ddd;')
+        self._hover_spin.valueChanged.connect(self._on_params_changed)
+        params_grid.addWidget(self._hover_spin, 0, 1)
+
+        params_grid.addWidget(QLabel('Grasp Z:'), 1, 0)
+        self._grasp_spin = QDoubleSpinBox()
+        self._grasp_spin.setRange(0, 60)
+        self._grasp_spin.setValue(12.0)
+        self._grasp_spin.setSuffix(' mm')
+        self._grasp_spin.setStyleSheet('background: #333; color: #ddd;')
+        self._grasp_spin.valueChanged.connect(self._on_params_changed)
+        params_grid.addWidget(self._grasp_spin, 1, 1)
+
+        params_grid.addWidget(QLabel('Lift Z:'), 2, 0)
+        self._lift_spin = QDoubleSpinBox()
+        self._lift_spin.setRange(20, 200)
+        self._lift_spin.setValue(80.0)
+        self._lift_spin.setSuffix(' mm')
+        self._lift_spin.setStyleSheet('background: #333; color: #ddd;')
+        self._lift_spin.valueChanged.connect(self._on_params_changed)
+        params_grid.addWidget(self._lift_spin, 2, 1)
+
+        params_grid.addWidget(QLabel('Place X:'), 3, 0)
+        self._place_x = QDoubleSpinBox()
+        self._place_x.setRange(-200, 200)
+        self._place_x.setValue(100.0)
+        self._place_x.setSuffix(' mm')
+        self._place_x.setStyleSheet('background: #333; color: #ddd;')
+        self._place_x.valueChanged.connect(self._on_params_changed)
+        params_grid.addWidget(self._place_x, 3, 1)
+
+        params_grid.addWidget(QLabel('Place Y:'), 4, 0)
+        self._place_y = QDoubleSpinBox()
+        self._place_y.setRange(-200, 200)
+        self._place_y.setValue(100.0)
+        self._place_y.setSuffix(' mm')
+        self._place_y.setStyleSheet('background: #333; color: #ddd;')
+        self._place_y.valueChanged.connect(self._on_params_changed)
+        params_grid.addWidget(self._place_y, 4, 1)
+
+        right_layout.addLayout(params_grid)
+
+        # Gripper cam info
+        right_layout.addWidget(section_label('Gripper Camera'))
+        self._gripper_info = QLabel('Not active')
+        self._gripper_info.setStyleSheet(
+            'color: #888; font-size: 10px; font-family: monospace;')
+        self._gripper_info.setWordWrap(True)
+        right_layout.addWidget(self._gripper_info)
+
+        right_layout.addStretch()
+        layout.addWidget(right, stretch=0)
+
+    def on_activate(self):
+        self.app.ensure_camera()
+        self.app.ensure_robot()
+
+        # Create controller if not exists
+        if self._controller is None:
+            from fetch_game import FetchGameController
+            self._controller = FetchGameController(self.app)
+            self._controller.on_state_changed = self._on_state_update
+
+        # Sync params
+        self._on_params_changed()
+
+        # Start camera
+        if self.app.camera:
+            self._cam_thread = CameraThread(self.app.camera)
+            self._cam_thread.frame_ready.connect(self._on_frame)
+            self._cam_thread.start()
+
+        # UI refresh timer
+        self._refresh_timer = QTimer()
+        self._refresh_timer.timeout.connect(self._refresh_ui)
+        self._refresh_timer.start(200)
+
+    def on_deactivate(self):
+        if self._cam_thread:
+            self._cam_thread.stop()
+            self._cam_thread = None
+        if hasattr(self, '_refresh_timer'):
+            self._refresh_timer.stop()
+
+    def _on_frame(self, frame):
+        """Process each camera frame: run detection, annotate, display."""
+        from vision.green_cube_detector import annotate_frame
+        self._last_frame = frame
+
+        if self._controller:
+            cubes, target_idx = self._controller.update_detection(frame)
+            display = annotate_frame(frame, cubes, target_idx=target_idx)
+
+            # Draw place target on overview camera if we have calibration
+            state = self._controller.state
+            if state.place_target_3d is not None and self._controller._transform:
+                self._draw_place_marker(display, state.place_target_3d)
+        else:
+            display = frame.copy()
+
+        h, w = display.shape[:2]
+        self._cam_label.set_source_size(w, h)
+        img = cv_to_qimage(display)
+        pix = QPixmap.fromImage(img).scaled(
+            self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.setPixmap(pix)
+
+    def _draw_place_marker(self, frame, pos_3d):
+        """Draw the place target marker on the overview camera image."""
+        try:
+            T = self._controller._transform.T_camera_to_base
+            T_inv = np.linalg.inv(T)
+            pos_cam = T_inv[:3, :3] @ pos_3d + T_inv[:3, 3]
+            if pos_cam[2] > 0:
+                intr = self.app.camera.intrinsics
+                px = int(pos_cam[0] / pos_cam[2] * intr.fx + intr.ppx)
+                py = int(pos_cam[1] / pos_cam[2] * intr.fy + intr.ppy)
+                h, w = frame.shape[:2]
+                if 0 <= px < w and 0 <= py < h:
+                    cv2.drawMarker(frame, (px, py), (255, 0, 255),
+                                   cv2.MARKER_DIAMOND, 20, 2)
+                    cv2.putText(frame, 'PLACE', (px + 12, py - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        except Exception:
+            pass
+
+    def _on_click(self, x, y):
+        """Handle click on camera image — select nearest cube."""
+        if self._controller:
+            self._controller.set_click_target(x, y)
+            self._mode_combo.blockSignals(True)
+            self._mode_combo.setCurrentText('closest_to_click')
+            self._mode_combo.blockSignals(False)
+
+    def _on_step(self):
+        if self._controller:
+            self._controller.step()
+
+    def _on_auto(self):
+        if self._controller:
+            self._controller.start_auto()
+
+    def _on_stop(self):
+        if self._controller:
+            self._controller.stop_auto()
+
+    def _on_reset(self):
+        if self._controller:
+            self._controller.reset()
+
+    def _on_mode_changed(self, text):
+        if self._controller:
+            self._controller.cube_selection_mode = text
+
+    def _on_params_changed(self):
+        if self._controller:
+            self._controller.hover_height_mm = self._hover_spin.value()
+            self._controller.grasp_height_mm = self._grasp_spin.value()
+            self._controller.lift_height_mm = self._lift_spin.value()
+            self._controller.set_place_target(np.array([
+                self._place_x.value(),
+                self._place_y.value(),
+                12.0,  # place Z
+            ]))
+
+    def _on_state_update(self, state):
+        """Called from worker thread when state changes — schedule UI update."""
+        # Use QTimer.singleShot for thread safety
+        QTimer.singleShot(0, self._refresh_ui)
+
+    def _refresh_ui(self):
+        """Update all UI elements from controller state."""
+        if not self._controller:
+            return
+
+        state = self._controller.state
+
+        # State label with color coding
+        s = state.state
+        color_map = {
+            'IDLE': '#666', 'DETECT': '#0af', 'APPROACH': '#f80',
+            'REFINE': '#f0f', 'OPEN_GRIP': '#fa0', 'DESCEND': '#f80',
+            'GRASP': '#f00', 'LIFT': '#0f0', 'TRANSPORT': '#0af',
+            'PLACE': '#ff0', 'RETRACT': '#888', 'DONE': '#0f0', 'ERROR': '#f00',
+        }
+        c = color_map.get(s.value, '#aaa')
+        self._state_label.setText(s.value)
+        self._state_label.setStyleSheet(
+            f'color: {c}; font-size: 18px; font-weight: bold; '
+            f'padding: 8px; background: #222; border-radius: 4px;')
+
+        # Status
+        self._status_label.setText(state.status_text)
+
+        # Detection info
+        info_parts = [f'Cubes: {state.num_cubes_detected}']
+        if state.target_cube_idx >= 0:
+            info_parts.append(f'Target: #{state.target_cube_idx + 1}')
+        if state.target_cube_px:
+            info_parts.append(f'px=({state.target_cube_px[0]},{state.target_cube_px[1]})')
+        self._detection_info.setText('  |  '.join(info_parts))
+
+        # Position table
+        self._update_pos_table(state)
+
+        # Gripper cam info
+        if state.gripper_cam_detection:
+            gcx, gcy = state.gripper_cam_detection
+            self._gripper_info.setText(
+                f'Detection: ({gcx:.0f}, {gcy:.0f})\n'
+                f'Error: {state.refine_error_px:.0f}px\n'
+                f'Yaw: {state.estimated_yaw_deg:.0f} deg')
+        else:
+            self._gripper_info.setText('Not active')
+
+        # Auto button state
+        if state.auto_mode:
+            self._auto_btn.setText('Auto: ON')
+            self._auto_btn.setStyleSheet(
+                'background-color: #006400; color: white; padding: 4px;')
+        else:
+            self._auto_btn.setText('Auto Run')
+            self._auto_btn.setStyleSheet(
+                'background-color: #0a3a6a; color: white; padding: 4px;')
+
+    def _update_pos_table(self, state):
+        """Update the position table with current state."""
+        def set_row(row, pos):
+            if pos is not None:
+                for col in range(3):
+                    item = QTableWidgetItem(f'{pos[col]:.1f}')
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self._pos_table.setItem(row, col, item)
+            else:
+                for col in range(3):
+                    item = QTableWidgetItem('--')
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self._pos_table.setItem(row, col, item)
+
+        set_row(0, state.target_cube_3d)
+        set_row(1, state.refined_pos_3d)
+        set_row(2, state.place_target_3d)
+
+        # Current arm position from robot
+        arm_pos = None
+        if self.app.robot and self._controller._solver:
+            try:
+                angles = self.app.robot.get_angles()
+                if angles:
+                    pos, _ = self._controller._solver.forward_kin(np.array(angles[:5]))
+                    arm_pos = pos
+            except Exception:
+                pass
+        set_row(3, arm_pos)
+
+
+# ---------------------------------------------------------------------------
 # CUBE TRACKER VIEW
 # ---------------------------------------------------------------------------
 
@@ -3929,7 +4313,8 @@ class CubeTrackerView(BaseViewWidget):
 
         tracker = self.app.cube_tracker
         cubes = tracker.update(frame)
-        display = annotate_frame(frame, cubes)
+        # Highlight the first (largest) cube as target
+        display = annotate_frame(frame, cubes, target_idx=0 if cubes else -1)
 
         if tracker.cube_pos_mm is not None:
             p = tracker.cube_pos_mm
@@ -4392,6 +4777,7 @@ class UnifiedPyQtApp(QMainWindow):
             ExtrasView,
             DigitalTwinView,
             LiveTwinView,
+            FetchGameView,
             CubeTrackerView,
             CameraOverlayView,
             # Sub-views (not in sidebar)
@@ -4639,6 +5025,7 @@ def main():
             ('pipeline', 'Pipeline', 'Full pick-and-stand'),
             ('discover', 'Discover Cameras', 'Find & configure cameras'),
             ('extras', 'Extra Scripts', 'Utility scripts'),
+            ('fetch_game', 'Fetch Game', 'Pick up and place cubes'),
             ('digital_twin', 'Digital Twin', 'Isaac Sim launcher'),
             ('live_twin', 'Live Twin', 'Real-time 3D FK skeleton'),
             ('camera_overlay', 'Camera Overlay', 'AR skeleton on camera feed'),

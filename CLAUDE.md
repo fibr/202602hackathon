@@ -23,9 +23,10 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh src/unified_gui_pyqt.py --safe --view control      # Safe mode (arm101)
 ./run.sh src/unified_gui_pyqt.py --view camera_overlay      # AR skeleton overlay on camera feed
 ./run.sh src/unified_gui_pyqt.py --no-robot --view home     # Config editor only (no robot)
+./run.sh src/unified_gui_pyqt.py --view fetch_game          # Fetch game: pick up and place cubes
 ```
 
-Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `digital_twin`, `live_twin`, `camera_overlay`, `verify_calib`. Use `--list` to see all with descriptions.
+Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `fetch_game`, `digital_twin`, `live_twin`, `camera_overlay`, `verify_calib`. Use `--list` to see all with descriptions.
 
 ### Individual scripts (still work standalone)
 ```bash
@@ -84,6 +85,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/robot/dobot_api.py` — TCP/IP driver, dashboard port 29999 only (V4 syntax)
 - `assets/nova5_robot.urdf` — Official Nova5 URDF with configurable gripper tool_tip frame
 - `src/robot/gripper.py` — Electric gripper via ToolDOInstant dual-channel control
+- `src/fetch_game.py` — Fetch game state machine: multi-cube detect → approach → gripper cam refine → grasp → transport → place
 - `config/robot_config.yaml` — Shared config; `robot_type: arm101|nova5` selects active robot
 - `config/settings.yaml` — Local overrides, gitignored (create to override any config value)
 - `config/calibration.yaml` — Generated camera-to-base 4×4 matrix

@@ -20,6 +20,9 @@ class CubeDetection:
     area: float          # contour area (pixels^2)
     bbox: tuple          # (x, y, w, h) bounding box
     contour: np.ndarray  # original contour points
+    yaw_deg: float = 0.0       # estimated yaw from minAreaRect (degrees)
+    aspect_ratio: float = 1.0  # bbox width/height ratio
+    solidity: float = 1.0      # contour area / convex hull area
 
 
 # Default HSV range for green cubes (tuned for bright green on white table)
@@ -92,9 +95,23 @@ def detect_green_cubes(
         cx = int(M['m10'] / M['m00'])
         cy = int(M['m01'] / M['m00'])
 
+        # Yaw from minimum-area rotated rectangle
+        yaw_deg = 0.0
+        if len(contour) >= 5:
+            rect = cv2.minAreaRect(contour)
+            yaw_deg = rect[2]  # angle in [-90, 0)
+
+        # Solidity (how square-like the contour is)
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 0.0
+
         detections.append(CubeDetection(
             cx=cx, cy=cy, area=area,
             bbox=(x, y, w, h), contour=contour,
+            yaw_deg=yaw_deg,
+            aspect_ratio=max(w, h) / max(min(w, h), 1),
+            solidity=solidity,
         ))
 
     # Sort by area (largest first)
@@ -107,10 +124,55 @@ def detect_green_cubes(
     return detections, info
 
 
+def select_target_cube(
+    detections: list[CubeDetection],
+    mode: str = 'largest',
+    click_xy: tuple = None,
+    reference_pos: np.ndarray = None,
+) -> int:
+    """Select the best target cube from a list of detections.
+
+    Args:
+        detections: List of CubeDetection objects.
+        mode: Selection mode - 'largest', 'closest_to_click', 'closest_to_center',
+              'closest_to_ref' (closest to reference_pos in pixel space).
+        click_xy: (x, y) pixel position for 'closest_to_click' mode.
+        reference_pos: (x, y) reference position for 'closest_to_ref' mode.
+
+    Returns:
+        Index of the selected cube, or -1 if no detections.
+    """
+    if not detections:
+        return -1
+
+    if mode == 'largest':
+        # Already sorted by area descending
+        return 0
+
+    if mode == 'closest_to_click' and click_xy is not None:
+        cx, cy = click_xy
+        dists = [(d.cx - cx)**2 + (d.cy - cy)**2 for d in detections]
+        return int(np.argmin(dists))
+
+    if mode == 'closest_to_center':
+        # Assumes 640x480 if no frame size available
+        cx, cy = 320, 240
+        dists = [(d.cx - cx)**2 + (d.cy - cy)**2 for d in detections]
+        return int(np.argmin(dists))
+
+    if mode == 'closest_to_ref' and reference_pos is not None:
+        rx, ry = reference_pos[0], reference_pos[1]
+        dists = [(d.cx - rx)**2 + (d.cy - ry)**2 for d in detections]
+        return int(np.argmin(dists))
+
+    return 0  # fallback to largest
+
+
 def annotate_frame(
     frame: np.ndarray,
     detections: list[CubeDetection],
     label_prefix: str = "Cube",
+    target_idx: int = -1,
 ) -> np.ndarray:
     """Draw detection annotations on a copy of the frame.
 
@@ -118,6 +180,7 @@ def annotate_frame(
         frame: BGR image.
         detections: List of CubeDetection.
         label_prefix: Prefix for labels.
+        target_idx: Index of the target cube to highlight (-1 = none).
 
     Returns:
         Annotated BGR image (copy of original).
@@ -125,12 +188,30 @@ def annotate_frame(
     vis = frame.copy()
     for i, det in enumerate(detections):
         x, y, w, h = det.bbox
-        # Draw bounding box
-        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        is_target = (i == target_idx)
+
+        # Draw bounding box - target in cyan, others in green
+        color = (0, 255, 255) if is_target else (0, 255, 0)
+        thickness = 3 if is_target else 1
+        cv2.rectangle(vis, (x, y), (x + w, y + h), color, thickness)
+
         # Draw centroid
-        cv2.circle(vis, (det.cx, det.cy), 5, (0, 0, 255), -1)
+        cv2.circle(vis, (det.cx, det.cy), 6 if is_target else 4,
+                   (0, 0, 255) if is_target else (0, 128, 255), -1)
+
+        # Target marker - crosshair
+        if is_target:
+            cv2.drawMarker(vis, (det.cx, det.cy), (0, 255, 255),
+                           cv2.MARKER_CROSS, 20, 2)
+
         # Label
-        label = f"{label_prefix} {i+1} ({det.cx},{det.cy})"
+        tag = " [TARGET]" if is_target else ""
+        label = f"{label_prefix} {i+1} A={det.area:.0f}{tag}"
         cv2.putText(vis, label, (x, y - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+
+    # Detection count
+    cv2.putText(vis, f"{len(detections)} cube(s) detected",
+                (10, frame.shape[0] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
     return vis
