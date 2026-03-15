@@ -23,6 +23,9 @@ import math
 import cv2
 import yaml
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+from config_loader import config_path, _SHARED_CONFIG_DIR
+
 # Optional RealSense support
 try:
     import pyrealsense2 as rs
@@ -33,8 +36,10 @@ except ImportError:
 # Project root
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
-_CAMERAS_YAML = os.path.join(_PROJECT_ROOT, 'config', 'cameras.yaml')
-_CALIBRATION_YAML = os.path.join(_PROJECT_ROOT, 'config', 'calibration.yaml')
+# Read from active config dir; write to shared (~/.config) dir.
+_CAMERAS_YAML_READ = config_path('cameras.yaml')
+_CALIBRATION_YAML = config_path('calibration.yaml')
+_CAMERAS_YAML = os.path.join(_SHARED_CONFIG_DIR, 'cameras.yaml')
 
 
 # ---------------------------------------------------------------------------
@@ -277,15 +282,17 @@ def _default_mount() -> dict:
 
 
 def _load_existing_cameras() -> dict:
-    """Load existing cameras.yaml if present."""
-    if not os.path.exists(_CAMERAS_YAML):
-        return {}
-    try:
-        with open(_CAMERAS_YAML, 'r') as f:
-            data = yaml.safe_load(f)
-        return data.get('cameras', {}) or {}
-    except Exception:
-        return {}
+    """Load existing cameras.yaml if present (from active config dir)."""
+    # Check both the write target and the read path (may differ on first run)
+    for path in (_CAMERAS_YAML, _CAMERAS_YAML_READ):
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = yaml.safe_load(f)
+                return data.get('cameras', {}) or {}
+            except Exception:
+                continue
+    return {}
 
 
 def _load_calibration_extrinsics() -> dict | None:
