@@ -3417,6 +3417,14 @@ class UnifiedPyQtApp(QMainWindow):
         self._nav_list.currentRowChanged.connect(self._on_nav_changed)
         sb_layout.addWidget(self._nav_list)
 
+        # Global servo toggle at bottom of sidebar (visible from all views)
+        self._servo_btn = QPushButton('Servos ON')
+        self._servo_btn.setStyleSheet(
+            'background-color: #006400; color: white; font-weight: bold; '
+            'padding: 8px; margin: 6px; border-radius: 4px;')
+        self._servo_btn.clicked.connect(self._toggle_servos)
+        sb_layout.addWidget(self._servo_btn)
+
         # Status bar at bottom of sidebar
         self._sb_status = QLabel('Robot: ? | Camera: off')
         self._sb_status.setStyleSheet(
@@ -3563,11 +3571,47 @@ class UnifiedPyQtApp(QMainWindow):
             self._robot_connected = True
             return False
 
+    def _toggle_servos(self):
+        if self.robot is None:
+            return
+        if getattr(self.robot, 'robot_type', None) == 'arm101':
+            if getattr(self.robot, '_enabled', False):
+                self.robot.disable_torque()
+            else:
+                self.robot.enable_torque()
+        else:
+            # Nova5 toggle
+            self.robot.send('DisableRobot()')
+            import time; time.sleep(1)
+            self.robot.send('ClearError()')
+            self.robot.send('EnableRobot()')
+        self._update_servo_btn()
+
+    def _update_servo_btn(self):
+        if self.robot is None:
+            self._servo_btn.setText('No Robot')
+            self._servo_btn.setStyleSheet(
+                'background-color: #333; color: #888; font-weight: bold; '
+                'padding: 8px; margin: 6px; border-radius: 4px;')
+            return
+        if getattr(self.robot, 'robot_type', None) == 'arm101':
+            enabled = getattr(self.robot, '_enabled', False)
+        else:
+            mode = self.robot.get_mode()
+            enabled = mode == 5
+        label = 'Servos OFF' if enabled else 'Servos ON'
+        color = '#640000' if enabled else '#006400'
+        self._servo_btn.setText(label)
+        self._servo_btn.setStyleSheet(
+            f'background-color: {color}; color: white; font-weight: bold; '
+            f'padding: 8px; margin: 6px; border-radius: 4px;')
+
     def _update_status(self):
         robot_type = self.config.get('robot_type', '?')
         r = 'connected' if self.robot else 'off'
         c = 'on' if self.camera else 'off'
         self._sb_status.setText(f'Robot: {robot_type} ({r})  |  Camera: {c}')
+        self._update_servo_btn()
 
     def closeEvent(self, event):
         """Clean up on close."""
