@@ -1145,17 +1145,18 @@ class CheckerboardCalibView(BaseViewWidget):
 
     def _run_intr_calib(self):
         try:
-            from calibration.board_detector import BoardDetector
-            detector = BoardDetector()
+            from vision.board_detector import BoardDetector
+            # Use configured board detector instead of hardcoded values
+            detector = BoardDetector.from_config(self.app.config)
+            print(f'  Using board: {detector.describe()}')
             all_obj_pts, all_img_pts = [], []
             for frame in self._intr_frames:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                found, corners = cv2.findChessboardCorners(gray, (9, 6), None)
-                if found:
-                    objp = np.zeros((54, 3), np.float32)
-                    objp[:, :2] = np.mgrid[0:9, 0:6].T.reshape(-1, 2) * 25.0
-                    all_obj_pts.append(objp)
-                    all_img_pts.append(corners)
+                detection = detector.detect(gray)
+                if detection is not None:
+                    obj_pts = detector.get_object_points(detection)
+                    all_obj_pts.append(obj_pts)
+                    all_img_pts.append(detection.corners)
             if len(all_obj_pts) < 3:
                 print(f'  Need >=3 valid frames, got {len(all_obj_pts)}')
                 return
