@@ -266,13 +266,18 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     # Optional: connect to real arm for mirroring
     real_arm = None
+    ik_solver = None
     if args_cli.mirror:
         try:
             sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
             from robot.lerobot_arm101 import LeRobotArm101
-            real_arm = LeRobotArm101()
+            from kinematics.arm101_ik_solver import Arm101IKSolver
+            port = LeRobotArm101.find_port()
+            real_arm = LeRobotArm101(port=port)
             real_arm.connect()
-            print("[INFO]: Connected to real arm for mirroring")
+            ik_solver = Arm101IKSolver()
+            print(f"[INFO]: Connected to real arm on {port} for mirroring")
+            print(f"[INFO]: Joint signs: {ik_solver.signs}")
         except Exception as e:
             print(f"[WARN]: Could not connect to real arm: {e}")
             print("[INFO]: Running without mirroring")
@@ -291,8 +296,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     try:
         while simulation_app.is_running():
-            # Reset every 2000 steps
-            if count % 2000 == 0:
+            # Reset every 2000 steps (disabled in mirror mode)
+            if real_arm is None and count % 2000 == 0:
                 count = 0
                 # Reset robot to default state
                 root_state = scene["robot"].data.default_root_state.clone()
@@ -309,11 +314,16 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
             # ── Set joint targets ──────────────────────────────────────
             if real_arm is not None:
-                # Mirror real arm joint angles
+                # Mirror real arm joint angles (convert motor→URDF via signs)
                 try:
-                    angles = real_arm.read_all_angles()  # 6 angles in degrees
+                    motor_angles = real_arm.read_all_angles()  # 6 motor angles in degrees
+                    # Apply joint signs: urdf_deg = motor_deg * sign
+                    urdf_rad = ik_solver._motor_to_urdf(
+                        np.array(motor_angles[:5], dtype=float))
+                    # Include gripper (no sign correction)
+                    urdf_rad[5] = math.radians(motor_angles[5]) if len(motor_angles) > 5 else 0.0
                     targets = torch.tensor(
-                        [[math.radians(a) for a in angles]],
+                        [urdf_rad.tolist()],
                         dtype=torch.float32,
                         device=scene["robot"].device,
                     )
