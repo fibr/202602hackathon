@@ -71,8 +71,9 @@ def connect_robot(config: dict, safe_mode: bool = False):
     if robot_type == 'arm101':
         from robot.lerobot_arm101 import LeRobotArm101
         ac = config.get('arm101', {})
+        port = ac.get('port', '') or LeRobotArm101.find_port()
         arm = LeRobotArm101(
-            port=ac.get('port', ''),
+            port=port,
             baudrate=ac.get('baudrate', 1_000_000),
             motor_ids=ac.get('motor_ids', [1, 2, 3, 4, 5, 6]),
             speed=ac.get('speed', 200),

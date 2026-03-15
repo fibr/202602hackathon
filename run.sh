@@ -45,14 +45,15 @@ if [ "$ROBOT_TYPE" = "nova5" ]; then
     fi
 fi
 
-# Suppress OpenCV Qt font warnings by pointing Qt to system fonts if the cv2
-# bundled fonts directory is missing (Qt spams "QFontDatabase: Cannot find font
-# directory .../cv2/qt/fonts" without this).
+# Suppress OpenCV Qt font warnings by symlinking system fonts into cv2's expected
+# location (QT_QPA_FONTDIR alone doesn't suppress the warning from OpenCV's
+# embedded Qt — it needs the directory to actually exist).
 CV2_QT_FONTS=$(.venv/bin/python -c "import cv2, os; print(os.path.join(os.path.dirname(cv2.__file__), 'qt', 'fonts'))" 2>/dev/null || true)
 if [ -n "$CV2_QT_FONTS" ] && [ ! -e "$CV2_QT_FONTS" ]; then
     for d in /usr/share/fonts/truetype/dejavu /usr/share/fonts/truetype /usr/share/fonts; do
         if [ -d "$d" ]; then
-            export QT_QPA_FONTDIR="$d"
+            mkdir -p "$(dirname "$CV2_QT_FONTS")"
+            ln -s "$d" "$CV2_QT_FONTS" 2>/dev/null || true
             break
         fi
     done

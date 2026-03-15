@@ -69,6 +69,7 @@ class UnifiedApp:
         self.robot = None
         self.camera = None
         self._robot_connected = False
+        self._robot_error = None
         self._camera_started = False
 
         # View dimensions (camera area; sidebar is separate)
@@ -138,10 +139,12 @@ class UnifiedApp:
             self.robot = connect_robot(self.config, safe_mode=safe)
             print("  Robot connected.")
             self._robot_connected = True
+            self._robot_error = None
             return True
         except Exception as e:
             print(f"  WARNING: Robot not available: {e}")
             self._robot_connected = True
+            self._robot_error = str(e)
             return False
 
     def get_camera_frame(self):

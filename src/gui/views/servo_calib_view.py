@@ -73,7 +73,8 @@ class ServoCalibView(BaseView):
         self.app.ensure_robot()
         robot = self.app.robot
         if robot is None:
-            self._error_msg = 'No robot connected'
+            reason = getattr(self.app, '_robot_error', None) or 'unknown'
+            self._error_msg = f'No robot connected: {reason}'
             return
         if getattr(robot, 'robot_type', None) != 'arm101':
             self._error_msg = 'Servo calibration requires arm101 robot'
@@ -250,7 +251,8 @@ class HandEyeYellowView(BaseView):
         self.app.ensure_robot()
         robot = self.app.robot
         if robot is None:
-            self._error_msg = 'No robot connected'
+            reason = getattr(self.app, '_robot_error', None) or 'unknown'
+            self._error_msg = f'No robot connected: {reason}'
             return
         if getattr(robot, 'robot_type', None) != 'arm101':
             self._error_msg = 'Hand-eye yellow calibration requires arm101'
