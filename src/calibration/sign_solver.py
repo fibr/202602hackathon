@@ -583,10 +583,25 @@ def _rvec_tvec_to_T(rvec, tvec):
 
 
 def save_calibration_results(signs, offsets_raw, T_cam_in_tcp):
-    """Save signs + offsets to servo_offsets.yaml."""
+    """Save signs + offsets to servo_offsets.yaml, preserving existing data.
+
+    Reads the existing file first and merges new calibration results into it,
+    so that sections not being updated (e.g. joint_signs when only offsets
+    are re-solved) are preserved rather than silently dropped.
+    """
     import yaml
 
     offset_file = config_path('servo_offsets.yaml')
+
+    # Load existing data to preserve fields we're not updating
+    existing = {}
+    if os.path.exists(offset_file):
+        try:
+            with open(offset_file, 'r') as f:
+                existing = yaml.safe_load(f) or {}
+        except Exception:
+            existing = {}
+
     offsets_dict = {}
     for i, name in enumerate(MOTOR_NAMES):
         offsets_dict[name] = {
@@ -598,18 +613,20 @@ def save_calibration_results(signs, offsets_raw, T_cam_in_tcp):
     for i, name in enumerate(MOTOR_NAMES):
         signs_dict[name] = int(signs[i])
 
-    data = {
-        'description': 'Servo zero offsets and joint signs for SO-ARM101',
-        'zero_offsets': offsets_dict,
-        'joint_signs': signs_dict,
-        'notes': {
-            'usage': 'angle_deg = sign * (raw_position - zero_raw) * 360/4096',
-            'default': '2048 (servo center) if no offset defined',
-            'signs': '+1 = motor and URDF agree, -1 = inverted',
-            'calibrated_by': 'servo_direction auto-calibration (ChArUco)',
-            'calibrated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-        }
+    # Merge: start from existing data, update with new results
+    data = dict(existing)
+    data['description'] = 'Servo zero offsets and joint signs for SO-ARM101'
+    data['zero_offsets'] = offsets_dict
+    data['joint_signs'] = signs_dict
+    # Preserve any extra top-level keys from existing file (e.g. custom notes)
+    data['notes'] = {
+        'usage': 'angle_deg = sign * (raw_position - zero_raw) * 360/4096',
+        'default': '2048 (servo center) if no offset defined',
+        'signs': '+1 = motor and URDF agree, -1 = inverted',
+        'calibrated_by': 'servo_direction auto-calibration (ChArUco)',
+        'calibrated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
+
     os.makedirs(os.path.dirname(offset_file), exist_ok=True)
     with open(offset_file, 'w') as f:
         yaml.dump(data, f, default_flow_style=False)

@@ -1916,13 +1916,31 @@ class ServoCalibView(BaseViewWidget):
             if raw:
                 import yaml
                 offsets_path = config_path('servo_offsets.yaml')
+                # Load existing data to preserve joint_signs and other sections
                 data = {}
                 if os.path.exists(offsets_path):
                     with open(offsets_path, 'r') as f:
                         data = yaml.safe_load(f) or {}
-                data['zero_raw'] = [int(r) for r in raw]
+
+                # Motor names matching sign_solver convention
+                motor_names = [
+                    'shoulder_pan', 'shoulder_lift', 'elbow_flex',
+                    'wrist_flex', 'wrist_roll',
+                ]
+                # Update zero_offsets in the structured format
+                offsets_dict = data.get('zero_offsets', {})
+                for i, name in enumerate(motor_names):
+                    if i < len(raw):
+                        offsets_dict[name] = {
+                            'motor_id': i + 1,
+                            'zero_raw': int(raw[i]),
+                        }
+                data['zero_offsets'] = offsets_dict
+                # Remove legacy flat list if present
+                data.pop('zero_raw', None)
+
                 with open(offsets_path, 'w') as f:
-                    yaml.dump(data, f)
+                    yaml.dump(data, f, default_flow_style=False)
                 self._status.setText(f'Saved zero offsets: {[int(r) for r in raw]}')
                 print(f'  Saved servo offsets to {offsets_path}')
         except Exception as e:

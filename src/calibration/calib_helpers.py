@@ -231,19 +231,33 @@ def save_offsets(raw_positions):
 
 
 def save_offsets_dict(offsets):
-    """Persist an offsets dict to servo_offsets.yaml.
+    """Persist an offsets dict to servo_offsets.yaml, preserving existing data.
+
+    Reads the existing file first so that sections not being updated
+    (e.g. joint_signs) are preserved rather than silently dropped.
 
     Args:
         offsets: dict  {motor_name: {'motor_id': int, 'zero_raw': int, ...}}
     """
-    data = {
-        'description': 'Servo zero offsets for SO-ARM101',
-        'zero_offsets': offsets,
-        'notes': {
-            'usage': 'angle_deg = (raw_position - zero_raw) * 360/4096',
-            'default': '2048 (servo center) if no offset defined',
-        }
-    }
+    # Load existing data to preserve joint_signs and other sections
+    existing = {}
+    if os.path.exists(OFFSET_FILE):
+        try:
+            with open(OFFSET_FILE, 'r') as f:
+                existing = yaml.safe_load(f) or {}
+        except Exception:
+            existing = {}
+
+    data = dict(existing)
+    data['description'] = 'Servo zero offsets for SO-ARM101'
+    data['zero_offsets'] = offsets
+    if 'notes' not in data:
+        data['notes'] = {}
+    data['notes'].update({
+        'usage': 'angle_deg = (raw_position - zero_raw) * 360/4096',
+        'default': '2048 (servo center) if no offset defined',
+    })
+
     os.makedirs(os.path.dirname(OFFSET_FILE), exist_ok=True)
     with open(OFFSET_FILE, 'w') as f:
         yaml.dump(data, f, default_flow_style=False)
