@@ -56,10 +56,10 @@ gripper_camera:
   device_index: 8             # V4L2 index for /dev/video8
   width: 640
   height: 480
-  hfov_deg: 60.0              # Horizontal field of view in degrees.
+  hfov_deg: 61.8              # Horizontal field of view in degrees.
                               # Used to auto-compute scale_mm_per_pixel below.
-                              # Derived from cameras.yaml fx≈554.3 at 640px:
-                              #   hfov = 2*arctan(320/554.3) ≈ 60°
+                              # Calibrated: fx=534.22 at 640px:
+                              #   hfov = 2*arctan(320/534.22) ≈ 61.8°
 
 # Closed-loop visual servoing using the gripper camera
 # Runs after PRE_GRASP to correct residual calibration errors.
