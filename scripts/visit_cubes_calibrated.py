@@ -2,7 +2,7 @@
 """Visit green cubes with calibrated ARM101.
 
 Key improvements over visit_cubes.py:
-  - Uses per-motor servo offsets (config/servo_offsets.yaml)
+  - Uses per-motor servo offsets (config/servo_offsets.yaml) via explicit _deg_to_pos_motor()
   - Prints actual vs commanded angles for debugging
   - Constrains targets to reachable workspace
   - Takes screenshots with arm position overlay
@@ -104,6 +104,30 @@ def clamp_to_workspace(x, y, z):
 SAFE_UP_ANGLES = [0, 10, -10, -10, 0]  # FK ≈ (370, 0, 230)mm — well above table
 
 
+def angles_to_calibrated_positions(arm, angles):
+    """Convert joint angles in degrees to raw positions using per-motor calibration.
+
+    Uses arm._deg_to_pos_motor() for motors 1-5 (IK joints) to apply per-motor
+    zero offsets from servo_offsets.yaml. Motor 6 (gripper) uses standard conversion.
+
+    Args:
+        arm: LeRobotArm101 instance
+        angles: List of 6 target angles in degrees
+
+    Returns:
+        List of 6 raw positions (0-4095)
+    """
+    positions = []
+    for i, angle in enumerate(angles):
+        motor_id = arm.motor_ids[i]
+        if motor_id <= 5:  # IK joints use per-motor calibration
+            pos = arm._deg_to_pos_motor(angle, motor_id)
+        else:  # Gripper (motor 6) uses standard conversion
+            pos = arm._deg_to_pos(angle)
+        positions.append(pos)
+    return positions
+
+
 def move_to_target(arm, solver, target_mm, initial_angles, speed=150,
                    use_waypoint=True):
     """Move arm to target using IK with waypoint safety.
@@ -155,13 +179,17 @@ def move_to_target(arm, solver, target_mm, initial_angles, speed=150,
     if use_waypoint:
         safe_cmd = list(SAFE_UP_ANGLES) + [grip]
         print(f"    -> Safe waypoint first...")
-        arm.write_all_angles(safe_cmd, speed=speed)
+        # Convert angles to calibrated positions using per-motor offsets
+        safe_positions = angles_to_calibrated_positions(arm, safe_cmd)
+        arm.write_all_positions(safe_positions, speed=speed)
         time.sleep(1.5)
         wait_for_motion(arm, timeout=4)
 
     # Step 2: Move to target
     cmd = list(result) + [grip]
-    arm.write_all_angles(cmd, speed=speed)
+    # Convert angles to calibrated positions using per-motor offsets
+    cmd_positions = angles_to_calibrated_positions(arm, cmd)
+    arm.write_all_positions(cmd_positions, speed=speed)
     time.sleep(2.0)
     wait_for_motion(arm, timeout=5)
     time.sleep(0.5)
@@ -300,10 +328,14 @@ def main():
         print(f"\n{'='*50}")
         print("  Returning to initial (via safe waypoint)...")
         safe_cmd = list(SAFE_UP_ANGLES) + [initial[5]]
-        arm.write_all_angles(safe_cmd, speed=args.speed)
+        # Convert angles to calibrated positions using per-motor offsets
+        safe_positions = angles_to_calibrated_positions(arm, safe_cmd)
+        arm.write_all_positions(safe_positions, speed=args.speed)
         time.sleep(1.5)
         wait_for_motion(arm, timeout=4)
-        arm.write_all_angles(initial, speed=args.speed)
+        # Convert initial angles to calibrated positions using per-motor offsets
+        initial_positions = angles_to_calibrated_positions(arm, initial)
+        arm.write_all_positions(initial_positions, speed=args.speed)
         wait_for_motion(arm)
 
     except KeyboardInterrupt:
