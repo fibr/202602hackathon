@@ -645,16 +645,16 @@ class ServoDirectionCalibView(BaseView):
             self._status_time = time.time()
             return True
 
-        # Duplicate check: any joint must move >= 20 raw (~1.8°)
-        cur_raw_vals = [raw[m] for m in range(1, 6)]
+        # Duplicate check: board must have moved enough in camera frame
+        # (more reliable than raw servo comparison since it uses actual vision)
         for prev in self._captures:
-            prev_raw_vals = [prev['raw'][m] for m in range(1, 6)]
-            max_delta = max(abs(a - b) for a, b in
-                           zip(cur_raw_vals, prev_raw_vals))
-            if max_delta < 20:
-                self._status_msg = (f'SKIP: too similar '
-                                    f'(max delta={max_delta} raw '
-                                    f'≈{max_delta * 360 / 4096:.1f}°)')
+            prev_t = prev['T_board_in_cam'][:3, 3]
+            cur_t = T_board[:3, 3]
+            dist_mm = float(np.linalg.norm(cur_t - prev_t) * 1000)
+            if dist_mm < 10:  # board moved less than 10mm in camera frame
+                self._status_msg = (f'SKIP: too similar to previous '
+                                    f'(board moved {dist_mm:.0f}mm, '
+                                    f'need >10mm)')
                 self._status_time = time.time()
                 return True
 
