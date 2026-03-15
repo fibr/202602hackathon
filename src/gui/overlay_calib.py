@@ -17,7 +17,7 @@ _BTN_W = 30
 _MARGIN = 10
 _SAVE_BTN_H = 30
 
-# Colors (BGR) — matches robot_controls.py scheme
+# Colors (BGR) — dark theme
 _BG = (30, 30, 30)
 _BTN = (60, 60, 60)
 _BTN_HOVER = (80, 80, 80)

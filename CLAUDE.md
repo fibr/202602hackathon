@@ -75,7 +75,6 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/main.py` — State machine orchestrator (INIT → DETECT → PLAN → EXECUTE → DONE)
 - `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge); `connect_robot(config)` factory returns connected robot based on `robot_type`
 - `src/unified_gui_pyqt.py` — PyQt5 unified GUI: sidebar navigation, all views, all actions via buttons
-- `src/gui/robot_controls.py` — Legacy OpenCV GUI panel (retained for reference; superseded by PyQt views)
 - `src/calibration/sign_solver.py` — Brute-force servo sign/offset solver (ChArUco-based, used by servo direction calib)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion

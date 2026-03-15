@@ -1,8 +1,8 @@
 """Driver for LeRobot SO-ARM101 follower arm (Feetech STS3215 servos).
 
 Uses the Feetech servo SDK (scservo_sdk) to communicate with 6 STS3215 servos
-on a serial bus. Provides the same duck-typed interface that RobotControlPanel
-expects: get_pose(), get_angles(), send(), plus native methods for direct control.
+on a serial bus. Provides native methods for direct control of joint angles and
+positions, plus FK/IK-based Cartesian interface.
 
 Motor mapping (SO-101 follower):
     ID 1: shoulder_pan   (base rotation)
@@ -104,8 +104,8 @@ ADDR_MAX_TORQUE = 48            # STS3215 max torque register (2-byte)
 class LeRobotArm101:
     """Driver for SO-ARM101 follower arm with Feetech STS3215 servos.
 
-    Provides both a native interface and a duck-typed interface compatible
-    with RobotControlPanel (get_pose, get_angles, send).
+    Provides native methods for joint control, position reading, and FK-based
+    Cartesian interface.
 
     Args:
         port: Serial port path (e.g., '/dev/ttyACM0').
@@ -405,7 +405,7 @@ class LeRobotArm101:
         target = current[joint_idx] + direction * step_deg
         self.write_angle(self.motor_ids[joint_idx], target, speed)
 
-    # --- Duck-typed interface for RobotControlPanel ---
+    # --- Cartesian interface (FK/IK) ---
 
     def get_pose(self) -> Optional[list]:
         """Get Cartesian TCP pose [x,y,z,rx,ry,rz] in mm/deg via FK.
@@ -425,7 +425,7 @@ class LeRobotArm101:
             return None
 
     def get_angles(self) -> Optional[list]:
-        """Get joint angles in degrees. Compatible with RobotControlPanel.
+        """Get joint angles in degrees.
 
         Returns:
             List of 6 joint angles in degrees, or None on error.
