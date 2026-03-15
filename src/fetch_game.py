@@ -52,6 +52,7 @@ class FetchGameState:
     target_cube_3d: Optional[np.ndarray] = None  # [x,y,z] mm in base frame
     # Refinement
     gripper_cam_detection: Optional[tuple] = None  # (cx, cy) in gripper cam
+    gripper_cam_frame: Optional[np.ndarray] = None  # latest gripper cam frame (BGR)
     refined_pos_3d: Optional[np.ndarray] = None
     estimated_yaw_deg: float = 0.0
     refine_error_px: float = float('inf')
@@ -79,7 +80,7 @@ class FetchGameController:
 
     def __init__(self, app,
                  hover_height_mm: float = 40.0,
-                 grasp_height_mm: float = 12.0,
+                 grasp_height_mm: float = 8.0,
                  lift_height_mm: float = 80.0,
                  place_pos_mm: np.ndarray = None,
                  cube_selection_mode: str = 'largest'):
@@ -96,7 +97,6 @@ class FetchGameController:
         self._solver = None
         self._worker_thread = None
         self._abort = False
-        self._gripper_cam = None
         self._speed = 150
 
         # Callbacks for GUI updates
@@ -175,7 +175,18 @@ class FetchGameController:
                 cube_z = 10.0  # cube center height above table
                 if abs(ray_base[2]) > 1e-6:
                     s = (cube_z - origin_base[2]) / ray_base[2]
-                    self.state.target_cube_3d = origin_base + s * ray_base
+                    if s > 0:  # only accept intersections in front of camera
+                        self.state.target_cube_3d = origin_base + s * ray_base
+                    else:
+                        log.debug(f"Negative ray scale {s:.2f}, ignoring")
+                        self.state.target_cube_3d = None
+
+            # Auto-advance: if in DETECT state with auto_mode and we have a target
+            if (self.state.auto_mode
+                    and self.state.state == FetchState.DETECT
+                    and self.state.target_cube_3d is not None
+                    and not (self._worker_thread and self._worker_thread.is_alive())):
+                self.step()
         else:
             self.state.target_cube_px = None
             self.state.target_cube_3d = None
@@ -271,8 +282,8 @@ class FetchGameController:
 
     def start_auto(self):
         """Run the full fetch sequence automatically."""
-        self.state.auto_mode = True
         self.reset()
+        self.state.auto_mode = True
         self._set_state(FetchState.DETECT, 'Auto: scanning...')
 
     def stop_auto(self):
@@ -306,18 +317,22 @@ class FetchGameController:
 
     def _move_to_position(self, pos_mm: np.ndarray, label: str = 'target'):
         """Move arm to a 3D position using position-only IK."""
+        if self._abort:
+            return
         robot = self.app.robot
         if robot is None or self._solver is None:
             raise RuntimeError("No robot or IK solver available")
 
         angles = robot.get_angles()
-        seed = np.array(angles[:5]) if angles else None
+        if not angles or len(angles) < 6:
+            raise RuntimeError(f"Cannot get joint angles for {label}")
+        seed = np.array(angles[:5])
         solution = self._solver.solve_ik_position(pos_mm, seed_motor_deg=seed)
 
         if solution is None:
             raise RuntimeError(f"IK failed for {label}: {pos_mm}")
 
-        cmd = list(solution) + [angles[5] if angles else 0]
+        cmd = list(solution) + [angles[5]]
         robot.move_joints(cmd, speed=self._speed)
         time.sleep(0.5)  # Wait for motion to complete
         log.info(f"Moved to {label}: ({pos_mm[0]:.1f}, {pos_mm[1]:.1f}, {pos_mm[2]:.1f})")
@@ -328,10 +343,14 @@ class FetchGameController:
         if target is None:
             raise RuntimeError("No target cube position")
 
+        # Snapshot target position to avoid race with detection thread
         hover_pos = target.copy()
         hover_pos[2] = self.hover_height_mm
         self._move_to_position(hover_pos, 'approach')
         self.state.status_text = f'Hovering above cube at z={self.hover_height_mm:.0f}mm'
+        # Store the approach position as refined_pos_3d baseline
+        self.state.refined_pos_3d = hover_pos.copy()
+        self.state.refined_pos_3d[2] = target[2]  # keep original Z for later use
 
     def _do_refine(self):
         """Use gripper camera to refine position over the cube.
@@ -342,12 +361,16 @@ class FetchGameController:
         from vision.green_cube_detector import detect_green_cubes
         import math
 
-        config = self.app.config
+        config = self.app.config or {}
         gc = config.get('gripper_camera', {})
         cam_index = gc.get('device_index', 8)
         cam_w = gc.get('width', 640)
         cam_h = gc.get('height', 480)
         hfov_deg = gc.get('hfov_deg', 61.8)
+        # Camera mount rotation relative to gripper (degrees)
+        refine_cfg = config.get('visual_servoing', {})
+        mount_angle_deg = refine_cfg.get('mount_angle_deg', 0.0)
+        mount_angle_rad = math.radians(mount_angle_deg)
 
         # Compute scale from current height
         z_mm = self.hover_height_mm
@@ -391,6 +414,18 @@ class FetchGameController:
                     continue
 
                 cubes, _ = detect_green_cubes(frame, min_area=100)
+
+                # Annotate and publish gripper cam frame for GUI display
+                gc_vis = frame.copy()
+                # Draw crosshair at center
+                h_gc, w_gc = gc_vis.shape[:2]
+                cv2.drawMarker(gc_vis, (w_gc // 2, h_gc // 2), (255, 255, 0),
+                               cv2.MARKER_CROSS, 30, 1)
+                if cubes:
+                    from vision.green_cube_detector import annotate_frame
+                    gc_vis = annotate_frame(gc_vis, cubes, target_idx=0)
+                self.state.gripper_cam_frame = gc_vis
+
                 if not cubes:
                     self.state.gripper_cam_detection = None
                     self.state.status_text = f'Refine iter {iteration+1}: no cube in gripper cam'
@@ -416,9 +451,13 @@ class FetchGameController:
                     self.state.status_text = f'Refined! err={error_px:.1f}px'
                     break
 
-                # Compute correction in robot frame
-                dx_mm = ex * scale_mm_per_px * gain
-                dy_mm = ey * scale_mm_per_px * gain
+                # Compute correction in robot frame (rotate by mount angle)
+                ex_mm = ex * scale_mm_per_px
+                ey_mm = ey * scale_mm_per_px
+                cos_a = math.cos(mount_angle_rad)
+                sin_a = math.sin(mount_angle_rad)
+                dx_mm = (cos_a * ex_mm - sin_a * ey_mm) * gain
+                dy_mm = (sin_a * ex_mm + cos_a * ey_mm) * gain
 
                 # Clamp
                 mag = np.hypot(dx_mm, dy_mm)
@@ -428,7 +467,7 @@ class FetchGameController:
 
                 # Apply correction via small position move
                 angles = robot.get_angles()
-                if angles is None:
+                if not angles or len(angles) < 6:
                     break
 
                 seed = np.array(angles[:5])
@@ -446,6 +485,13 @@ class FetchGameController:
 
                     # Update refined position
                     self.state.refined_pos_3d = new_pos.copy()
+            else:
+                # Exhausted iterations without converging
+                log.warning(f"Refine did not converge after {max_iters} iterations "
+                            f"(last error: {self.state.refine_error_px:.0f}px)")
+                self.state.status_text = (
+                    f'Refine: {self.state.refine_error_px:.0f}px error '
+                    f'(threshold {pixel_threshold:.0f}px)')
 
         finally:
             cap.release()

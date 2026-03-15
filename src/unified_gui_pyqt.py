@@ -3986,7 +3986,7 @@ class FetchGameView(BaseViewWidget):
         params_grid.addWidget(QLabel('Grasp Z:'), 1, 0)
         self._grasp_spin = QDoubleSpinBox()
         self._grasp_spin.setRange(0, 60)
-        self._grasp_spin.setValue(12.0)
+        self._grasp_spin.setValue(8.0)
         self._grasp_spin.setSuffix(' mm')
         self._grasp_spin.setStyleSheet('background: #333; color: #ddd;')
         self._grasp_spin.valueChanged.connect(self._on_params_changed)
@@ -4021,8 +4021,15 @@ class FetchGameView(BaseViewWidget):
 
         right_layout.addLayout(params_grid)
 
-        # Gripper cam info
+        # Gripper cam info + feed
         right_layout.addWidget(section_label('Gripper Camera'))
+        self._gripper_cam_label = QLabel('No feed')
+        self._gripper_cam_label.setAlignment(Qt.AlignCenter)
+        self._gripper_cam_label.setMinimumSize(200, 150)
+        self._gripper_cam_label.setMaximumHeight(160)
+        self._gripper_cam_label.setStyleSheet('background-color: #111; border: 1px solid #333;')
+        right_layout.addWidget(self._gripper_cam_label)
+
         self._gripper_info = QLabel('Not active')
         self._gripper_info.setStyleSheet(
             'color: #888; font-size: 10px; font-family: monospace;')
@@ -4057,6 +4064,9 @@ class FetchGameView(BaseViewWidget):
         self._refresh_timer.start(200)
 
     def on_deactivate(self):
+        # Stop the controller to avoid background robot motions
+        if self._controller:
+            self._controller.stop_auto()
         if self._cam_thread:
             self._cam_thread.stop()
             self._cam_thread = None
@@ -4183,6 +4193,18 @@ class FetchGameView(BaseViewWidget):
 
         # Position table
         self._update_pos_table(state)
+
+        # Gripper cam feed
+        from fetch_game import FetchState
+        if state.gripper_cam_frame is not None:
+            gc_frame = state.gripper_cam_frame
+            gc_img = cv_to_qimage(gc_frame)
+            gc_pix = QPixmap.fromImage(gc_img).scaled(
+                self._gripper_cam_label.size(), Qt.KeepAspectRatio,
+                Qt.SmoothTransformation)
+            self._gripper_cam_label.setPixmap(gc_pix)
+        elif state.state not in (FetchState.REFINE,):
+            self._gripper_cam_label.setText('No feed')
 
         # Gripper cam info
         if state.gripper_cam_detection:
