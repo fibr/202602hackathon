@@ -253,6 +253,10 @@ class ArmRenderer:
         self.draw_drop_lines = True  # vertical drop lines from joints to floor
         self.draw_axes = True       # XYZ axis indicator in corner
 
+        # External target marker (set by cube tracker or other views)
+        # Position in mm, in robot base frame. None = no marker.
+        self.target_pos_mm = None
+
         # Mesh rendering
         self.render_mesh_mode = False   # False = skeleton (default), True = mesh
         self._link_meshes = {}          # link_name -> list[_LinkMeshData]
