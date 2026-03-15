@@ -29,6 +29,8 @@ from calibration.calib_helpers import (
     read_all_raw,
     load_offsets,
     save_handeye_calibration,
+    detect_corners,
+    compute_board_pose,
     HANDEYE_FILE,
 )
 from vision.board_detector import BoardDetector
@@ -459,27 +461,33 @@ class ServoDirectionCalibView(BaseView):
         self._current_frame = frame
         fh, fw = frame.shape[:2]
 
-        # Detect board
+        # Detect board — same path as checkerboard_view for consistency
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        detection = self._board_detector.detect(gray)
+        found, corners, detection = detect_corners(
+            gray, board_detector=self._board_detector)
         self._current_detection = detection
 
         # Compute board pose if detected
         self._current_T_board = None
         n_corners = 0
-        if detection is not None:
-            n_corners = len(detection.corners)
-            # Build a CameraIntrinsics-like object for compute_pose
+        reproj = None
+        if found:
+            n_corners = len(corners)
             intr = _SimpleIntrinsics(self._gripper_K, self._gripper_dist)
-            T, _, reproj = self._board_detector.compute_pose(detection, intr)
+            T, _, reproj = compute_board_pose(
+                corners, intr, detection,
+                board_detector=self._board_detector)
             self._current_T_board = T
 
             # Draw detected corners
-            corners_draw = detection.corners.reshape(-1, 2).astype(int)
-            for pt in corners_draw:
-                cv2.circle(frame, tuple(pt), 3, (0, 255, 0), -1)
+            if self._board_detector is not None and detection is not None:
+                self._board_detector.draw_corners(frame, detection)
+            else:
+                corners_draw = corners.reshape(-1, 2).astype(int)
+                for pt in corners_draw:
+                    cv2.circle(frame, tuple(pt), 3, (0, 255, 0), -1)
 
-            if T is not None:
+            if T is not None and reproj is not None:
                 cv2.putText(frame, f'Board: {n_corners} corners, '
                             f'reproj={reproj:.1f}px',
                             (10, fh - 75), FONT, 0.4, (0, 255, 0), 1)
@@ -626,7 +634,6 @@ class ServoDirectionCalibView(BaseView):
         """Capture current pose: raw servos + board pose in camera."""
         raw = self._current_raw
         T_board = self._current_T_board
-        detection = self._current_detection
 
         if T_board is None:
             self._status_msg = 'SKIP: no board detected'
@@ -652,8 +659,14 @@ class ServoDirectionCalibView(BaseView):
                 return True
 
         # Corner centroid for visualization
-        corners_2d = detection.corners.reshape(-1, 2)
-        centroid = corners_2d.mean(axis=0).tolist()
+        detection = self._current_detection
+        if detection is not None and hasattr(detection, 'corners'):
+            corners_2d = detection.corners.reshape(-1, 2)
+            n_corners = len(corners_2d)
+        else:
+            corners_2d = np.zeros((0, 2))
+            n_corners = 0
+        centroid = corners_2d.mean(axis=0).tolist() if n_corners else [0, 0]
 
         self._captures.append({
             'raw': dict(raw),
@@ -661,7 +674,6 @@ class ServoDirectionCalibView(BaseView):
             'centroid_px': centroid,
         })
         n = len(self._captures)
-        n_corners = len(detection.corners)
         self._status_msg = (f'Captured #{n}: {n_corners} corners, '
                             f'board at z={T_board[2, 3] * 1000:.0f}mm')
         self._status_time = time.time()
