@@ -11,3 +11,4 @@ PyQt5>=5.15                  # PyQt5 GUI framework (for unified_gui_pyqt.py)
 pytest-qt>=4.0               # PyQt5 integration for pytest (GUI tests)
 pytest>=7.0                  # Test framework
 trimesh>=4.0                 # STL mesh loading for 3D arm visualization
+fast_simplification>=0.1.13  # Quadric mesh decimation for smoother mesh reduction

@@ -146,7 +146,7 @@ def _load_and_decimate_mesh(filepath: str, target_faces: int) -> trimesh.Trimesh
         return mesh
 
     try:
-        mesh = mesh.simplify_quadric_decimation(target_faces)
+        mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
         return mesh
     except Exception:
         pass
