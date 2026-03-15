@@ -1,7 +1,16 @@
-description: Servo zero offsets for SO-ARM101
+description: Servo zero offsets and joint signs for SO-ARM101
 notes:
+  calibrated_at: '2026-03-15 20:10:24'
+  calibrated_by: servo_direction auto-calibration (ChArUco)
   default: 2048 (servo center) if no offset defined
-  usage: angle_deg = (raw_position - zero_raw) * 360/4096
+  signs: +1 = motor and URDF agree, -1 = inverted
+  usage: angle_deg = sign * (raw_position - zero_raw) * 360/4096
+joint_signs:
+  elbow_flex: 1
+  shoulder_lift: 1
+  shoulder_pan: -1
+  wrist_flex: 1
+  wrist_roll: -1
 zero_offsets:
   elbow_flex:
     motor_id: 3
