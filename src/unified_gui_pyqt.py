@@ -3546,10 +3546,43 @@ class DigitalTwinView(SubprocessLauncherView):
 # LIVE TWIN VIEW
 # ---------------------------------------------------------------------------
 
+class _DraggableRenderLabel(QLabel):
+    """QLabel with mouse-drag rotation and scroll-wheel zoom for 3D views."""
+
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self._renderer = None  # set externally
+        self.setCursor(Qt.OpenHandCursor)
+        self.setMouseTracking(True)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton and self._renderer:
+            self.setCursor(Qt.ClosedHandCursor)
+            self._renderer.start_drag(event.x(), event.y())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self._renderer and self._renderer._drag_start is not None:
+            self._renderer.update_drag(event.x(), event.y())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton and self._renderer:
+            self.setCursor(Qt.OpenHandCursor)
+            self._renderer.end_drag()
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):  # noqa: N802
+        if self._renderer:
+            delta = event.angleDelta().y()
+            self._renderer.handle_scroll(delta)
+        super().wheelEvent(event)
+
+
 class LiveTwinView(BaseViewWidget):
     view_id = 'live_twin'
     view_name = 'Live Twin'
-    description = 'Real-time 3D FK skeleton'
+    description = 'Real-time 3D FK skeleton (drag to rotate, scroll to zoom)'
 
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
@@ -3565,8 +3598,8 @@ class LiveTwinView(BaseViewWidget):
     def _build_ui(self):
         layout = QHBoxLayout(self)
 
-        # 3D view
-        self._render_label = QLabel('Connecting to robot...')
+        # 3D view — draggable label for mouse rotation
+        self._render_label = _DraggableRenderLabel('Connecting to robot...')
         self._render_label.setAlignment(Qt.AlignCenter)
         self._render_label.setMinimumSize(400, 300)
         self._render_label.setStyleSheet('background-color: #1a1a1a;')
@@ -3580,12 +3613,19 @@ class LiveTwinView(BaseViewWidget):
         self._mv_btn = make_button('Toggle Multi-View', self._toggle_multiview)
         ctrl_layout.addWidget(self._mv_btn)
         ctrl_layout.addWidget(make_button('Toggle Angle Table', self._toggle_table))
+        ctrl_layout.addWidget(make_button('Toggle Shadows', self._toggle_shadows))
         ctrl_layout.addWidget(make_button('Clear Trail', self._clear_trail))
         ctrl_layout.addWidget(make_button('Reset View', self._reset_view))
 
         ctrl_layout.addWidget(section_label('View Presets'))
         for i, name in enumerate(['Front', 'Side', 'Top', 'Iso']):
             ctrl_layout.addWidget(make_button(name, lambda ch, n=name: self._set_preset(n)))
+
+        # Hint text for mouse controls
+        hint = QLabel('Drag to rotate\nScroll to zoom')
+        hint.setStyleSheet('color: #666; font-size: 9px; margin-top: 8px;')
+        hint.setWordWrap(True)
+        ctrl_layout.addWidget(hint)
 
         self._angle_label = QLabel('')
         self._angle_label.setStyleSheet('color: #aaa; font-family: monospace; font-size: 10px;')
@@ -3601,6 +3641,10 @@ class LiveTwinView(BaseViewWidget):
         try:
             from gui.arm_renderer import ArmRenderer
             self._renderer = ArmRenderer()
+            # Default to 3/4 side view for better depth perception
+            self._renderer.azimuth = 60.0
+            self._renderer.elevation = 25.0
+            self._render_label._renderer = self._renderer
         except Exception as e:
             print(f'  ArmRenderer init error: {e}')
 
@@ -3620,6 +3664,7 @@ class LiveTwinView(BaseViewWidget):
             self._poll_thread = None
         if hasattr(self, '_render_timer'):
             self._render_timer.stop()
+        self._render_label._renderer = None
 
     def _on_state(self, pose, angles, mode):
         self._actual_angles = angles
@@ -3633,6 +3678,8 @@ class LiveTwinView(BaseViewWidget):
         try:
             w = max(400, self._render_label.width())
             h = max(300, self._render_label.height())
+            self._renderer.width = w
+            self._renderer.height = h
             canvas = np.zeros((h, w, 3), dtype=np.uint8)
             self._renderer.render_comparison(
                 canvas, self._actual_angles, self._commanded_angles)
@@ -3650,12 +3697,21 @@ class LiveTwinView(BaseViewWidget):
     def _toggle_table(self):
         self._show_table = not self._show_table
 
+    def _toggle_shadows(self):
+        if self._renderer:
+            self._renderer.draw_shadows = not self._renderer.draw_shadows
+            self._renderer.draw_drop_lines = self._renderer.draw_shadows
+
     def _clear_trail(self):
         self._trail.clear()
 
     def _reset_view(self):
         self._trail.clear()
         self._commanded_angles = None
+        if self._renderer:
+            self._renderer.azimuth = 60.0
+            self._renderer.elevation = 25.0
+            self._renderer.zoom = 1200.0
 
     def _set_preset(self, name):
         if self._renderer:

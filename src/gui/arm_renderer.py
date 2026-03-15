@@ -1,8 +1,9 @@
 """Lightweight 3D arm skeleton renderer using OpenCV + Pinocchio FK.
 
 Computes all joint positions via forward kinematics and projects them
-to 2D for visualization.  Supports multiple view angles and overlaying
-two arm configurations (commanded vs actual) for misconfiguration detection.
+to 2D for visualization.  Supports multiple view angles, mouse-drag
+rotation, shadow projection, and overlaying two arm configurations
+(commanded vs actual) for misconfiguration detection.
 
 All rendering is pure OpenCV — no Isaac Sim, matplotlib, or other heavy deps.
 """
@@ -59,6 +60,9 @@ _LINK_THICKNESS = 3
 class ArmRenderer:
     """Renders SO-ARM101 arm skeleton using FK and 3D->2D projection.
 
+    Supports mouse-drag rotation, shadow projection on the floor plane,
+    and visual depth cues (thickness/shading variation, drop-lines).
+
     Args:
         urdf_path: Path to the URDF file.
         joint_signs: Per-joint sign array (5,).
@@ -102,12 +106,45 @@ class ArmRenderer:
         self.table_z_m = -0.10  # meters below base origin
 
         # Camera parameters for 3D->2D projection
-        # Viewpoint: azimuth and elevation in degrees
-        self.azimuth = -30.0   # degrees around Y axis
-        self.elevation = 20.0  # degrees above horizontal
+        # Default: 3/4 side view — shows depth much better than front view
+        self.azimuth = 60.0    # degrees around Z axis (side-ish view)
+        self.elevation = 25.0  # degrees above horizontal
         self.zoom = 1200.0     # scale factor (pixels per meter)
         self.center_offset = np.array([0.0, 0.08, 0.0])  # world offset to center arm
-        self.depth_shading = True  # darken links further from camera
+        self.depth_shading = True   # darken links further from camera
+        self.draw_shadows = True    # project shadow on floor plane
+        self.draw_drop_lines = True  # vertical drop lines from joints to floor
+        self.draw_axes = True       # XYZ axis indicator in corner
+
+        # Mouse drag state (managed externally by the view widget)
+        self._drag_start = None
+        self._drag_az_start = 0.0
+        self._drag_el_start = 0.0
+
+    def start_drag(self, x: int, y: int):
+        """Begin a mouse-drag rotation. Call on mouse-press."""
+        self._drag_start = (x, y)
+        self._drag_az_start = self.azimuth
+        self._drag_el_start = self.elevation
+
+    def update_drag(self, x: int, y: int):
+        """Update view rotation during mouse-drag. Call on mouse-move."""
+        if self._drag_start is None:
+            return
+        dx = x - self._drag_start[0]
+        dy = y - self._drag_start[1]
+        # 0.5 deg per pixel of drag
+        self.azimuth = self._drag_az_start + dx * 0.5
+        self.elevation = np.clip(self._drag_el_start - dy * 0.5, -89, 89)
+
+    def end_drag(self):
+        """End mouse-drag rotation. Call on mouse-release."""
+        self._drag_start = None
+
+    def handle_scroll(self, delta: float):
+        """Zoom in/out via scroll wheel. delta>0 = zoom in."""
+        factor = 1.1 if delta > 0 else 0.9
+        self.zoom = np.clip(self.zoom * factor, 400, 4000)
 
     def _motor_to_urdf(self, motor_deg: np.ndarray) -> np.ndarray:
         """Convert motor angles (deg) to URDF joint angles (rad)."""
@@ -217,6 +254,14 @@ class ArmRenderer:
         if draw_grid and self.table_z_m is not None:
             self._draw_table(canvas, offset_x, offset_y)
 
+        # Draw shadow on floor plane (before the skeleton so it's behind)
+        if self.draw_shadows and not color_override:
+            self._draw_shadow(canvas, positions_3d, offset_x, offset_y)
+
+        # Draw vertical drop-lines from joints to floor (depth cue)
+        if self.draw_drop_lines and not color_override:
+            self._draw_drop_lines(canvas, positions_3d, offset_x, offset_y)
+
         lw = thickness or _LINK_THICKNESS
 
         if alpha < 1.0:
@@ -241,9 +286,74 @@ class ArmRenderer:
 
         return canvas
 
+    def _draw_shadow(self, canvas, positions_3d, offset_x=0, offset_y=0):
+        """Project arm skeleton shadow onto the floor (table) plane.
+
+        Simulates a light source directly above, projecting each joint
+        position down to table_z_m and drawing the resulting silhouette.
+        """
+        floor_z = self.table_z_m if self.table_z_m is not None else -0.10
+        # Project each joint straight down to floor plane
+        shadow_3d = [np.array([p[0], p[1], floor_z]) for p in positions_3d]
+        projected = self.project_3d_to_2d(shadow_3d)
+        shadow_2d = [(x + offset_x, y + offset_y) for x, y, _ in projected]
+
+        # Draw shadow links as thin dark lines
+        shadow_color = (35, 30, 25)
+        for i in range(len(shadow_2d) - 1):
+            cv2.line(canvas, shadow_2d[i], shadow_2d[i + 1], shadow_color, 2)
+        # Shadow joint dots
+        for pt in shadow_2d[1:]:
+            cv2.circle(canvas, pt, 2, shadow_color, -1)
+
+    def _draw_drop_lines(self, canvas, positions_3d, offset_x=0, offset_y=0):
+        """Draw dashed vertical lines from each joint down to the floor.
+
+        These provide a strong visual cue for height and help disambiguate
+        the shoulder offset that makes the upper arm look sideways.
+        """
+        floor_z = self.table_z_m if self.table_z_m is not None else -0.10
+        drop_color = (60, 55, 50)
+
+        for i, p in enumerate(positions_3d):
+            if i == 0:
+                continue  # skip base
+            # Only draw if joint is above the floor
+            if p[2] <= floor_z + 0.005:
+                continue
+            top_pt = self.project_3d_to_2d([p])[0]
+            bot_3d = np.array([p[0], p[1], floor_z])
+            bot_pt = self.project_3d_to_2d([bot_3d])[0]
+
+            x1, y1 = top_pt[0] + offset_x, top_pt[1] + offset_y
+            x2, y2 = bot_pt[0] + offset_x, bot_pt[1] + offset_y
+
+            # Draw dashed line
+            self._draw_dashed_line(canvas, (x1, y1), (x2, y2),
+                                   drop_color, thickness=1, dash_len=4, gap_len=4)
+
+    @staticmethod
+    def _draw_dashed_line(canvas, pt1, pt2, color, thickness=1,
+                          dash_len=6, gap_len=4):
+        """Draw a dashed line between two points."""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 1:
+            return
+        ux, uy = dx / length, dy / length
+        pos = 0.0
+        while pos < length:
+            end = min(pos + dash_len, length)
+            p1 = (int(x1 + ux * pos), int(y1 + uy * pos))
+            p2 = (int(x1 + ux * end), int(y1 + uy * end))
+            cv2.line(canvas, p1, p2, color, thickness)
+            pos = end + gap_len
+
     def _draw_table(self, canvas, offset_x=0, offset_y=0):
-        """Draw a semi-transparent table surface at table_z_m."""
-        # Project 4 corners of a table rectangle at table height
+        """Draw a semi-transparent table surface at table_z_m with grid."""
         half = 0.30  # 300mm half-width
         corners_3d = [
             np.array([-half, -half, self.table_z_m]),
@@ -258,10 +368,89 @@ class ArmRenderer:
         cv2.fillPoly(overlay, [pts], (40, 35, 30))
         cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
         cv2.polylines(canvas, [pts], True, (80, 70, 60), 1)
+
+        # Draw grid lines on the table for spatial reference
+        grid_color = (55, 50, 45)
+        n_lines = 6  # lines per axis
+        step = 2 * half / n_lines
+        for i in range(1, n_lines):
+            t = -half + i * step
+            # Lines along X axis (constant Y)
+            p1 = self.project_3d_to_2d([np.array([-half, t, self.table_z_m])])[0]
+            p2 = self.project_3d_to_2d([np.array([+half, t, self.table_z_m])])[0]
+            cv2.line(canvas,
+                     (p1[0] + offset_x, p1[1] + offset_y),
+                     (p2[0] + offset_x, p2[1] + offset_y),
+                     grid_color, 1)
+            # Lines along Y axis (constant X)
+            p1 = self.project_3d_to_2d([np.array([t, -half, self.table_z_m])])[0]
+            p2 = self.project_3d_to_2d([np.array([t, +half, self.table_z_m])])[0]
+            cv2.line(canvas,
+                     (p1[0] + offset_x, p1[1] + offset_y),
+                     (p2[0] + offset_x, p2[1] + offset_y),
+                     grid_color, 1)
+
         # Label
         mid = pts.mean(axis=0).astype(int)
         cv2.putText(canvas, 'table', (mid[0] - 15, mid[1] + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 90, 80), 1)
+
+    def draw_axis_indicator(self, canvas, x=40, y=40, length=30):
+        """Draw a small XYZ axis indicator showing current view orientation.
+
+        Args:
+            canvas: BGR image to draw on.
+            x, y: Center position of the axis indicator.
+            length: Length of each axis arrow in pixels.
+        """
+        az = math.radians(self.azimuth)
+        el = math.radians(self.elevation)
+        cos_az, sin_az = math.cos(az), math.sin(az)
+        cos_el, sin_el = math.cos(el), math.sin(el)
+
+        # World axes -> screen space (same transform as project_3d_to_2d)
+        axes = {
+            'X': np.array([1, 0, 0]),
+            'Y': np.array([0, 1, 0]),
+            'Z': np.array([0, 0, 1]),
+        }
+        colors = {
+            'X': (0, 0, 220),    # red
+            'Y': (0, 180, 0),    # green
+            'Z': (220, 100, 0),  # blue
+        }
+
+        for label, axis in axes.items():
+            ax, ay, az_v = axis
+            # Rotate by azimuth around Z
+            x2 = ax * cos_az - ay * sin_az
+            y2 = ax * sin_az + ay * cos_az
+            # Rotate by elevation around X
+            z3 = y2 * sin_el + az_v * cos_el
+
+            sx = int(x + x2 * length)
+            sy = int(y - z3 * length)
+
+            cv2.arrowedLine(canvas, (x, y), (sx, sy), colors[label], 2,
+                            tipLength=0.25)
+            cv2.putText(canvas, label, (sx + 3, sy + 3),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, colors[label], 1)
+
+    def draw_view_hud(self, canvas, x=None, y=None):
+        """Draw a small HUD showing current azimuth/elevation angles.
+
+        Args:
+            canvas: BGR image to draw on.
+            x, y: Position. Defaults to bottom-left corner.
+        """
+        h, w = canvas.shape[:2]
+        if x is None:
+            x = 8
+        if y is None:
+            y = h - 12
+        text = f"Az:{self.azimuth:.0f} El:{self.elevation:.0f}"
+        cv2.putText(canvas, text, (x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 100), 1)
 
     def _draw_skeleton(self, canvas, points_2d, depths, color_override, thickness, draw_joints):
         """Draw line segments and joint circles with depth-based shading."""
@@ -354,6 +543,11 @@ class ArmRenderer:
         self.render(canvas, actual_angles,
                     label='Actual' if commanded_angles is not None else None,
                     offset_x=offset_x, offset_y=offset_y)
+
+        # Draw axis indicator and view HUD
+        if self.draw_axes:
+            self.draw_axis_indicator(canvas, x=offset_x + 40, y=offset_y + 40)
+            self.draw_view_hud(canvas, x=offset_x + 8)
 
         return canvas
 
