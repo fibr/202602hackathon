@@ -3628,6 +3628,8 @@ class LiveTwinView(BaseViewWidget):
         ctrl_layout = QVBoxLayout(ctrl)
 
         ctrl_layout.addWidget(section_label('View Controls'))
+        self._mesh_btn = make_button('Mesh View', self._toggle_mesh)
+        ctrl_layout.addWidget(self._mesh_btn)
         self._mv_btn = make_button('Toggle Multi-View', self._toggle_multiview)
         ctrl_layout.addWidget(self._mv_btn)
         ctrl_layout.addWidget(make_button('Toggle Angle Table', self._toggle_table))
@@ -3708,6 +3710,12 @@ class LiveTwinView(BaseViewWidget):
             self._render_label.setPixmap(QPixmap.fromImage(img))
         except Exception:
             pass
+
+    def _toggle_mesh(self):
+        if self._renderer:
+            self._renderer.render_mesh_mode = not self._renderer.render_mesh_mode
+            mode = 'Skeleton View' if self._renderer.render_mesh_mode else 'Mesh View'
+            self._mesh_btn.setText(mode)
 
     def _toggle_multiview(self):
         self._multi_view = not self._multi_view

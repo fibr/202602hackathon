@@ -5,10 +5,15 @@ to 2D for visualization.  Supports multiple view angles, mouse-drag
 rotation, shadow projection, and overlaying two arm configurations
 (commanded vs actual) for misconfiguration detection.
 
+Now also supports rendering the actual SO101 STL meshes from the URDF,
+with depth-sorted triangle rasterization for a solid 3D appearance.
+
 All rendering is pure OpenCV — no Isaac Sim, matplotlib, or other heavy deps.
 """
 
 import math
+import os
+import xml.etree.ElementTree as ET
 import numpy as np
 import cv2
 
@@ -17,6 +22,12 @@ try:
     HAS_PINOCCHIO = True
 except ImportError:
     HAS_PINOCCHIO = False
+
+try:
+    import trimesh
+    HAS_TRIMESH = True
+except ImportError:
+    HAS_TRIMESH = False
 
 
 # Joint chain: frame names in kinematic order.
@@ -55,6 +66,132 @@ _LINK_COLORS = [
 
 # Per-link thickness
 _LINK_THICKNESS = 3
+
+# Material colors (BGR) — from URDF material definitions
+_MAT_3D_PRINTED = (30, 209, 255)   # yellow-gold (rgba 1.0, 0.82, 0.12)
+_MAT_STS3215 = (30, 30, 30)        # dark (rgba 0.1, 0.1, 0.1)
+_MAT_DEFAULT = (160, 160, 160)     # gray fallback
+
+# Target face count per mesh after decimation (for real-time rendering).
+# With ~17 mesh parts, this gives ~13k total faces at ~8ms per frame.
+_MESH_TARGET_FACES = 800
+
+
+def _parse_urdf_visuals(urdf_path: str) -> dict[str, list[dict]]:
+    """Parse URDF to extract visual mesh info for each link.
+
+    Returns:
+        Dict mapping link_name -> list of dicts, each with keys:
+            'mesh': relative filename (e.g. 'assets/base_so101_v2.stl')
+            'origin_xyz': (x, y, z) translation
+            'origin_rpy': (r, p, y) rotation
+            'material': material name string
+    """
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+    result = {}
+    for link_el in root.findall('link'):
+        name = link_el.get('name')
+        visuals = []
+        for vis in link_el.findall('visual'):
+            geom = vis.find('geometry')
+            if geom is None:
+                continue
+            mesh_el = geom.find('mesh')
+            if mesh_el is None:
+                continue
+            entry = {
+                'mesh': mesh_el.get('filename', ''),
+                'origin_xyz': (0.0, 0.0, 0.0),
+                'origin_rpy': (0.0, 0.0, 0.0),
+                'material': '',
+            }
+            origin = vis.find('origin')
+            if origin is not None:
+                xyz_str = origin.get('xyz', '0 0 0')
+                rpy_str = origin.get('rpy', '0 0 0')
+                entry['origin_xyz'] = tuple(float(v) for v in xyz_str.split())
+                entry['origin_rpy'] = tuple(float(v) for v in rpy_str.split())
+            mat = vis.find('material')
+            if mat is not None:
+                entry['material'] = mat.get('name', '')
+            visuals.append(entry)
+        if visuals:
+            result[name] = visuals
+    return result
+
+
+def _rpy_to_matrix(rpy: tuple) -> np.ndarray:
+    """Convert roll-pitch-yaw to a 3x3 rotation matrix."""
+    r, p, y = rpy
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+    # ZYX convention (yaw * pitch * roll)
+    return np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr],
+    ])
+
+
+def _load_and_decimate_mesh(filepath: str, target_faces: int) -> trimesh.Trimesh:
+    """Load an STL mesh and decimate it for fast rendering.
+
+    Tries quadric decimation first; falls back to vertex clustering
+    if the fast_simplification extension isn't available.
+    """
+    mesh = trimesh.load(filepath)
+    if len(mesh.faces) <= target_faces:
+        return mesh
+
+    try:
+        mesh = mesh.simplify_quadric_decimation(target_faces)
+        return mesh
+    except Exception:
+        pass
+
+    # Fallback: vertex clustering — merge nearby vertices, which
+    # naturally reduces face count while preserving mesh topology.
+    # Determine grid cell size from target reduction ratio.
+    ratio = (len(mesh.faces) / target_faces) ** (1.0 / 3.0)
+    extents = mesh.bounding_box.extents
+    cell_size = float(np.mean(extents)) / max(8, 30 / ratio)
+
+    # Quantize vertices to grid
+    quantized = np.round(mesh.vertices / cell_size) * cell_size
+    # Map each vertex to its quantized representative
+    _, inverse, counts = np.unique(
+        quantized, axis=0, return_inverse=True, return_counts=True)
+    # Remap faces
+    new_faces = inverse[mesh.faces]
+    # Remove degenerate faces (where two or more vertices collapsed)
+    valid = ((new_faces[:, 0] != new_faces[:, 1]) &
+             (new_faces[:, 1] != new_faces[:, 2]) &
+             (new_faces[:, 0] != new_faces[:, 2]))
+    new_faces = new_faces[valid]
+    # Build new mesh with quantized vertices
+    unique_verts = np.zeros((inverse.max() + 1, 3))
+    np.add.at(unique_verts, inverse, mesh.vertices)
+    vert_counts = np.zeros(inverse.max() + 1)
+    np.add.at(vert_counts, inverse, 1.0)
+    unique_verts /= vert_counts[:, None].clip(1)
+
+    result = trimesh.Trimesh(vertices=unique_verts, faces=new_faces,
+                             process=True)
+    return result
+
+
+class _LinkMeshData:
+    """Pre-loaded mesh data for one visual element of a link."""
+    __slots__ = ('vertices', 'faces', 'color_bgr', 'origin_T')
+
+    def __init__(self, vertices: np.ndarray, faces: np.ndarray,
+                 color_bgr: tuple, origin_T: np.ndarray):
+        self.vertices = vertices      # (N, 3) float32
+        self.faces = faces            # (M, 3) int32 — triangle indices
+        self.color_bgr = color_bgr    # (B, G, R)
+        self.origin_T = origin_T      # 4x4 visual origin transform
 
 
 class ArmRenderer:
@@ -116,10 +253,69 @@ class ArmRenderer:
         self.draw_drop_lines = True  # vertical drop lines from joints to floor
         self.draw_axes = True       # XYZ axis indicator in corner
 
+        # Mesh rendering
+        self.render_mesh_mode = False   # False = skeleton (default), True = mesh
+        self._link_meshes = {}          # link_name -> list[_LinkMeshData]
+        self._urdf_path = urdf
+        self._mesh_loaded = False
+        self._mesh_load_error = None
+
         # Mouse drag state (managed externally by the view widget)
         self._drag_start = None
         self._drag_az_start = 0.0
         self._drag_el_start = 0.0
+
+    def _ensure_meshes_loaded(self):
+        """Lazy-load and decimate STL meshes on first use."""
+        if self._mesh_loaded:
+            return self._mesh_load_error is None
+        self._mesh_loaded = True
+
+        if not HAS_TRIMESH:
+            self._mesh_load_error = "trimesh not installed"
+            return False
+
+        try:
+            urdf_dir = os.path.dirname(self._urdf_path)
+            visuals = _parse_urdf_visuals(self._urdf_path)
+
+            mat_colors = {
+                '3d_printed': _MAT_3D_PRINTED,
+                'sts3215': _MAT_STS3215,
+            }
+
+            for link_name, vis_list in visuals.items():
+                mesh_data_list = []
+                for vis in vis_list:
+                    mesh_file = os.path.join(urdf_dir, vis['mesh'])
+                    if not os.path.isfile(mesh_file):
+                        continue
+
+                    mesh = _load_and_decimate_mesh(mesh_file, _MESH_TARGET_FACES)
+
+                    # Build 4x4 visual origin transform
+                    R = _rpy_to_matrix(vis['origin_rpy'])
+                    t = np.array(vis['origin_xyz'])
+                    T = np.eye(4)
+                    T[:3, :3] = R
+                    T[:3, 3] = t
+
+                    color = mat_colors.get(vis['material'], _MAT_DEFAULT)
+
+                    mesh_data_list.append(_LinkMeshData(
+                        vertices=np.array(mesh.vertices, dtype=np.float32),
+                        faces=np.array(mesh.faces, dtype=np.int32),
+                        color_bgr=color,
+                        origin_T=T,
+                    ))
+                if mesh_data_list:
+                    self._link_meshes[link_name] = mesh_data_list
+
+        except Exception as e:
+            self._mesh_load_error = str(e)
+            return False
+
+        return True
 
     def start_drag(self, x: int, y: int):
         """Begin a mouse-drag rotation. Call on mouse-press."""
@@ -283,6 +479,202 @@ class ArmRenderer:
             cv2.putText(canvas, label, (bx - 30, by + 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35,
                         color_override or (200, 200, 200), 1)
+
+        return canvas
+
+    def _project_points_batch(self, points_3d: np.ndarray) -> np.ndarray:
+        """Project an (N, 3) array of 3D points to (N, 3) screen coords.
+
+        Returns:
+            (N, 3) array with columns [screen_x, screen_y, depth].
+        """
+        az = math.radians(self.azimuth)
+        el = math.radians(self.elevation)
+        cos_az, sin_az = math.cos(az), math.sin(az)
+        cos_el, sin_el = math.cos(el), math.sin(el)
+
+        cx = self.width // 2
+        cy = int(self.height * 0.75)
+
+        # Shift by center offset
+        pts = points_3d - self.center_offset
+        x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+
+        # Azimuth rotation around Z
+        x2 = x * cos_az - y * sin_az
+        y2 = x * sin_az + y * cos_az
+
+        # Elevation rotation around X
+        y3 = y2 * cos_el - z * sin_el
+        z3 = y2 * sin_el + z * cos_el
+
+        # Perspective
+        persp = np.clip(1.0 + y3 * 0.8, 0.3, None)
+
+        sx = cx + x2 * self.zoom * persp
+        sy = cy - z3 * self.zoom * persp
+
+        return np.column_stack([sx, sy, y3])
+
+    def render_mesh(self, canvas: np.ndarray,
+                    motor_angles_deg: np.ndarray,
+                    draw_grid: bool = True,
+                    offset_x: int = 0, offset_y: int = 0) -> np.ndarray:
+        """Render the arm with actual STL meshes using depth-sorted triangles.
+
+        Falls back to skeleton rendering if meshes aren't available.
+
+        Args:
+            canvas: BGR image to draw on.
+            motor_angles_deg: 5 or 6 motor angles in degrees.
+            draw_grid: Whether to draw ground grid.
+            offset_x, offset_y: Pixel offset.
+
+        Returns:
+            The modified canvas.
+        """
+        if not self._ensure_meshes_loaded():
+            # Fall back to skeleton
+            return self.render(canvas, motor_angles_deg,
+                               draw_grid=draw_grid,
+                               offset_x=offset_x, offset_y=offset_y)
+
+        # Run FK to get frame transforms
+        q = self._motor_to_urdf(motor_angles_deg)
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+
+        # Draw table surface first
+        if draw_grid and self.table_z_m is not None:
+            self._draw_table(canvas, offset_x, offset_y)
+
+        # Light direction for diffuse shading (normalized)
+        light_dir = np.array([0.3, -0.4, 0.8])
+        light_dir /= np.linalg.norm(light_dir)
+
+        # Collect all triangles across all links for depth sorting
+        # Arrays: depths (N,), screen_pts (N, 3, 2), colors (N, 3)
+        all_depths = []
+        all_screen_pts = []
+        all_colors = []
+
+        for link_name, mesh_list in self._link_meshes.items():
+            # Get the frame transform for this link
+            fid = self.model.getFrameId(link_name)
+            if fid >= self.model.nframes:
+                continue
+            frame_T = self.data.oMf[fid].homogeneous  # 4x4
+
+            for md in mesh_list:
+                # Full transform: frame_T * visual_origin_T
+                world_T = frame_T @ md.origin_T
+                R = world_T[:3, :3]
+                t = world_T[:3, 3]
+
+                # Transform vertices to world frame
+                world_verts = (R @ md.vertices.T).T + t  # (N, 3)
+
+                # Project all vertices to screen in one batch
+                proj = self._project_points_batch(world_verts)  # (N, 3)
+                screen_xy = proj[:, :2] + np.array([offset_x, offset_y])
+                depths = proj[:, 2]
+
+                faces = md.faces
+                nf = len(faces)
+
+                # Face centroid depth for sorting
+                tri_depths = (depths[faces[:, 0]] + depths[faces[:, 1]] +
+                              depths[faces[:, 2]]) / 3.0
+
+                # Screen-space backface culling (skip faces whose screen
+                # winding is CW → back-facing in our projection)
+                sv0 = screen_xy[faces[:, 0]]
+                sv1 = screen_xy[faces[:, 1]]
+                sv2 = screen_xy[faces[:, 2]]
+                cross_z = ((sv1[:, 0] - sv0[:, 0]) * (sv2[:, 1] - sv0[:, 1]) -
+                           (sv1[:, 1] - sv0[:, 1]) * (sv2[:, 0] - sv0[:, 0]))
+                # Keep front-facing faces (negative cross = CW in screen)
+                # STL winding varies, so keep both large-magnitude faces and
+                # cull only degenerate (zero-area) triangles
+                keep = np.abs(cross_z) > 0.5
+
+                if not np.any(keep):
+                    continue
+
+                faces_k = faces[keep]
+                tri_depths_k = tri_depths[keep]
+
+                # World-space face normals for lighting
+                wv0 = world_verts[faces_k[:, 0]]
+                wv1 = world_verts[faces_k[:, 1]]
+                wv2 = world_verts[faces_k[:, 2]]
+                normals = np.cross(wv1 - wv0, wv2 - wv0)
+                norm_len = np.linalg.norm(normals, axis=1, keepdims=True)
+                normals = normals / np.maximum(norm_len, 1e-10)
+
+                # Diffuse lighting (vectorized)
+                ndotl = np.abs(normals @ light_dir)  # abs for double-sided
+                brightness = 0.35 + 0.65 * ndotl     # ambient + diffuse
+
+                # Per-face colors
+                base = np.array(md.color_bgr, dtype=np.float32)
+                face_colors = np.clip(
+                    np.outer(brightness, base), 0, 255
+                ).astype(np.int32)  # (nf, 3)
+
+                # Screen triangle vertices: (nf, 3, 2)
+                tri_screen = np.stack([
+                    screen_xy[faces_k[:, 0]],
+                    screen_xy[faces_k[:, 1]],
+                    screen_xy[faces_k[:, 2]],
+                ], axis=1).astype(np.int32)
+
+                all_depths.append(tri_depths_k)
+                all_screen_pts.append(tri_screen)
+                all_colors.append(face_colors)
+
+        if not all_depths:
+            return canvas
+
+        # Concatenate and sort by depth (painter's algorithm: far first)
+        depths_cat = np.concatenate(all_depths)
+        screen_cat = np.concatenate(all_screen_pts)
+        colors_cat = np.concatenate(all_colors)
+
+        order = np.argsort(-depths_cat)
+
+        # Render all triangles — must iterate but fillPoly is fast
+        for idx in order:
+            tri = screen_cat[idx]  # (3, 2)
+            c = colors_cat[idx]    # (3,)
+            cv2.fillPoly(canvas, [tri], (int(c[0]), int(c[1]), int(c[2])))
+
+        return canvas
+
+    def render_mesh_comparison(self, canvas: np.ndarray,
+                               motor_angles_deg: np.ndarray,
+                               draw_grid: bool = True,
+                               offset_x: int = 0,
+                               offset_y: int = 0) -> np.ndarray:
+        """Render mesh view with HUD elements (axis indicator, view info).
+
+        Args:
+            canvas: BGR image to draw on.
+            motor_angles_deg: Motor angles in degrees.
+            draw_grid: Whether to draw the ground grid.
+            offset_x, offset_y: Pixel offset.
+
+        Returns:
+            Modified canvas.
+        """
+        self.render_mesh(canvas, motor_angles_deg,
+                         draw_grid=draw_grid,
+                         offset_x=offset_x, offset_y=offset_y)
+
+        # Draw axis indicator and view HUD
+        if self.draw_axes:
+            self.draw_axis_indicator(canvas, x=offset_x + 40, y=offset_y + 40)
+            self.draw_view_hud(canvas, x=offset_x + 8)
 
         return canvas
 
@@ -517,8 +909,11 @@ class ArmRenderer:
                           offset_x: int = 0, offset_y: int = 0) -> np.ndarray:
         """Render actual arm state with optional commanded overlay.
 
+        When render_mesh_mode is True, renders the full 3D mesh.
+        Otherwise renders the skeleton (line/wireframe) view.
+
         The actual arm is drawn solid; the commanded pose is drawn as
-        a translucent green ghost for comparison.
+        a translucent green ghost for comparison (skeleton mode only).
 
         Args:
             canvas: BGR image to draw on.
@@ -529,6 +924,12 @@ class ArmRenderer:
         Returns:
             The modified canvas.
         """
+        if self.render_mesh_mode:
+            return self.render_mesh_comparison(
+                canvas, actual_angles,
+                draw_grid=True,
+                offset_x=offset_x, offset_y=offset_y)
+
         # Draw commanded first (ghost, behind)
         if commanded_angles is not None:
             self.render(canvas, commanded_angles,
