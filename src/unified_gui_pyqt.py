@@ -3630,7 +3630,7 @@ class LiveTwinView(BaseViewWidget):
         ctrl_layout.addWidget(section_label('View Controls'))
         self._mesh_btn = make_button('Mesh View', self._toggle_mesh)
         ctrl_layout.addWidget(self._mesh_btn)
-        self._mv_btn = make_button('Toggle Multi-View', self._toggle_multiview)
+        self._mv_btn = make_button('Single View', self._toggle_multiview)
         ctrl_layout.addWidget(self._mv_btn)
         ctrl_layout.addWidget(make_button('Toggle Angle Table', self._toggle_table))
         ctrl_layout.addWidget(make_button('Toggle Shadows', self._toggle_shadows))
@@ -3711,18 +3711,100 @@ class LiveTwinView(BaseViewWidget):
 
             w = max(400, self._render_label.width())
             h = max(300, self._render_label.height())
-            self._renderer.width = w
-            self._renderer.height = h
-            canvas = np.zeros((h, w, 3), dtype=np.uint8)
-            self._renderer.render_comparison(
-                canvas, self._actual_angles, self._commanded_angles)
-            if self._show_table and self._actual_angles:
-                self._renderer.render_angle_table(
+
+            if self._multi_view:
+                canvas = self._render_multiview(w, h)
+            else:
+                self._renderer.width = w
+                self._renderer.height = h
+                canvas = np.zeros((h, w, 3), dtype=np.uint8)
+                self._renderer.render_comparison(
                     canvas, self._actual_angles, self._commanded_angles)
+                if self._show_table and self._actual_angles:
+                    self._renderer.render_angle_table(
+                        canvas, self._actual_angles, self._commanded_angles)
+
             img = cv_to_qimage(canvas)
             self._render_label.setPixmap(QPixmap.fromImage(img))
         except Exception:
             pass
+
+    def _render_multiview(self, w, h):
+        """Render a 2x2 grid of orthographic views for full spatial coverage.
+
+        Panels (left-to-right, top-to-bottom):
+            Front (az=0, el=0)   | Side (az=90, el=0)
+            Iso  (az=45, el=30)  | Top  (az=0,  el=89)
+        """
+        import cv2 as _cv2
+
+        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        r = self._renderer
+
+        # Save renderer state we'll temporarily override
+        save_az = r.azimuth
+        save_el = r.elevation
+        save_w = r.width
+        save_h = r.height
+        save_axes = r.draw_axes
+
+        # Panel configuration: (label, azimuth, elevation)
+        panels = [
+            ('Front', 0.0,  0.0),
+            ('Side',  90.0, 0.0),
+            ('Iso',   45.0, 30.0),
+            ('Top',   0.0,  89.0),
+        ]
+
+        pw = w // 2
+        ph = h // 2
+
+        # Set panel dimensions; suppress the built-in axis/HUD so we can
+        # draw our own per-panel axis indicator and name label instead.
+        r.width = pw
+        r.height = ph
+        r.draw_axes = False
+
+        for i, (name, az, el) in enumerate(panels):
+            row = i // 2
+            col = i % 2
+            ox = col * pw
+            oy = row * ph
+
+            r.azimuth = az
+            r.elevation = el
+
+            # Render this panel onto the shared canvas using pixel offsets
+            r.render_comparison(
+                canvas, self._actual_angles, self._commanded_angles,
+                offset_x=ox, offset_y=oy)
+
+            # Per-panel axis indicator (top-left of each panel)
+            r.draw_axis_indicator(canvas, x=ox + 35, y=oy + 35)
+
+            # Panel name label
+            _cv2.putText(canvas, name, (ox + 5, oy + 15),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 180, 255), 1,
+                         _cv2.LINE_AA)
+
+        # Dividing lines between panels
+        _cv2.line(canvas, (pw, 0), (pw, h), (70, 70, 70), 1)
+        _cv2.line(canvas, (0, ph), (w, ph), (70, 70, 70), 1)
+
+        # Restore renderer state
+        r.azimuth = save_az
+        r.elevation = save_el
+        r.width = save_w
+        r.height = save_h
+        r.draw_axes = save_axes
+
+        # Angle table in the bottom-right (Top panel), below the panel label
+        if self._show_table and self._actual_angles:
+            r.render_angle_table(
+                canvas, self._actual_angles, self._commanded_angles,
+                x=pw + 6, y=ph + 32)
+
+        return canvas
 
     def _toggle_mesh(self):
         if self._renderer:
@@ -3732,6 +3814,7 @@ class LiveTwinView(BaseViewWidget):
 
     def _toggle_multiview(self):
         self._multi_view = not self._multi_view
+        self._mv_btn.setText('Single View' if self._multi_view else 'Multi-View')
 
     def _toggle_table(self):
         self._show_table = not self._show_table
