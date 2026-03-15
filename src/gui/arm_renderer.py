@@ -29,15 +29,17 @@ _JOINT_CHAIN = [
     'gripper_frame_link',
 ]
 
-# Short labels for each joint (drawn next to the joint circle)
+# Short labels for each frame in the chain.
+# Note: the label marks the joint AT that frame, i.e. the rotation
+# point between the incoming link and the outgoing link.
 _JOINT_LABELS = [
-    'Base',        # base_link
-    'J1:Pan',      # shoulder_link
-    'J2:Lift',     # upper_arm_link
-    'J3:Elbow',    # lower_arm_link
-    'J4:Wrist',    # wrist_link
-    'J5:Roll',     # gripper_link
-    'Grip',        # gripper_frame_link
+    'Base',        # base_link (fixed)
+    'J1',          # shoulder_link (pan rotation point)
+    'J2',          # upper_arm_link (lift rotation point)
+    'J3',          # lower_arm_link (elbow rotation point)
+    'J4',          # wrist_link (wrist flex rotation point)
+    'J5',          # gripper_link (wrist roll rotation point)
+    'TCP',         # gripper_frame_link (tool center point)
 ]
 
 # Colors for each link segment (BGR)
@@ -97,8 +99,8 @@ class ArmRenderer:
 
         # Camera parameters for 3D->2D projection
         # Viewpoint: azimuth and elevation in degrees
-        self.azimuth = -45.0   # degrees around Y axis
-        self.elevation = 30.0  # degrees above horizontal
+        self.azimuth = -30.0   # degrees around Y axis
+        self.elevation = 20.0  # degrees above horizontal
         self.zoom = 1200.0     # scale factor (pixels per meter)
         self.center_offset = np.array([0.0, 0.08, 0.0])  # world offset to center arm
         self.depth_shading = True  # darken links further from camera
