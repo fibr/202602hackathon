@@ -569,7 +569,7 @@ class ControlPanelView(BaseViewWidget):
         # Enable / Home / Safe
         ctrl_layout.addWidget(section_label('Robot Control'))
         eh_row = QHBoxLayout()
-        self._enable_btn = make_button('Servos ON', self._do_enable, color='#006400')
+        self._enable_btn = make_button('\u25cb Servos OFF', self._do_enable, color='#640000')
         eh_row.addWidget(self._enable_btn)
         eh_row.addWidget(make_button('Home', self._do_home, color='#644800'))
         eh_row.addWidget(make_button('Set Home', self._set_home, color='#4a3200',
@@ -662,9 +662,9 @@ class ControlPanelView(BaseViewWidget):
         # Update servo on/off button label
         if self._is_arm101():
             enabled = getattr(self.app.robot, '_enabled', False)
-            self._enable_btn.setText('Servos OFF' if enabled else 'Servos ON')
+            self._enable_btn.setText('\u25cf Servos ON' if enabled else '\u25cb Servos OFF')
             self._enable_btn.setStyleSheet(
-                f'background-color: {"#640000" if enabled else "#006400"}; '
+                f'background-color: {"#006400" if enabled else "#640000"}; '
                 f'color: white; padding: 4px; border-radius: 3px;')
         self._status_label.setText('\n'.join(lines) if lines else 'No robot')
 
@@ -1021,7 +1021,7 @@ class CheckerboardCalibView(BaseViewWidget):
         grip_row.addWidget(make_button('Grip Close', self._grip_close, color='#660000'))
         ctrl_layout.addLayout(grip_row)
 
-        self._calib_enable_btn = make_button('Servos ON', self._enable_robot, color='#006400')
+        self._calib_enable_btn = make_button('\u25cb Servos OFF', self._enable_robot, color='#640000')
         ctrl_layout.addWidget(self._calib_enable_btn)
 
         ctrl_layout.addWidget(make_button('< Back to Calibration',
@@ -1821,7 +1821,7 @@ class CheckerboardCalibView(BaseViewWidget):
             enabled = getattr(self.app.robot, '_enabled', False)
             btn = getattr(self, '_calib_enable_btn', None)
             if btn:
-                btn.setText('Servos OFF' if enabled else 'Servos ON')
+                btn.setText('\u25cf Servos ON' if enabled else '\u25cb Servos OFF')
                 btn.setStyleSheet(
                     f'background-color: {"#640000" if enabled else "#006400"}; '
                     f'color: white; padding: 4px; border-radius: 3px;')
@@ -3781,8 +3781,8 @@ class CubeTrackerView(BaseViewWidget):
         ctrl_layout = QVBoxLayout(ctrl)
 
         ctrl_layout.addWidget(section_label('Cube Tracker'))
-        self._track_btn = make_button('Start Tracking', self._toggle_tracking,
-                                       color='#006400')
+        self._track_btn = make_button('\u25cb Tracking OFF', self._toggle_tracking,
+                                       color='#640000')
         ctrl_layout.addWidget(self._track_btn)
 
         ctrl_layout.addWidget(QLabel('Hover height (mm):'))
@@ -3914,13 +3914,13 @@ class CubeTrackerView(BaseViewWidget):
         self._tracking = not self._tracking
         self._last_target = None
         if self._tracking:
-            self._track_btn.setText('Stop Tracking')
-            self._track_btn.setStyleSheet(
-                'background-color: #640000; color: white; padding: 4px;')
-        else:
-            self._track_btn.setText('Start Tracking')
+            self._track_btn.setText('\u25cf Tracking ON')
             self._track_btn.setStyleSheet(
                 'background-color: #006400; color: white; padding: 4px;')
+        else:
+            self._track_btn.setText('\u25cb Tracking OFF')
+            self._track_btn.setStyleSheet(
+                'background-color: #640000; color: white; padding: 4px;')
 
     def _adjust_height(self, delta):
         self._hover_height = max(0, self._hover_height + delta)
@@ -4186,9 +4186,9 @@ class UnifiedPyQtApp(QMainWindow):
         sb_layout.addWidget(self._nav_list)
 
         # Global servo toggle at bottom of sidebar (visible from all views)
-        self._servo_btn = QPushButton('Servos ON')
+        self._servo_btn = QPushButton('\u25cb Servos OFF')
         self._servo_btn.setStyleSheet(
-            'background-color: #006400; color: white; font-weight: bold; '
+            'background-color: #640000; color: white; font-weight: bold; '
             'padding: 8px; margin: 6px; border-radius: 4px;')
         self._servo_btn.clicked.connect(self._toggle_servos)
         sb_layout.addWidget(self._servo_btn)
@@ -4393,8 +4393,8 @@ class UnifiedPyQtApp(QMainWindow):
         else:
             mode = self.robot.get_mode()
             enabled = mode == 5
-        label = 'Servos OFF' if enabled else 'Servos ON'
-        color = '#640000' if enabled else '#006400'
+        label = '\u25cf Servos ON' if enabled else '\u25cb Servos OFF'
+        color = '#006400' if enabled else '#640000'
         self._servo_btn.setText(label)
         self._servo_btn.setStyleSheet(
             f'background-color: {color}; color: white; font-weight: bold; '
