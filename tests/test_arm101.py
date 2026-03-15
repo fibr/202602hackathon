@@ -122,7 +122,7 @@ def clear_servo_offsets():
             robot = LeRobotArm101('/dev/ttyACM0')  # No calibration coupled
             ...
     """
-    with mock.patch('robot.lerobot_arm101._load_servo_offsets', return_value={}):
+    with mock.patch('robot.lerobot_arm101._load_servo_offsets', return_value=({}, {})):
         yield
 
 
@@ -882,11 +882,12 @@ class TestServoOffsetsIsolation:
     use default POS_CENTER (2048) instead of calibrated values from disk.
     """
 
-    def test_clear_servo_offsets_fixture_returns_empty_dict(self, clear_servo_offsets):
-        """Verify the fixture mocks _load_servo_offsets to return empty dict."""
+    def test_clear_servo_offsets_fixture_returns_empty(self, clear_servo_offsets):
+        """Verify the fixture mocks _load_servo_offsets to return empty tuples."""
         from robot.lerobot_arm101 import _load_servo_offsets
-        offsets = _load_servo_offsets()
+        offsets, signs = _load_servo_offsets()
         assert offsets == {}
+        assert signs == {}
 
     def test_arm_with_fixture_has_no_nondefault_offsets(self, arm):
         """Verify arm created with fixture has no custom offsets (all default)."""

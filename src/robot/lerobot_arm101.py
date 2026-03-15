@@ -71,22 +71,33 @@ from config_loader import config_path as _config_path
 _SERVO_OFFSETS_PATH = _config_path('servo_offsets.yaml')
 
 
-def _load_servo_offsets() -> dict:
-    """Load per-motor zero offsets from config/servo_offsets.yaml.
+def _load_servo_offsets() -> tuple:
+    """Load per-motor zero offsets and signs from config/servo_offsets.yaml.
 
     Returns:
-        Dict mapping motor_id (int) -> zero_raw (int).
-        Missing motors default to POS_CENTER (2048).
+        (offsets, signs) where:
+        - offsets: Dict mapping motor_id (int) -> zero_raw (int).
+        - signs: Dict mapping motor_id (int) -> sign (float, +1 or -1).
     """
     path = os.path.normpath(_SERVO_OFFSETS_PATH)
     offsets = {}
+    signs = {}
     if os.path.exists(path):
         with open(path, 'r') as f:
             data = yaml.safe_load(f) or {}
         for name, info in data.get('zero_offsets', {}).items():
             if isinstance(info, dict) and 'motor_id' in info and 'zero_raw' in info:
                 offsets[info['motor_id']] = info['zero_raw']
-    return offsets
+        # Load joint signs
+        motor_name_to_id = {
+            'shoulder_pan': 1, 'shoulder_lift': 2, 'elbow_flex': 3,
+            'wrist_flex': 4, 'wrist_roll': 5,
+        }
+        for name, sign_val in data.get('joint_signs', {}).items():
+            mid = motor_name_to_id.get(name)
+            if mid is not None:
+                signs[mid] = float(sign_val)
+    return offsets, signs
 
 # Gripper positions (motor 6)
 GRIPPER_OPEN_POS = 2600
@@ -137,8 +148,8 @@ class LeRobotArm101:
         self.port_handler = PortHandler(port)
         self.packet_handler = PacketHandler(0)  # Protocol 0 for STS/SCS
 
-        # Per-motor zero offsets (raw position corresponding to 0°)
-        self._zero_offsets = _load_servo_offsets()
+        # Per-motor zero offsets and signs
+        self._zero_offsets, self._joint_signs = _load_servo_offsets()
         if self._zero_offsets:
             non_default = {mid: off for mid, off in self._zero_offsets.items()
                           if off != POS_CENTER}
@@ -512,10 +523,10 @@ class LeRobotArm101:
         return max(0, min(4095, pos))
 
     def _deg_to_pos_motor(self, deg: float, motor_id: int) -> int:
-        """Convert degrees to raw position using per-motor zero offset.
+        """Convert motor angle (degrees) to raw position using per-motor offset.
 
         Args:
-            deg: Angle in degrees (0° = calibrated zero for this motor).
+            deg: Motor angle in degrees (same convention as get_angles()).
             motor_id: Motor ID for offset lookup.
 
         Returns:
@@ -528,16 +539,15 @@ class LeRobotArm101:
     def _pos_to_deg_motor(self, pos: int, motor_id: int) -> float:
         """Convert raw position to degrees using per-motor zero offset.
 
-        Uses the calibrated zero_raw for motor_id (from servo_offsets.yaml)
-        as the baseline instead of POS_CENTER.  Falls back to _pos_to_deg()
-        if no offset is loaded for the motor.
+        Returns the motor angle without sign correction. The IK solver
+        applies joint signs when converting motor angles to URDF angles.
 
         Args:
             pos: Raw servo position (0-4095).
             motor_id: Motor ID for offset lookup.
 
         Returns:
-            Calibrated angle in degrees, or -999.0 on error.
+            Motor angle in degrees, or -999.0 on error.
         """
         if pos < 0:
             return -999.0
