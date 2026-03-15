@@ -33,4 +33,15 @@ if [ -n "$CV2_QT_FONTS" ] && [ ! -e "$CV2_QT_FONTS" ]; then
     fi
 fi
 
+# Ensure current user can access serial ports (needed for arm101 USB servo bus).
+# /dev/ttyACM* is owned by group 'dialout' on most Linux distros.
+if [ -e /dev/ttyACM0 ] || [ -e /dev/ttyUSB0 ]; then
+    if ! id -nG | grep -qw dialout; then
+        echo ""
+        echo "Adding $USER to 'dialout' group for serial port access..."
+        sudo usermod -aG dialout "$USER"
+        echo "✓ Added to dialout — log out and back in (or run: newgrp dialout)"
+    fi
+fi
+
 echo "✓ venv ready — run:  source .venv/bin/activate"
