@@ -74,8 +74,8 @@ class UnifiedApp:
 
         # View dimensions (camera area; sidebar is separate)
         sd = getattr(args, 'sd', False)
-        self.view_width = 640 if sd else 640  # default, views can override
-        self.view_height = 480
+        self.view_width = 640 if sd else 960
+        self.view_height = 480 if sd else 720
 
         # Sidebar state
         self._sidebar_items = []  # [(view_id, view_name, description)]
@@ -370,7 +370,8 @@ class UnifiedApp:
                 self.switch_view('home')
 
         # Create window
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_NAME, self.canvas_width, self.canvas_height)
         cv2.setMouseCallback(WINDOW_NAME, self._on_mouse)
 
         try:
