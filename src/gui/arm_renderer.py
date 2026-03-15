@@ -103,7 +103,7 @@ class ArmRenderer:
 
         # Table height relative to arm base (negative = below base)
         # Arm base is typically ~100mm above the table surface.
-        self.table_z_m = -0.10  # meters below base origin
+        self.table_z_m = 0.0  # table at arm base level
 
         # Camera parameters for 3D->2D projection
         # Default: 3/4 side view — shows depth much better than front view

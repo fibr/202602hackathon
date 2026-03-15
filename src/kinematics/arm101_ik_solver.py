@@ -31,7 +31,7 @@ _URDF_PATH = os.path.join(
 # Default per-joint sign correction: +1 = motor and URDF agree, -1 = inverted.
 # Order: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
 # These are used if servo_offsets.yaml does not contain a joint_signs section.
-_DEFAULT_JOINT_SIGNS = np.array([-1, +1, +1, +1, -1], dtype=float)
+_DEFAULT_JOINT_SIGNS = np.array([+1, +1, +1, +1, -1], dtype=float)
 
 _MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
                 'wrist_flex', 'wrist_roll']
@@ -70,8 +70,34 @@ def _load_joint_signs() -> np.ndarray:
     return _DEFAULT_JOINT_SIGNS.copy()
 
 
-# Module-level JOINT_SIGNS loaded from config (or defaults)
+def _load_urdf_offsets() -> np.ndarray:
+    """Load URDF joint offsets from config/servo_offsets.yaml if available.
+
+    These offsets bridge the convention gap between the servo zero position
+    and the URDF zero position (typically ±90° for shoulder/elbow).
+
+    Returns:
+        Array of 5 offset values in degrees.
+    """
+    path = os.path.normpath(_SERVO_OFFSETS_PATH)
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            offsets_data = data.get('urdf_offsets_deg')
+            if offsets_data and isinstance(offsets_data, dict):
+                return np.array([
+                    float(offsets_data.get(name, 0.0))
+                    for name in _MOTOR_NAMES
+                ], dtype=float)
+        except Exception:
+            pass
+    return np.zeros(5)
+
+
+# Module-level constants loaded from config (or defaults)
 JOINT_SIGNS = _load_joint_signs()
+JOINT_OFFSETS_DEG = _load_urdf_offsets()
 
 # Number of IK-controlled joints (exclude gripper)
 N_IK_JOINTS = 5

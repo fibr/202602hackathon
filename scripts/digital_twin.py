@@ -300,13 +300,14 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 print("[INFO]: Importing arm101 driver...", flush=True)
                 from robot.lerobot_arm101 import LeRobotArm101
 
-                # Load joint signs from servo_offsets.yaml (avoids importing
-                # Pinocchio which conflicts with Isaac Sim's Assimp library).
+                # Load joint signs + URDF offsets from servo_offsets.yaml
+                # (avoids importing Pinocchio which conflicts with Isaac Sim's Assimp).
                 import yaml
                 _SIGN_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                                "wrist_flex", "wrist_roll"]
-                _DEFAULT_SIGNS = np.array([-1.0, 1.0, -1.0, 1.0, 1.0])
+                _DEFAULT_SIGNS = np.array([1.0, 1.0, 1.0, 1.0, -1.0])
                 joint_signs = _DEFAULT_SIGNS.copy()
+                urdf_offsets_deg = np.zeros(5)
                 _offsets_path = os.path.expanduser(
                     "~/.config/202602hackathon/servo_offsets.yaml")
                 if os.path.exists(_offsets_path):
@@ -318,9 +319,17 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                             float(_sd.get(n, _DEFAULT_SIGNS[i]))
                             for i, n in enumerate(_SIGN_NAMES)
                         ])
-                    print(f"[INFO]: Loaded joint signs from {_offsets_path}", flush=True)
+                    _od = _data.get("urdf_offsets_deg") if _data else None
+                    if _od and isinstance(_od, dict):
+                        urdf_offsets_deg = np.array([
+                            float(_od.get(n, 0.0))
+                            for n in _SIGN_NAMES
+                        ])
+                    print(f"[INFO]: Loaded from {_offsets_path}", flush=True)
                 else:
                     print(f"[WARN]: {_offsets_path} not found, using defaults", flush=True)
+                print(f"[INFO]: Signs: {joint_signs}", flush=True)
+                print(f"[INFO]: URDF offsets: {urdf_offsets_deg}", flush=True)
 
                 port = LeRobotArm101.find_port()
                 print(f"[INFO]: Found port {port}, connecting...", flush=True)
@@ -369,11 +378,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 # Mirror real arm joint angles (convert motor→URDF via signs)
                 try:
                     motor_angles = real_arm.read_all_angles()  # 6 motor angles in degrees
-                    # Apply joint signs inline: urdf_rad = motor_deg * sign * pi/180
+                    # Apply signs + URDF offsets: urdf = (motor * sign + offset) * pi/180
                     motor_deg = np.array(motor_angles[:5], dtype=float)
+                    urdf_deg = motor_deg * joint_signs + urdf_offsets_deg
                     urdf_rad = np.zeros(6)
-                    urdf_rad[:5] = motor_deg * joint_signs * (math.pi / 180.0)
-                    # Include gripper (no sign correction)
+                    urdf_rad[:5] = np.radians(urdf_deg)
+                    # Include gripper (no sign/offset correction)
                     urdf_rad[5] = math.radians(motor_angles[5]) if len(motor_angles) > 5 else 0.0
                     targets = torch.tensor(
                         [urdf_rad.tolist()],
