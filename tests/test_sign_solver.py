@@ -37,7 +37,7 @@ except ImportError:
     HAS_CV2 = False
 
 try:
-    from gui.views.servo_direction_calib_view import (
+    from calibration.sign_solver import (
         _brute_force_signs, _pose_to_matrix)
     HAS_SIGN_SOLVER = True
 except Exception:

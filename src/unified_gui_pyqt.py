@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """PyQt5 reimplementation of the ArmRobotics Unified GUI.
 
-Every action that was previously keyboard-only now has a corresponding GUI
-button.  The sidebar, view switching, and resource management mirror the
-original OpenCV-based unified_gui.py.
+Every action has a corresponding GUI button — no keyboard-only actions.
+Sidebar navigation, view switching, and resource management all use PyQt5.
 
 Usage:
     ./run.sh src/unified_gui_pyqt.py                    # Launch with home view
@@ -25,16 +24,12 @@ import time
 from datetime import datetime
 from typing import Optional
 
-# Fix Qt plugin conflict: opencv-python ships its own Qt plugins which clash
-# with PyQt5.  Point Qt to PyQt5's plugins BEFORE any Qt import.
+# Qt plugin conflict prevention:
+# We use opencv-python-headless (no bundled Qt) to avoid clashing with PyQt5.
+# If someone accidentally installs opencv-python (non-headless), clear any
+# inherited Qt env vars so PyQt5's own plugins take precedence.
 os.environ.pop('QT_PLUGIN_PATH', None)
 os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
-try:
-    from PyQt5.QtCore import QLibraryInfo
-    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = QLibraryInfo.location(
-        QLibraryInfo.PluginsPath) + '/platforms'
-except Exception:
-    pass
 
 import cv2
 import numpy as np
@@ -795,7 +790,7 @@ class CalibrationView(BaseViewWidget):
         ('verify_calib', 'Verify Checkerboard',
          'Move arm above board corners to verify calibration'),
         ('servo_direction', 'Servo Direction Auto-Calib',
-         'Auto-detect servo signs + offsets via yellow tape (arm101)'),
+         'Auto-detect servo signs + offsets via ChArUco board (arm101)'),
     ]
 
     def __init__(self, app, parent=None):
@@ -1278,104 +1273,464 @@ class HandEyeYellowView(BaseViewWidget):
         self._status.setText(f'Captures: {len(self._captures)} (need >= 6)')
 
 
+class GripperCameraThread(QThread):
+    """Polls gripper camera (cv2.VideoCapture) and emits frames."""
+    frame_ready = pyqtSignal(np.ndarray)
+
+    def __init__(self, cap, parent=None):
+        super().__init__(parent)
+        self._cap = cap
+        self._running = True
+
+    def run(self):
+        while self._running:
+            ret, frame = self._cap.read()
+            if ret and frame is not None:
+                self.frame_ready.emit(frame)
+            time.sleep(0.033)
+
+    def stop(self):
+        self._running = False
+        self.wait(2000)
+
+
 class ServoDirectionCalibView(BaseViewWidget):
+    """Auto servo calibration using gripper camera + ChArUco board.
+
+    Opens the gripper-mounted camera (not the main RealSense) and detects
+    a ChArUco board.  The user moves the arm by hand to diverse poses
+    keeping the board visible, and captures raw servo positions + board pose.
+    The solver brute-forces all 32 sign combinations to find the best
+    offset/sign configuration.
+    """
     view_id = 'servo_direction'
     view_name = 'Servo Direction'
-    description = 'Auto-detect servo signs (arm101)'
+    description = 'Auto-detect servo signs + offsets via ChArUco (arm101)'
     show_in_sidebar = False
     parent_view_id = 'calibration'
 
+    MIN_CAPTURES = 6
+    GOOD_CAPTURES = 10
+
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
-        self._cam_thread = None
-        self._captures = []
+        self._gripper_cap = None
+        self._gripper_cam_thread = None
+        self._board_detector = None
+        self._solver = None
+        self._gripper_K = None
+        self._gripper_dist = None
+        self._captures = []  # list of {raw, T_board_in_cam, centroid_px}
+        self._result = None
+        self._current_frame = None
+        self._current_T_board = None
+        self._current_detection = None
+        self._current_raw = None
+        self._error_msg = ''
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        # Left: camera feed
+        cam_panel = QVBoxLayout()
+        self._cam_label = QLabel('Gripper Camera')
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setMinimumSize(480, 360)
+        self._cam_label.setStyleSheet('background-color: #1a1a1a;')
+        cam_panel.addWidget(self._cam_label)
+
+        self._detection_label = QLabel('')
+        self._detection_label.setStyleSheet('color: #aaa; font-family: monospace; font-size: 10px;')
+        cam_panel.addWidget(self._detection_label)
+        layout.addLayout(cam_panel, stretch=3)
+
+        # Right: controls
+        ctrl_scroll = QScrollArea()
+        ctrl_scroll.setWidgetResizable(True)
+        ctrl_scroll.setMaximumWidth(320)
+        ctrl_widget = QWidget()
+        ctrl_layout = QVBoxLayout(ctrl_widget)
 
         title = QLabel('Servo Direction Auto-Calibration')
-        title.setStyleSheet('font-size: 16px; font-weight: bold; color: #ffc864;')
-        layout.addWidget(title)
-        layout.addWidget(QLabel(
-            'Capture 8-12+ diverse poses with yellow tape visible.\n'
-            'Brute-forces all 32 sign combinations to find best fit.'))
+        title.setStyleSheet('font-size: 14px; font-weight: bold; color: #ffc864;')
+        ctrl_layout.addWidget(title)
 
-        self._status = QLabel('Captures: 0 (need >= 8, recommend 12+)')
-        self._status.setStyleSheet('color: #aaa; font-family: monospace;')
-        layout.addWidget(self._status)
+        ctrl_layout.addWidget(QLabel(
+            'Uses gripper camera + ChArUco board.\n'
+            'Move arm by hand to diverse poses,\n'
+            'keep board visible, press Capture.'))
 
-        self._cam_label = QLabel('Camera')
-        self._cam_label.setAlignment(Qt.AlignCenter)
-        self._cam_label.setMinimumSize(320, 240)
-        self._cam_label.setStyleSheet('background-color: #1a1a1a;')
-        layout.addWidget(self._cam_label)
+        self._status = QLabel(f'Captures: 0 (need >= {self.MIN_CAPTURES}, '
+                              f'{self.GOOD_CAPTURES}+ recommended)')
+        self._status.setStyleSheet('color: #aaa; font-family: monospace; font-size: 11px;')
+        self._status.setWordWrap(True)
+        ctrl_layout.addWidget(self._status)
 
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(make_button('Capture Pose', self._capture,
-                                      'Capture raw servo positions + yellow tape', '#506430'))
-        btn_row.addWidget(make_button('Solve (Brute-force)', self._solve,
-                                      'Brute-force all 32 sign combos', '#3c705a'))
-        btn_row.addWidget(make_button('Undo', self._undo, 'Remove last capture', '#644832'))
-        btn_row.addWidget(make_button('Reset All', self._reset, 'Clear all captures', '#643232'))
-        layout.addLayout(btn_row)
+        self._error_label = QLabel('')
+        self._error_label.setStyleSheet('color: #ff4444; font-size: 11px;')
+        self._error_label.setWordWrap(True)
+        ctrl_layout.addWidget(self._error_label)
 
-        btn_row2 = QHBoxLayout()
-        btn_row2.addWidget(make_button('< Back', lambda: self.app.switch_view('calibration'),
-                                       color='#444'))
-        layout.addLayout(btn_row2)
-        layout.addStretch()
+        # Action buttons
+        ctrl_layout.addWidget(section_label('Actions'))
+        ctrl_layout.addWidget(make_button('Capture Pose', self._capture,
+                                          'Capture raw servo positions + board pose', '#506430'))
+        ctrl_layout.addWidget(make_button('Solve (Brute-force)', self._solve,
+                                          'Test all 32 sign combos (need >= 6 captures)', '#3c705a'))
+        ctrl_layout.addWidget(make_button('Undo Last', self._undo,
+                                          'Remove last capture', '#644832'))
+        ctrl_layout.addWidget(make_button('Reset All', self._reset,
+                                          'Clear all captures', '#643232'))
+
+        # Results area
+        ctrl_layout.addWidget(section_label('Results'))
+        self._result_label = QLabel('No results yet')
+        self._result_label.setStyleSheet('color: #aaa; font-family: monospace; font-size: 10px;')
+        self._result_label.setWordWrap(True)
+        ctrl_layout.addWidget(self._result_label)
+
+        ctrl_layout.addWidget(make_button('< Back to Calibration',
+                                          lambda: self.app.switch_view('calibration'),
+                                          color='#444'))
+        ctrl_layout.addStretch()
+
+        ctrl_scroll.setWidget(ctrl_widget)
+        layout.addWidget(ctrl_scroll, stretch=1)
 
     def on_activate(self):
-        self.app.ensure_camera()
+        self._error_msg = ''
+        self._error_label.setText('')
+
+        # Robot check
         self.app.ensure_robot()
-        if self.app.robot and getattr(self.app.robot, 'robot_type', None) == 'arm101':
-            try:
-                self.app.robot.disable_torque()
-            except Exception:
-                pass
-        if self.app.camera:
-            self._cam_thread = CameraThread(self.app.camera)
-            self._cam_thread.frame_ready.connect(self._on_frame)
-            self._cam_thread.start()
+        robot = self.app.robot
+        if robot is None:
+            self._show_error('No robot connected')
+            return
+        if getattr(robot, 'robot_type', None) != 'arm101':
+            self._show_error('Servo direction calibration requires arm101')
+            return
+
+        try:
+            robot.disable_torque()
+            print('  Servo direction calib: torque disabled, move arm by hand')
+        except Exception as exc:
+            print(f'  WARNING: Could not disable torque: {exc}')
+
+        # FK solver
+        try:
+            from kinematics.arm101_ik_solver import Arm101IKSolver
+            self._solver = Arm101IKSolver()
+        except Exception as exc:
+            self._show_error(f'FK solver not available: {exc}')
+            return
+
+        # Board detector
+        try:
+            from vision.board_detector import BoardDetector
+            self._board_detector = BoardDetector.from_config(self.app.config)
+        except Exception as exc:
+            self._show_error(f'Board detector error: {exc}')
+            return
+
+        # Open gripper camera
+        gc = self.app.config.get('gripper_camera', {})
+        dev_idx = gc.get('device_index', 0)
+        width = gc.get('width', 640)
+        height = gc.get('height', 480)
+        print(f'  Opening gripper camera /dev/video{dev_idx}...')
+        self._gripper_cap = cv2.VideoCapture(dev_idx)
+        if not self._gripper_cap.isOpened():
+            self._show_error(f'Cannot open gripper camera (device {dev_idx})')
+            return
+        self._gripper_cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._gripper_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        # Flush initial frames
+        for _ in range(10):
+            self._gripper_cap.read()
+        print('  Gripper camera ready.')
+
+        # Load gripper camera intrinsics
+        self._gripper_K, self._gripper_dist = self._load_gripper_intrinsics()
+
+        # Start camera thread
+        self._gripper_cam_thread = GripperCameraThread(self._gripper_cap)
+        self._gripper_cam_thread.frame_ready.connect(self._on_frame)
+        self._gripper_cam_thread.start()
+
+        # Read-servo timer (10Hz)
+        self._servo_timer = QTimer()
+        self._servo_timer.timeout.connect(self._poll_servos)
+        self._servo_timer.start(100)
 
     def on_deactivate(self):
-        if self._cam_thread:
-            self._cam_thread.stop()
-            self._cam_thread = None
+        if hasattr(self, '_servo_timer'):
+            self._servo_timer.stop()
+        if self._gripper_cam_thread:
+            self._gripper_cam_thread.stop()
+            self._gripper_cam_thread = None
+        if self._gripper_cap is not None:
+            self._gripper_cap.release()
+            self._gripper_cap = None
+            print('  Gripper camera released')
         if self.app.robot and getattr(self.app.robot, 'robot_type', None) == 'arm101':
             try:
                 self.app.robot.enable_torque()
+                print('  Servo direction calib: torque re-enabled')
             except Exception:
                 pass
 
+    def _show_error(self, msg):
+        self._error_msg = msg
+        self._error_label.setText(msg)
+
+    def _load_gripper_intrinsics(self):
+        """Load gripper camera intrinsics from cameras.yaml or estimate."""
+        import yaml
+        import math
+        gc = self.app.config.get('gripper_camera', {})
+        dev_idx = gc.get('device_index', 0)
+        cam_yaml = config_path('cameras.yaml')
+
+        if os.path.exists(cam_yaml):
+            with open(cam_yaml) as fh:
+                cdata = yaml.safe_load(fh)
+            for cname, cinfo in (cdata or {}).get('cameras', {}).items():
+                if cinfo.get('device_index') == dev_idx:
+                    intr = cinfo.get('intrinsics', {})
+                    cm = intr.get('camera_matrix')
+                    dc = intr.get('dist_coeffs')
+                    if cm is not None:
+                        K = np.array(cm, dtype=np.float64)
+                        dist = np.array(dc or [0, 0, 0, 0, 0], dtype=np.float64)
+                        print(f'  Gripper intrinsics from {cname}: fx={K[0, 0]:.1f}')
+                        return K, dist
+
+        # Estimate from HFOV
+        w = gc.get('width', 640)
+        h = gc.get('height', 480)
+        hfov = gc.get('hfov_deg', 60.0)
+        fx = w / (2.0 * math.tan(math.radians(hfov / 2.0)))
+        K = np.array([[fx, 0, w / 2.0],
+                       [0, fx, h / 2.0],
+                       [0, 0, 1]], dtype=np.float64)
+        dist = np.zeros(5, dtype=np.float64)
+        print(f'  Gripper intrinsics estimated: fx={fx:.1f} (hfov={hfov} deg)')
+        return K, dist
+
+    def _poll_servos(self):
+        """Read raw servo positions at 10Hz."""
+        if self.app.robot is None:
+            return
+        try:
+            from calibration.calib_helpers import read_all_raw
+            self._current_raw = read_all_raw(self.app.robot)
+        except Exception:
+            self._current_raw = None
+
     def _on_frame(self, frame):
-        img = cv_to_qimage(frame)
+        """Process each gripper camera frame: detect board, update display."""
+        self._current_frame = frame
+        display = frame.copy()
+
+        # Detect ChArUco board
+        from calibration.calib_helpers import detect_corners, compute_board_pose
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        found, corners, detection = detect_corners(
+            gray, board_detector=self._board_detector)
+
+        self._current_detection = detection
+        self._current_T_board = None
+        n_corners = 0
+        reproj = None
+
+        if found and corners is not None:
+            n_corners = len(corners)
+            # Compute board pose
+            try:
+                T, _, reproj = compute_board_pose(
+                    corners, _SimpleIntrinsics(self._gripper_K, self._gripper_dist),
+                    detection, board_detector=self._board_detector)
+                self._current_T_board = T
+            except Exception:
+                pass
+
+            # Draw detected corners
+            if self._board_detector is not None and detection is not None:
+                self._board_detector.draw_corners(display, detection)
+            else:
+                corners_draw = corners.reshape(-1, 2).astype(int)
+                for pt in corners_draw:
+                    cv2.circle(display, tuple(pt), 3, (0, 255, 0), -1)
+
+        # Draw capture markers
+        for i, cap in enumerate(self._captures):
+            cx, cy = int(cap.get('centroid_px', [0, 0])[0]), \
+                     int(cap.get('centroid_px', [0, 0])[1])
+            cv2.drawMarker(display, (cx, cy), (0, 200, 0),
+                           cv2.MARKER_DIAMOND, 10, 1)
+            cv2.putText(display, str(i + 1), (cx + 8, cy - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 200, 0), 1)
+
+        # Detection status text
+        det_text = (f'Board: {n_corners} corners' if found
+                    else 'No board detected')
+        if reproj is not None:
+            det_text += f', reproj={reproj:.1f}px'
+        self._detection_label.setText(det_text)
+
+        # Convert and display
+        img = cv_to_qimage(display)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cam_label.setPixmap(pix)
 
     def _capture(self):
-        self._captures.append(time.time())
-        self._status.setText(f'Captures: {len(self._captures)} (need >= 8)')
-        print(f'  Captured #{len(self._captures)}')
+        """Capture current pose: raw servos + board pose in camera frame."""
+        if self._error_msg:
+            return
+
+        T_board = self._current_T_board
+        raw = self._current_raw
+
+        if T_board is None:
+            self._status.setText('SKIP: No board detected - point gripper camera at board')
+            return
+        if raw is None:
+            self._status.setText('SKIP: Cannot read servo positions')
+            return
+
+        # Duplicate check: board must have moved enough in camera frame
+        for prev in self._captures:
+            prev_t = prev['T_board_in_cam'][:3, 3]
+            cur_t = T_board[:3, 3]
+            dist_mm = float(np.linalg.norm(cur_t - prev_t) * 1000)
+            if dist_mm < 10:
+                self._status.setText(
+                    f'SKIP: Too similar (board moved {dist_mm:.0f}mm, need >10mm)')
+                return
+
+        # Corner centroid for visualization
+        detection = self._current_detection
+        if detection is not None and hasattr(detection, 'corners'):
+            corners_2d = detection.corners.reshape(-1, 2)
+        else:
+            corners_2d = np.zeros((0, 2))
+        centroid = corners_2d.mean(axis=0).tolist() if len(corners_2d) else [0, 0]
+
+        self._captures.append({
+            'raw': dict(raw),
+            'T_board_in_cam': T_board.copy(),
+            'centroid_px': centroid,
+        })
+        n = len(self._captures)
+        z_mm = T_board[2, 3] * 1000
+        self._status.setText(
+            f'Captured #{n}: board at z={z_mm:.0f}mm | '
+            f'{"Ready to solve! Press Solve" if n >= self.MIN_CAPTURES else f"need {self.MIN_CAPTURES - n} more"}')
+        self._result = None
+        print(f'  Captured #{n}: raw=[{",".join(str(raw[m]) for m in range(1, 6))}]')
 
     def _solve(self):
-        if len(self._captures) < 8:
-            self._status.setText(f'Need >= 8 captures, have {len(self._captures)}')
+        """Run brute-force sign detection across all 32 combinations."""
+        n = len(self._captures)
+        if n < self.MIN_CAPTURES:
+            self._status.setText(
+                f'Need >= {self.MIN_CAPTURES} captures (have {n})')
             return
-        print('  Running brute-force sign solve...')
-        self._status.setText('Solving (this may take a minute)...')
+
+        if self._solver is None:
+            self._status.setText('FK solver not available')
+            return
+
+        self._status.setText('Solving... (testing 32 sign combinations)')
+        QApplication.processEvents()
+
+        from calibration.calib_helpers import load_offsets
+        from calibration.sign_solver import (
+            _brute_force_signs, save_calibration_results, MOTOR_NAMES)
+
+        offsets = load_offsets()
+        current_offsets_raw = np.array([
+            offsets.get(name, {}).get('zero_raw', 2048)
+            for name in MOTOR_NAMES
+        ], dtype=float)
+
+        print(f'\n  Starting auto-calibration with {n} captures...')
+        result = _brute_force_signs(
+            self._captures, self._solver, current_offsets_raw, verbose=True)
+        self._result = result
+
+        # Display results
+        lines = [f'Signs: {result["signs_str"]}',
+                 f'Mean error: {result["mean_err_mm"]:.1f}mm']
+
+        quality = ('EXCELLENT' if result['mean_err_mm'] < 5 else
+                   'GOOD' if result['mean_err_mm'] < 15 else
+                   'OK' if result['mean_err_mm'] < 30 else 'POOR')
+        lines.append(f'Quality: {quality}')
+
+        ambiguous = result.get('ambiguous_joints', set())
+        if ambiguous:
+            names = [MOTOR_NAMES[j] for j in sorted(ambiguous)]
+            lines.append(f'Ambiguous: {", ".join(names)}')
+
+        try:
+            from kinematics.arm101_ik_solver import JOINT_SIGNS
+            for i, name in enumerate(MOTOR_NAMES):
+                old_s = '+' if JOINT_SIGNS[i] > 0 else '-'
+                new_s = '+' if result['signs'][i] > 0 else '-'
+                status = ('AMBIG' if i in ambiguous
+                          else 'CHANGED' if JOINT_SIGNS[i] != result['signs'][i]
+                          else 'ok')
+                offset = int(round(result['offsets_raw'][i]))
+                lines.append(f'  {name[:14]:<14} {old_s}->{new_s} [{status}] off={offset}')
+        except Exception:
+            pass
+
+        self._result_label.setText('\n'.join(lines))
+
+        # Save if quality is acceptable
+        if result['mean_err_mm'] < 30:
+            save_calibration_results(
+                result['signs'], result['offsets_raw'],
+                result.get('T_cam_in_tcp', np.eye(4)))
+            self._status.setText(
+                f'Solved & SAVED! signs={result["signs_str"]} '
+                f'err={result["mean_err_mm"]:.1f}mm')
+        else:
+            self._status.setText(
+                f'Solved but error is high ({result["mean_err_mm"]:.0f}mm). '
+                f'Collect more diverse poses.')
 
     def _undo(self):
         if self._captures:
             self._captures.pop()
-        self._status.setText(f'Captures: {len(self._captures)} (need >= 8)')
+            self._result = None
+            self._result_label.setText('No results yet')
+        n = len(self._captures)
+        self._status.setText(
+            f'Captures: {n} (need >= {self.MIN_CAPTURES})')
 
     def _reset(self):
         self._captures.clear()
-        self._status.setText('Captures: 0 (need >= 8)')
+        self._result = None
+        self._result_label.setText('No results yet')
+        self._status.setText(
+            f'Captures: 0 (need >= {self.MIN_CAPTURES}, '
+            f'{self.GOOD_CAPTURES}+ recommended)')
+
+
+class _SimpleIntrinsics:
+    """Minimal intrinsics wrapper for compute_board_pose()."""
+    def __init__(self, K, dist):
+        self.fx = K[0, 0]
+        self.fy = K[1, 1]
+        self.ppx = K[0, 2]
+        self.ppy = K[1, 2]
+        self.coeffs = dist.tolist() if hasattr(dist, 'tolist') else list(dist)
 
 
 class VerifyCalibView(BaseViewWidget):

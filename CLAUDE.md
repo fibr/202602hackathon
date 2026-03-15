@@ -15,15 +15,14 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 
 ### Unified GUI (recommended entry point)
 ```bash
-./run.sh src/unified_gui.py                          # Launch GUI with home view (config editor)
-./run.sh src/unified_gui.py --view control            # Jump to control panel
-./run.sh src/unified_gui.py --view calibration        # Jump to calibration tools
-./run.sh src/unified_gui.py --list                    # List all available views
-./run.sh src/unified_gui.py --headless --view discover # Run camera discovery without GUI
-./run.sh src/unified_gui.py --direct --view demo_cube  # Direct actuation (skip GUI)
-./run.sh src/unified_gui.py --no-camera --view control # Control panel without camera
-./run.sh src/unified_gui.py --safe --view control      # Safe mode (arm101)
-./run.sh src/unified_gui.py --view camera_overlay      # AR skeleton overlay on camera feed
+./run.sh src/unified_gui_pyqt.py                          # Launch GUI with home view (config editor)
+./run.sh src/unified_gui_pyqt.py --view control            # Jump to control panel
+./run.sh src/unified_gui_pyqt.py --view calibration        # Jump to calibration tools
+./run.sh src/unified_gui_pyqt.py --list                    # List all available views
+./run.sh src/unified_gui_pyqt.py --no-camera --view control # Control panel without camera
+./run.sh src/unified_gui_pyqt.py --safe --view control      # Safe mode (arm101)
+./run.sh src/unified_gui_pyqt.py --view camera_overlay      # AR skeleton overlay on camera feed
+./run.sh src/unified_gui_pyqt.py --no-robot --view home     # Config editor only (no robot)
 ```
 
 Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `digital_twin`, `live_twin`, `camera_overlay`, `verify_calib`. Use `--list` to see all with descriptions.
@@ -70,7 +69,7 @@ Inspect logs: `tail -f logs/*.log` or `cat logs/$(ls -t logs/ | head -1)`
 
 ## Dependencies
 
-Defined in `requirements.txt`: pyrealsense2, opencv-python, numpy, PyYAML, pin (Pinocchio), scipy. No other build system — just pip in a venv.
+Defined in `requirements.txt`: pyrealsense2, opencv-python-headless, numpy, PyYAML, PyQt5, pin (Pinocchio), scipy. No other build system — just pip in a venv. Uses opencv-python-headless (not opencv-python) to avoid Qt plugin conflicts with PyQt5.
 
 ## Architecture
 
@@ -78,9 +77,9 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 
 - `src/main.py` — State machine orchestrator (INIT → DETECT → PLAN → EXECUTE → DONE)
 - `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge); `connect_robot(config)` factory returns connected robot based on `robot_type`
-- `src/unified_gui.py` — Unified GUI entry point with sidebar navigation and view switching
-- `src/gui/views/` — View registry + per-script view wrappers (home, control, calibration, dataset, etc.)
-- `src/gui/robot_controls.py` — Shared OpenCV GUI panel for robot arm control (XY jog pad, Z, gripper, speed, enable/home, status)
+- `src/unified_gui_pyqt.py` — PyQt5 unified GUI: sidebar navigation, all views, all actions via buttons
+- `src/gui/robot_controls.py` — Shared OpenCV GUI panel for standalone scripts (control_panel.py, etc.)
+- `src/calibration/sign_solver.py` — Brute-force servo sign/offset solver (ChArUco-based, used by servo direction calib)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
 - `src/kinematics/ik_solver.py` — Local IK/FK using Pinocchio + Nova5 URDF (~0.8ms per solve)
@@ -151,7 +150,7 @@ All public interfaces use mm and degrees. Internal math uses meters and radians.
 Recommended order after assembling the arm:
 
 1. **Camera intrinsics** — `[1] Checkerboard` in calibration menu. Captures checkerboard images, saves intrinsics to `config/cameras.yaml`.
-2. **Servo direction + offset auto-calib** — `[5] Servo Direction Auto-Calib` in calibration menu. Attach yellow tape to gripper TCP, move arm to 8-12+ diverse poses, press SPACE at each. Press S to auto-solve: brute-forces all 32 sign combinations, picks the one with lowest reprojection error. Saves signs + offsets to `config/servo_offsets.yaml`.
+2. **Servo direction + offset auto-calib** — `Servo Direction Auto-Calib` in calibration menu. Place ChArUco board under the arm, move arm to 8-12+ diverse poses keeping board visible in gripper camera, click Capture at each. Click Solve to brute-force all 32 sign combinations. Saves signs + offsets to `config/servo_offsets.yaml`.
 3. **Hand-eye calibration** — `[3] Hand-Eye (Yellow Tape)` in calibration menu. Reuses the corrected signs/offsets. Collect 6+ FK+pixel correspondences, press S to jointly optimize remaining offset refinement + camera extrinsics.
 
 The servo direction auto-calibration (step 2) replaces the old manual "move arm to zero pose" workflow. It automatically determines:
