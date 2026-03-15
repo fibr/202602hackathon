@@ -94,4 +94,4 @@ arm101:
   jog_step_deg: 5.0           # Joint jog step size in degrees
   gripper_open_pos: 1800      # Gripper open raw position
   gripper_close_pos: 2600     # Gripper close raw position
-  home_angles: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Home position in degrees (0° = center)
+  home_angles: [0.0, 0.0, 90.0, 90.0, 0.0, 0.0]  # Safe home: arm folded, gripper facing down
