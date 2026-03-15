@@ -45,6 +45,19 @@ if [ "$ROBOT_TYPE" = "nova5" ]; then
     fi
 fi
 
+# Suppress OpenCV Qt font warnings by pointing Qt to system fonts if the cv2
+# bundled fonts directory is missing (Qt spams "QFontDatabase: Cannot find font
+# directory .../cv2/qt/fonts" without this).
+CV2_QT_FONTS=$(.venv/bin/python -c "import cv2, os; print(os.path.join(os.path.dirname(cv2.__file__), 'qt', 'fonts'))" 2>/dev/null || true)
+if [ -n "$CV2_QT_FONTS" ] && [ ! -e "$CV2_QT_FONTS" ]; then
+    for d in /usr/share/fonts/truetype/dejavu /usr/share/fonts/truetype /usr/share/fonts; do
+        if [ -d "$d" ]; then
+            export QT_QPA_FONTDIR="$d"
+            break
+        fi
+    done
+fi
+
 # Shell scripts run directly; Python scripts run in venv
 if [[ "$1" == *.sh ]]; then
     exec bash "$@"
