@@ -26,6 +26,7 @@ import time
 import cv2
 import numpy as np
 
+from config_loader import config_path
 from gui.views.base import BaseView, ViewRegistry
 from calibration.calib_helpers import (
     find_yellow_tape,
@@ -279,7 +280,7 @@ def save_calibration_results(signs, offsets_raw, T_c2b):
     import yaml
 
     # Save offsets + signs
-    offset_file = os.path.join(_PROJECT_ROOT, 'config', 'servo_offsets.yaml')
+    offset_file = config_path('servo_offsets.yaml')
     offsets_dict = {}
     for i, name in enumerate(MOTOR_NAMES):
         offsets_dict[name] = {
@@ -400,7 +401,7 @@ class ServoDirectionCalibView(BaseView):
         import yaml
         cam_cfg = self.app.config.get('camera', {})
         cam_idx = cam_cfg.get('device_index', 4)
-        cam_yaml = os.path.join(_PROJECT_ROOT, 'config', 'cameras.yaml')
+        cam_yaml = config_path('cameras.yaml')
 
         if os.path.exists(cam_yaml):
             with open(cam_yaml) as fh:

@@ -12,7 +12,7 @@ import numpy as np
 # Add parent to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config_loader import load_config
+from config_loader import load_config, config_path
 from logger import get_logger, get_log_file
 from vision import RodDetector, create_camera, VisualServo, make_green_cube_detector
 from calibration import CoordinateTransform
@@ -219,7 +219,7 @@ def main():
     )
 
     transform = CoordinateTransform()
-    calibration_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'calibration.yaml')
+    calibration_path = config_path('calibration.yaml')
     if os.path.exists(calibration_path):
         transform.load(calibration_path)
         log.info(f"Loaded calibration from {calibration_path}")

@@ -15,6 +15,7 @@ import time
 import cv2
 import numpy as np
 
+from config_loader import config_path
 from gui.views.base import BaseView, ViewRegistry
 from calibration.calib_helpers import (
     OFFSET_FILE,
@@ -283,7 +284,7 @@ class HandEyeYellowView(BaseView):
         import yaml
         cam_cfg = self.app.config.get('camera', {})
         cam_idx = cam_cfg.get('device_index', 4)
-        cam_yaml = os.path.join(_PROJECT_ROOT, 'config', 'cameras.yaml')
+        cam_yaml = config_path('cameras.yaml')
 
         if os.path.exists(cam_yaml):
             with open(cam_yaml) as fh:

@@ -40,8 +40,8 @@ _MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
 JOINT_OFFSETS_DEG = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
 
 # Servo offsets config path
-_SERVO_OFFSETS_PATH = os.path.join(
-    os.path.dirname(__file__), '..', '..', 'config', 'servo_offsets.yaml')
+from config_loader import config_path as _config_path
+_SERVO_OFFSETS_PATH = _config_path('servo_offsets.yaml')
 
 
 def _load_joint_signs() -> np.ndarray:

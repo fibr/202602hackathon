@@ -29,7 +29,10 @@ elif [ requirements.txt -nt .venv/.deps_installed ]; then
 fi
 
 # Ensure ROS2 dobot driver is running (only for nova5, not arm101)
-ROBOT_TYPE=$(grep -m1 '^robot_type:' config/robot_config.yaml 2>/dev/null | awk '{print $2}' || echo "nova5")
+# Config: prefer ~/.config/202602hackathon, fall back to local config/
+_CONFIG_DIR="${HOME}/.config/202602hackathon"
+[ -d "$_CONFIG_DIR" ] || _CONFIG_DIR="config"
+ROBOT_TYPE=$(grep -m1 '^robot_type:' "$_CONFIG_DIR/robot_config.yaml" 2>/dev/null | awk '{print $2}' || echo "nova5")
 if [ "$ROBOT_TYPE" = "nova5" ]; then
     if command -v docker &>/dev/null; then
         if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dobot-driver$'; then

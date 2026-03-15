@@ -66,8 +66,8 @@ POS_PER_DEG = 4096.0 / 360.0   # ~11.378 steps per degree
 DEG_PER_POS = 360.0 / 4096.0   # ~0.0879 degrees per step
 
 # Per-motor zero offsets file
-_SERVO_OFFSETS_PATH = os.path.join(
-    os.path.dirname(__file__), '..', '..', 'config', 'servo_offsets.yaml')
+from config_loader import config_path as _config_path
+_SERVO_OFFSETS_PATH = _config_path('servo_offsets.yaml')
 
 
 def _load_servo_offsets() -> dict:

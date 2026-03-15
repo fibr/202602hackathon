@@ -35,6 +35,7 @@ import time
 import cv2
 import numpy as np
 
+from config_loader import config_path
 from gui.views.base import BaseView, ViewRegistry
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from vision.board_detector import BoardDetector, BoardDetection
@@ -88,8 +89,7 @@ class CheckerboardCalibView(BaseView):
         # Intrinsics calibration state
         self._intr_frames = []        # [(obj_pts, img_pts)] legacy path
         self._intr_detections = []    # [BoardDetection] for BoardDetector path
-        self._intr_path = os.path.join(_PROJECT_ROOT, 'config',
-                                       'camera_intrinsics.yaml')
+        self._intr_path = config_path('camera_intrinsics.yaml')
 
         # Ground-plane calibration state
         self._plane_samples = []      # [(normal_vec, distance)]
@@ -182,7 +182,7 @@ class CheckerboardCalibView(BaseView):
         self._panel.panel_height = view_h
 
         # Load existing calibration for robot-joint overlay
-        calib_path = os.path.join(_PROJECT_ROOT, 'config', 'calibration.yaml')
+        calib_path = config_path('calibration.yaml')
         if os.path.exists(calib_path):
             try:
                 from calibration import CoordinateTransform
@@ -731,7 +731,7 @@ class CheckerboardCalibView(BaseView):
             for n in normals]
         max_angle = float(max(angles_deg))
 
-        plane_path = os.path.join(_PROJECT_ROOT, 'config', 'ground_plane.yaml')
+        plane_path = config_path('ground_plane.yaml')
         os.makedirs(os.path.dirname(plane_path), exist_ok=True)
         data = {
             'plane_normal': avg_normal.tolist(),
@@ -792,7 +792,7 @@ class CheckerboardCalibView(BaseView):
 
         ct = CoordinateTransform()
         ct.T_camera_to_base = T_cam2base
-        out_path = os.path.join(_PROJECT_ROOT, 'config', 'calibration.yaml')
+        out_path = config_path('calibration.yaml')
         ct.save(out_path)
         print(f'Saved to {out_path}')
 

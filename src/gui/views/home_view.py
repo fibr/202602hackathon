@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import yaml
 
+from config_loader import config_path
 from gui.views.base import BaseView, ViewRegistry
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -260,7 +261,7 @@ class HomeView(BaseView):
 
     def _save_edit(self):
         """Save edited value to settings.yaml (local overrides)."""
-        settings_path = os.path.join(_PROJECT_ROOT, 'config', 'settings.yaml')
+        settings_path = config_path('settings.yaml')
 
         # Load existing settings
         settings = {}

@@ -3,6 +3,30 @@
 import os
 import yaml
 
+# Shared config directory: ~/.config/202602hackathon/
+# Falls back to the local config/ directory in the repo if the shared one
+# doesn't exist (e.g. fresh clone without setup).
+_LOCAL_CONFIG_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), '..', 'config'))
+_SHARED_CONFIG_DIR = os.path.join(
+    os.path.expanduser('~'), '.config', '202602hackathon')
+
+
+def get_config_dir() -> str:
+    """Return the active config directory path.
+
+    Prefers ~/.config/202602hackathon/ if it exists, otherwise falls back
+    to the local config/ directory next to the repo root.
+    """
+    if os.path.isdir(_SHARED_CONFIG_DIR):
+        return _SHARED_CONFIG_DIR
+    return _LOCAL_CONFIG_DIR
+
+
+def config_path(filename: str) -> str:
+    """Return the full path to a config file in the active config directory."""
+    return os.path.join(get_config_dir(), filename)
+
 
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge override dict into base dict."""
@@ -14,15 +38,15 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return base
 
 
-def load_config(config_path: str = None) -> dict:
+def load_config(cfg_path: str = None) -> dict:
     """Load configuration from robot_config.yaml, with settings.yaml overrides."""
-    if config_path is None:
-        config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'robot_config.yaml')
-    with open(config_path, 'r') as f:
+    if cfg_path is None:
+        cfg_path = os.path.join(get_config_dir(), 'robot_config.yaml')
+    with open(cfg_path, 'r') as f:
         config = yaml.safe_load(f)
 
     # Apply local settings overrides if present
-    settings_path = os.path.join(os.path.dirname(config_path), 'settings.yaml')
+    settings_path = os.path.join(os.path.dirname(cfg_path), 'settings.yaml')
     if os.path.exists(settings_path):
         with open(settings_path, 'r') as f:
             overrides = yaml.safe_load(f)

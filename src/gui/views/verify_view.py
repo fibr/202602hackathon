@@ -48,6 +48,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from config_loader import config_path
 from gui.views.base import BaseView, ViewRegistry
 from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from robot.motion_utils import move_to_pose
@@ -140,7 +141,7 @@ class VerifyCalibView(BaseView):
             self._board_detector = None
 
         # Load calibration
-        calib_path = os.path.join(_PROJECT_ROOT, 'config', 'calibration.yaml')
+        calib_path = config_path('calibration.yaml')
         if not os.path.exists(calib_path):
             self._state = _S_ERROR
             self._error_msg = (

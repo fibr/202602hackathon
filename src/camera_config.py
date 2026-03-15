@@ -26,7 +26,8 @@ import yaml
 
 
 # Default config path
-_CONFIG_DIR = os.path.join(os.path.dirname(__file__), '..', 'config')
+from config_loader import get_config_dir
+_CONFIG_DIR = get_config_dir()
 _CAMERAS_YAML = os.path.join(_CONFIG_DIR, 'cameras.yaml')
 
 

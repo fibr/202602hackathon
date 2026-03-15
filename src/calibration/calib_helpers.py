@@ -46,8 +46,9 @@ DEG_PER_POS = 360.0 / 4096.0
 
 _PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..'))
-OFFSET_FILE = os.path.join(_PROJECT_ROOT, 'config', 'servo_offsets.yaml')
-HANDEYE_FILE = os.path.join(_PROJECT_ROOT, 'config', 'calibration_arm101.yaml')
+from config_loader import config_path as _config_path
+OFFSET_FILE = _config_path('servo_offsets.yaml')
+HANDEYE_FILE = _config_path('calibration_arm101.yaml')
 
 # --- Checkerboard / geometry ---
 

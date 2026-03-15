@@ -19,8 +19,8 @@ except ImportError:
 
 
 # Default path for calibrated intrinsics
-_INTRINSICS_PATH = os.path.join(
-    os.path.dirname(__file__), '..', '..', 'config', 'camera_intrinsics.yaml')
+from config_loader import config_path as _config_path
+_INTRINSICS_PATH = _config_path('camera_intrinsics.yaml')
 
 
 class CameraIntrinsics:
