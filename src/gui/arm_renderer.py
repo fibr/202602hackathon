@@ -949,12 +949,34 @@ class ArmRenderer:
                     label='Actual' if commanded_angles is not None else None,
                     offset_x=offset_x, offset_y=offset_y)
 
+        # Draw target marker (cube hover target)
+        if self.target_pos_mm is not None:
+            self._draw_target_marker(canvas, self.target_pos_mm,
+                                     offset_x, offset_y)
+
         # Draw axis indicator and view HUD
         if self.draw_axes:
             self.draw_axis_indicator(canvas, x=offset_x + 40, y=offset_y + 40)
             self.draw_view_hud(canvas, x=offset_x + 8)
 
         return canvas
+
+    def _draw_target_marker(self, canvas, pos_mm, offset_x=0, offset_y=0):
+        """Draw a crosshair marker at a target position (mm in base frame)."""
+        pos_m = np.array(pos_mm) / 1000.0
+        projected = self.project_3d_to_2d([pos_m])
+        sx, sy, _ = projected[0]
+        sx += offset_x
+        sy += offset_y
+        h, w = canvas.shape[:2]
+        if 0 <= sx < w and 0 <= sy < h:
+            size = 10
+            color = (0, 200, 255)  # orange/yellow
+            cv2.drawMarker(canvas, (int(sx), int(sy)), color,
+                           cv2.MARKER_CROSS, size * 2, 2)
+            cv2.circle(canvas, (int(sx), int(sy)), size, color, 1)
+            cv2.putText(canvas, 'target', (int(sx) + size + 3, int(sy) - 3),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
 
     def draw_on_camera_frame(self, canvas: np.ndarray,
                              motor_angles_deg: np.ndarray,

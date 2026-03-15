@@ -3696,6 +3696,19 @@ class LiveTwinView(BaseViewWidget):
         if self._renderer is None or self._actual_angles is None:
             return
         try:
+            # Feed camera to cube tracker (so detection persists across views)
+            tracker = self.app.cube_tracker
+            if self.app.camera:
+                try:
+                    color, _, _ = self.app.camera.get_frames()
+                    if color is not None:
+                        tracker.update(color)
+                except Exception:
+                    pass
+
+            # Pass cube target to renderer for visualization
+            self._renderer.target_pos_mm = tracker.target_pos_mm
+
             w = max(400, self._render_label.width())
             h = max(300, self._render_label.height())
             self._renderer.width = w
@@ -3752,6 +3765,12 @@ class LiveTwinView(BaseViewWidget):
 # ---------------------------------------------------------------------------
 
 class CubeTrackerView(BaseViewWidget):
+    """Cube tracker view — thin wrapper around app.cube_tracker.
+
+    Shows camera feed with cube detection overlay + tracking controls.
+    The actual detection and tracking logic lives in AppCubeTracker
+    so it persists when switching to other views (e.g. Live Twin).
+    """
     view_id = 'cube_tracker'
     view_name = 'Cube Tracker'
     description = 'Hover arm above green cube'
@@ -3759,13 +3778,6 @@ class CubeTrackerView(BaseViewWidget):
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self._cam_thread = None
-        self._tracking = False
-        self._hover_height = 30.0  # mm above cube
-        self._speed = 200
-        self._solver = None
-        self._transform = None
-        self._last_target = None
-        self._status_text = ''
         self._build_ui()
 
     def _build_ui(self):
@@ -3788,7 +3800,8 @@ class CubeTrackerView(BaseViewWidget):
         ctrl_layout.addWidget(QLabel('Hover height (mm):'))
         height_row = QHBoxLayout()
         height_row.addWidget(make_button('-10', lambda: self._adjust_height(-10)))
-        self._height_label = QLabel(f'{self._hover_height:.0f}')
+        tracker = self.app.cube_tracker
+        self._height_label = QLabel(f'{tracker.hover_height_mm:.0f}')
         self._height_label.setAlignment(Qt.AlignCenter)
         self._height_label.setStyleSheet('color: #0af; font-size: 14px; font-weight: bold;')
         height_row.addWidget(self._height_label)
@@ -3807,124 +3820,70 @@ class CubeTrackerView(BaseViewWidget):
     def on_activate(self):
         self.app.ensure_camera()
         self.app.ensure_robot()
-
-        # Load calibration
-        cal_path = config_path('calibration.yaml')
-        if os.path.exists(cal_path):
-            from calibration import CoordinateTransform
-            self._transform = CoordinateTransform()
-            self._transform.load(cal_path)
-        else:
-            self._status_label.setText('ERROR: No calibration.yaml')
-
-        try:
-            from kinematics.arm101_ik_solver import Arm101IKSolver
-            self._solver = Arm101IKSolver()
-        except Exception as e:
-            self._status_label.setText(f'IK error: {e}')
-
+        # Sync button state with app-level tracker
+        self._sync_btn()
         if self.app.camera:
             self._cam_thread = CameraThread(self.app.camera)
             self._cam_thread.frame_ready.connect(self._on_frame)
             self._cam_thread.start()
 
     def on_deactivate(self):
-        self._tracking = False
+        # NOTE: do NOT stop tracking here — it persists at app level
         if self._cam_thread:
             self._cam_thread.stop()
             self._cam_thread = None
 
     def _on_frame(self, frame):
-        from vision.green_cube_detector import detect_green_cubes, annotate_frame
+        from vision.green_cube_detector import annotate_frame
 
-        cubes, info = detect_green_cubes(frame)
+        tracker = self.app.cube_tracker
+        cubes = tracker.update(frame)
         display = annotate_frame(frame, cubes)
-        h, w = display.shape[:2]
 
-        if cubes and self._transform:
-            cube = cubes[0]
-            # Intersect pixel ray with cube-center plane (table + 10mm)
-            cube_center_z_mm = 10.0  # 20mm cube, center at 10mm above table
-            intr = self.app.camera.intrinsics
-            ray_cam = np.array([
-                (cube.cx - intr.ppx) / intr.fx,
-                (cube.cy - intr.ppy) / intr.fy,
-                1.0
-            ])
-            T = self._transform.T_camera_to_base
-            ray_base = T[:3, :3] @ ray_cam
-            origin_base = T[:3, 3]  # mm
-            if abs(ray_base[2]) > 1e-6:
-                s = (cube_center_z_mm - origin_base[2]) / ray_base[2]
-                p_base_mm = origin_base + s * ray_base
-            else:
-                p_cam = self.app.camera.pixel_to_3d(cube.cx, cube.cy, None)
-                p_base_mm = self._transform.camera_to_base(p_cam * 1000.0)
-
-            target_mm = p_base_mm.copy()
-            target_mm[2] += self._hover_height
-
+        if tracker.cube_pos_mm is not None:
+            p = tracker.cube_pos_mm
+            t = tracker.target_pos_mm
             cv2.putText(display,
-                        f'Cube: ({p_base_mm[0]:.0f},{p_base_mm[1]:.0f},'
-                        f'{p_base_mm[2]:.0f})mm',
+                        f'Cube: ({p[0]:.0f},{p[1]:.0f},{p[2]:.0f})mm',
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0, 255, 0), 1)
-            cv2.putText(display,
-                        f'Target: ({target_mm[0]:.0f},{target_mm[1]:.0f},'
-                        f'{target_mm[2]:.0f})mm  +{self._hover_height:.0f}',
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 200, 255), 1)
-
-            if self._tracking and self.app.robot and self._solver:
-                should_move = True
-                if self._last_target is not None:
-                    if np.linalg.norm(target_mm - self._last_target) < 3.0:
-                        should_move = False
-
-                if should_move:
-                    angles = self.app.robot.get_angles()
-                    seed = np.array(angles[:5]) if angles else None
-                    solution = self._solver.solve_ik_position(
-                        target_mm, seed_motor_deg=seed)
-                    if solution is not None:
-                        cmd = list(solution) + [angles[5] if angles else 0]
-
-                        def _move():
-                            self.app.robot.move_joints(cmd, speed=self._speed)
-                        threading.Thread(target=_move, daemon=True).start()
-                        self._last_target = target_mm.copy()
-                        cv2.putText(display, 'TRACKING',
-                                    (10, 75), cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.6, (0, 255, 0), 2)
-                    else:
-                        cv2.putText(display, 'IK FAILED',
-                                    (10, 75), cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.6, (0, 0, 255), 2)
+            if t is not None:
+                cv2.putText(display,
+                            f'Target: ({t[0]:.0f},{t[1]:.0f},{t[2]:.0f})mm  '
+                            f'+{tracker.hover_height_mm:.0f}',
+                            (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 200, 255), 1)
         else:
             cv2.putText(display, 'No cube detected',
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0, 0, 255), 1)
 
+        if tracker.status:
+            color = (0, 255, 0) if 'Track' in tracker.status else (0, 0, 255)
+            cv2.putText(display, tracker.status,
+                        (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
         img = cv_to_qimage(display)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cam_label.setPixmap(pix)
+        self._status_label.setText(tracker.status)
 
     def _toggle_tracking(self):
-        self._tracking = not self._tracking
-        self._last_target = None
-        if self._tracking:
-            self._track_btn.setText('\u25cf Tracking ON')
-            self._track_btn.setStyleSheet(
-                'background-color: #006400; color: white; padding: 4px;')
-        else:
-            self._track_btn.setText('\u25cb Tracking OFF')
-            self._track_btn.setStyleSheet(
-                'background-color: #640000; color: white; padding: 4px;')
+        self.app.cube_tracker.toggle()
+        self._sync_btn()
+
+    def _sync_btn(self):
+        on = self.app.cube_tracker.tracking
+        self._track_btn.setText('\u25cf Tracking ON' if on else '\u25cb Tracking OFF')
+        self._track_btn.setStyleSheet(
+            f'background-color: {"#006400" if on else "#640000"}; '
+            f'color: white; padding: 4px;')
 
     def _adjust_height(self, delta):
-        self._hover_height = max(0, self._hover_height + delta)
-        self._height_label.setText(f'{self._hover_height:.0f}')
+        tracker = self.app.cube_tracker
+        tracker.hover_height_mm = max(0, tracker.hover_height_mm + delta)
+        self._height_label.setText(f'{tracker.hover_height_mm:.0f}')
 
 
 # ---------------------------------------------------------------------------
@@ -4107,6 +4066,116 @@ class CameraOverlayView(BaseViewWidget):
 # MAIN APPLICATION
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# APP-LEVEL BEHAVIORS (persist across view switches)
+# ---------------------------------------------------------------------------
+
+class AppCubeTracker:
+    """App-level green cube detection + tracking behavior.
+
+    Runs independently of which view is active. Views read shared state
+    (cube_pos_mm, target_pos_mm) for visualization; controls (start/stop,
+    hover height) can be in any view.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.tracking = False
+        self.hover_height_mm = 30.0
+        self.cube_pos_mm = None    # detected cube center in base frame (mm)
+        self.target_pos_mm = None  # hover target in base frame (mm)
+        self.status = ''
+        self._transform = None
+        self._solver = None
+        self._last_target = None
+        self._speed = 200
+
+    def ensure_ready(self):
+        """Lazy-init calibration transform and IK solver."""
+        if self._transform is None:
+            cal_path = config_path('calibration.yaml')
+            if os.path.exists(cal_path):
+                from calibration import CoordinateTransform
+                self._transform = CoordinateTransform()
+                self._transform.load(cal_path)
+        if self._solver is None:
+            try:
+                from kinematics.arm101_ik_solver import Arm101IKSolver
+                self._solver = Arm101IKSolver()
+            except Exception:
+                pass
+
+    def update(self, frame):
+        """Run one detection cycle. Call from any view's camera frame callback.
+
+        Args:
+            frame: BGR camera frame from overview camera.
+
+        Returns:
+            List of CubeDetection (for visualization by the calling view).
+        """
+        from vision.green_cube_detector import detect_green_cubes
+        self.ensure_ready()
+
+        cubes, info = detect_green_cubes(frame)
+        self.cube_pos_mm = None
+        self.target_pos_mm = None
+
+        if cubes and self._transform and self.app.camera:
+            cube = cubes[0]
+            intr = self.app.camera.intrinsics
+            ray_cam = np.array([
+                (cube.cx - intr.ppx) / intr.fx,
+                (cube.cy - intr.ppy) / intr.fy,
+                1.0
+            ])
+            T = self._transform.T_camera_to_base
+            ray_base = T[:3, :3] @ ray_cam
+            origin_base = T[:3, 3]
+            cube_z = 10.0  # cube center 10mm above table
+            if abs(ray_base[2]) > 1e-6:
+                s = (cube_z - origin_base[2]) / ray_base[2]
+                self.cube_pos_mm = origin_base + s * ray_base
+                self.target_pos_mm = self.cube_pos_mm.copy()
+                self.target_pos_mm[2] += self.hover_height_mm
+
+        # Move arm if tracking is active
+        if self.tracking and self.target_pos_mm is not None:
+            self._move_to_target()
+
+        return cubes
+
+    def _move_to_target(self):
+        robot = self.app.robot
+        if robot is None or self._solver is None:
+            self.status = 'No robot/solver'
+            return
+        if not getattr(robot, '_enabled', False):
+            self.status = 'Servos off'
+            return
+
+        target = self.target_pos_mm
+        if self._last_target is not None:
+            if np.linalg.norm(target - self._last_target) < 3.0:
+                return
+
+        angles = robot.get_angles()
+        seed = np.array(angles[:5]) if angles else None
+        solution = self._solver.solve_ik_position(target, seed_motor_deg=seed)
+        if solution is not None:
+            cmd = list(solution) + [angles[5] if angles else 0]
+            robot.move_joints(cmd, speed=self._speed)
+            self._last_target = target.copy()
+            self.status = 'Tracking'
+        else:
+            self.status = 'IK failed'
+
+    def toggle(self):
+        self.tracking = not self.tracking
+        self._last_target = None
+        self.status = 'Tracking ON' if self.tracking else 'Tracking OFF'
+
+
 class UnifiedPyQtApp(QMainWindow):
     """Main PyQt5 application for ArmRobotics."""
 
@@ -4119,6 +4188,9 @@ class UnifiedPyQtApp(QMainWindow):
         self._robot_connected = False
         self._camera_started = False
         self._rig_lock = None  # RigLock instance, acquired on first HW access
+
+        # App-level behaviors (persist across view switches)
+        self.cube_tracker = AppCubeTracker(self)
 
         self._views = {}  # view_id -> widget instance
         self._active_view_id = ''
