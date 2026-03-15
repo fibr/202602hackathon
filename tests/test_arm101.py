@@ -132,11 +132,16 @@ def arm(clear_servo_offsets):
 
     Uses clear_servo_offsets fixture to isolate from hardware calibration.
     Simulates a connected arm (servos enabled).
+
+    Z-height safety is disabled by default in unit tests to avoid coupling
+    position-write tests to FK solver availability. FK safety should be tested
+    separately in integration tests or via dedicated test methods.
     """
     robot = LeRobotArm101('/dev/ttyACM0')
     robot.port_handler = _ph()
     robot.packet_handler = _pkt(read_pos=POS_CENTER)
     robot._enabled = True  # simulate post-connect state
+    robot.set_z_safety(enabled=False)  # disable FK safety for unit tests
     return robot
 
 
@@ -923,3 +928,60 @@ class TestServoOffsetsIsolation:
         robot2 = LeRobotArm101('/dev/ttyUSB0')
         assert robot1._zero_offsets == {}
         assert robot2._zero_offsets == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Z-height safety (FK-based table collision prevention)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestZHeightSafety:
+    """Test FK-based Z-height safety to prevent table collisions.
+
+    When enabled, write_all_angles() rejects commands that would place the
+    end-effector below the configured minimum Z height (default 30mm).
+    """
+
+    def test_z_safety_disabled_by_default_in_fixture(self, arm):
+        """Unit test fixture disables Z safety to avoid FK coupling."""
+        assert arm._z_safety_enabled is False
+
+    def test_z_safety_can_be_enabled(self, clear_servo_offsets):
+        """set_z_safety(True) enables the safety check."""
+        robot = LeRobotArm101('/dev/ttyACM0')
+        robot.port_handler = _ph()
+        robot.packet_handler = _pkt(read_pos=POS_CENTER)
+        robot._enabled = True
+
+        robot.set_z_safety(enabled=True, min_z_mm=50.0)
+        assert robot._z_safety_enabled is True
+        assert robot._min_safe_z_mm == 50.0
+
+    def test_z_safety_can_be_disabled(self, clear_servo_offsets):
+        """set_z_safety(False) disables the safety check."""
+        robot = LeRobotArm101('/dev/ttyACM0')
+        robot.port_handler = _ph()
+        robot.packet_handler = _pkt(read_pos=POS_CENTER)
+        robot._enabled = True
+
+        robot.set_z_safety(enabled=True, min_z_mm=50.0)
+        assert robot._z_safety_enabled is True
+
+        robot.set_z_safety(enabled=False)
+        assert robot._z_safety_enabled is False
+
+    def test_z_safety_default_min_z_is_30mm(self, clear_servo_offsets):
+        """New arm instance has Z safety enabled with 30mm default."""
+        robot = LeRobotArm101('/dev/ttyACM0')
+        assert robot._z_safety_enabled is True
+        assert robot._min_safe_z_mm == 30.0
+
+    def test_write_all_angles_with_safety_disabled_ignores_z_check(self, arm):
+        """With Z safety disabled, write_all_angles accepts any angles."""
+        # Even though we don't have a real FK solver in test,
+        # disabling safety ensures no Z check is performed
+        assert arm._z_safety_enabled is False
+        arm.packet_handler.write2ByteTxRx.reset_mock()
+        # Should not raise
+        arm.write_all_angles([0.0, 90.0, -90.0, 45.0, -45.0, 0.0])
+        gp = _goal_pos_calls(arm.packet_handler)
+        assert len(gp) == 6
