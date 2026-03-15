@@ -104,12 +104,30 @@ def main():
             if cubes:
                 cube = cubes[0]  # Track the largest one
 
-                # Convert pixel to 3D in camera frame
-                p_cam = camera.pixel_to_3d(cube.cx, cube.cy, depth_frame)
-
-                # Transform to robot base frame (meters → mm)
-                p_base_m = transform.camera_to_base(p_cam)
-                p_base_mm = p_base_m * 1000.0
+                # Intersect pixel ray with cube-center plane (table + 10mm)
+                # This is more accurate than assumed-depth projection.
+                cube_center_z_mm = 10.0  # cube is 20mm, center at 10mm above table (z=0)
+                intr = camera.intrinsics
+                # Ray direction in camera frame (mm)
+                ray_cam = np.array([
+                    (cube.cx - intr.ppx) / intr.fx,
+                    (cube.cy - intr.ppy) / intr.fy,
+                    1.0
+                ])
+                # Transform ray to base frame
+                T = transform.T_camera_to_base
+                R = T[:3, :3]
+                t = T[:3, 3]  # mm
+                ray_base = R @ ray_cam
+                origin_base = t  # camera origin in base frame (mm)
+                # Intersect with z = cube_center_z_mm plane
+                if abs(ray_base[2]) > 1e-6:
+                    s = (cube_center_z_mm - origin_base[2]) / ray_base[2]
+                    p_base_mm = origin_base + s * ray_base
+                else:
+                    # Ray parallel to plane, fall back to assumed depth
+                    p_cam = camera.pixel_to_3d(cube.cx, cube.cy, depth_frame)
+                    p_base_mm = transform.camera_to_base(p_cam * 1000.0)
 
                 # Target: hover above cube
                 target_mm = p_base_mm.copy()

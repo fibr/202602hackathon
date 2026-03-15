@@ -3843,9 +3843,23 @@ class CubeTrackerView(BaseViewWidget):
 
         if cubes and self._transform:
             cube = cubes[0]
-            p_cam = self.app.camera.pixel_to_3d(cube.cx, cube.cy, None)
-            p_base_m = self._transform.camera_to_base(p_cam)
-            p_base_mm = p_base_m * 1000.0
+            # Intersect pixel ray with cube-center plane (table + 10mm)
+            cube_center_z_mm = 10.0  # 20mm cube, center at 10mm above table
+            intr = self.app.camera.intrinsics
+            ray_cam = np.array([
+                (cube.cx - intr.ppx) / intr.fx,
+                (cube.cy - intr.ppy) / intr.fy,
+                1.0
+            ])
+            T = self._transform.T_camera_to_base
+            ray_base = T[:3, :3] @ ray_cam
+            origin_base = T[:3, 3]  # mm
+            if abs(ray_base[2]) > 1e-6:
+                s = (cube_center_z_mm - origin_base[2]) / ray_base[2]
+                p_base_mm = origin_base + s * ray_base
+            else:
+                p_cam = self.app.camera.pixel_to_3d(cube.cx, cube.cy, None)
+                p_base_mm = self._transform.camera_to_base(p_cam * 1000.0)
 
             target_mm = p_base_mm.copy()
             target_mm[2] += self._hover_height
