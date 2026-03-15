@@ -1053,6 +1053,9 @@ class CheckerboardCalibView(BaseViewWidget):
         self._stop_gripper_preview()
 
     def _on_frame(self, frame):
+        # Skip overview camera updates while gripper preview is active
+        if self._gripper_cap is not None:
+            return
         h, w = frame.shape[:2]
         # Apply numbered markers for hand-eye click points
         frame_with_markers = self._draw_he_markers(frame)
