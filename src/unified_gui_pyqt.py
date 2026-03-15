@@ -971,28 +971,23 @@ class CheckerboardCalibView(BaseViewWidget):
         ctrl_layout = QVBoxLayout(ctrl)
         ctrl_layout.setSpacing(4)
 
+        # Camera switch
+        self._cam_switch_btn = make_button('Camera: Overview', self._switch_camera,
+                                           'Switch between overview and gripper camera', '#4a3c5a')
+        ctrl_layout.addWidget(self._cam_switch_btn)
+
         ctrl_layout.addWidget(section_label('Intrinsics'))
-        ctrl_layout.addWidget(make_button('Capture Intrinsics Frame', self._capture_intr,
+        self._gripper_intr_status = QLabel('')
+        self._gripper_intr_status.setStyleSheet('color: #aaa; font-size: 10px;')
+        ctrl_layout.addWidget(self._gripper_intr_status)
+        ctrl_layout.addWidget(make_button('Capture Frame', self._capture_intr,
                                           'Capture checkerboard frame for intrinsics', '#3c5a70'))
         ctrl_layout.addWidget(make_button('Calibrate Intrinsics', self._calibrate_intr,
                                           'Run camera calibration', '#3c5a70'))
         ctrl_layout.addWidget(make_button('Visualize Intrinsics', self._visualize_intr,
                                           '', '#3c5a70'))
-
-        ctrl_layout.addWidget(section_label('Gripper Camera Intrinsics'))
-        self._gripper_intr_status = QLabel('Frames: 0  |  Preview: off')
-        self._gripper_intr_status.setStyleSheet('color: #aaa; font-size: 10px;')
-        ctrl_layout.addWidget(self._gripper_intr_status)
-        ctrl_layout.addWidget(make_button('Preview Gripper Cam', self._gripper_preview_toggle,
-                                          'Toggle live feed from gripper-mounted camera', '#3c5a70'))
-        ctrl_layout.addWidget(make_button('Capture Gripper Frame', self._capture_gripper_frame,
-                                          'Capture a checkerboard frame from gripper camera', '#3c5a70'))
-        ctrl_layout.addWidget(make_button('Calibrate Gripper Camera', self._calibrate_gripper_intr,
-                                          'Run intrinsics calibration for gripper camera', '#3c5a70'))
-        ctrl_layout.addWidget(make_button('Visualize Gripper Intrinsics', self._visualize_gripper_intr,
-                                          'Show undistorted frame from gripper camera', '#3c5a70'))
-        ctrl_layout.addWidget(make_button('Clear Gripper Frames', self._clear_gripper_frames,
-                                          'Discard all captured gripper frames', '#643232'))
+        ctrl_layout.addWidget(make_button('Clear Frames', self._clear_intr_frames,
+                                          'Discard all captured frames', '#643232'))
 
         ctrl_layout.addWidget(section_label('Ground Plane'))
         ctrl_layout.addWidget(make_button('Capture Plane Sample', self._capture_ground,
@@ -1051,6 +1046,41 @@ class CheckerboardCalibView(BaseViewWidget):
             self._cam_thread.stop()
             self._cam_thread = None
         self._stop_gripper_preview()
+
+    def _is_gripper_active(self):
+        return self._gripper_cap is not None
+
+    def _switch_camera(self):
+        """Toggle between overview and gripper camera."""
+        if self._is_gripper_active():
+            self._stop_gripper_preview()
+            self._cam_switch_btn.setText('Camera: Overview')
+            self._cam_switch_btn.setStyleSheet(
+                'background-color: #4a3c5a; color: white; padding: 4px; border-radius: 3px;')
+        else:
+            self._start_gripper_preview()
+            self._cam_switch_btn.setText('Camera: Gripper')
+            self._cam_switch_btn.setStyleSheet(
+                'background-color: #5a3c4a; color: white; padding: 4px; border-radius: 3px;')
+        self._update_intr_status()
+
+    def _update_intr_status(self):
+        if self._is_gripper_active():
+            n = len(self._gripper_intr_frames)
+            self._gripper_intr_status.setText(f'Gripper camera  |  Frames: {n}')
+        else:
+            n = len(self._intr_frames)
+            self._gripper_intr_status.setText(f'Overview camera  |  Frames: {n}')
+
+    def _clear_intr_frames(self):
+        """Clear captured intrinsics frames for the active camera."""
+        if self._is_gripper_active():
+            self._gripper_intr_frames.clear()
+            print('  Cleared gripper intrinsics frames')
+        else:
+            self._intr_frames.clear()
+            print('  Cleared overview intrinsics frames')
+        self._update_intr_status()
 
     def _on_frame(self, frame):
         # Skip overview camera updates while gripper preview is active
@@ -1200,12 +1230,22 @@ class CheckerboardCalibView(BaseViewWidget):
             traceback.print_exc()
 
     def _capture_intr(self):
-        if self.app.camera is None:
-            return
-        color, _, _ = self.app.camera.get_frames()
-        if color is not None:
-            self._intr_frames.append(color.copy())
-            print(f'  Captured intrinsics frame #{len(self._intr_frames)}')
+        """Capture an intrinsics frame from the active camera."""
+        if self._is_gripper_active():
+            frame = self._last_gripper_frame
+            if frame is not None:
+                self._gripper_intr_frames.append(frame.copy())
+                print(f'  Captured gripper intrinsics frame '
+                      f'#{len(self._gripper_intr_frames)}')
+        else:
+            if self.app.camera is None:
+                return
+            color, _, _ = self.app.camera.get_frames()
+            if color is not None:
+                self._intr_frames.append(color.copy())
+                print(f'  Captured overview intrinsics frame '
+                      f'#{len(self._intr_frames)}')
+        self._update_intr_status()
 
     def _calibrate_intr(self):
         print('  Running intrinsics calibration...')
@@ -1214,12 +1254,17 @@ class CheckerboardCalibView(BaseViewWidget):
 
     def _run_intr_calib(self):
         try:
+            is_gripper = self._is_gripper_active()
+            frames = self._gripper_intr_frames if is_gripper else self._intr_frames
+            cam_name = 'gripper' if is_gripper else 'overview'
+
             from vision.board_detector import BoardDetector
-            # Use configured board detector instead of hardcoded values
             detector = BoardDetector.from_config(self.app.config)
-            print(f'  Using board: {detector.describe()}')
+            print(f'  Calibrating {cam_name} camera ({len(frames)} frames, '
+                  f'{detector.describe()})')
+
             all_obj_pts, all_img_pts = [], []
-            for frame in self._intr_frames:
+            for frame in frames:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 detection = detector.detect(gray)
                 if detection is not None:
@@ -1229,11 +1274,16 @@ class CheckerboardCalibView(BaseViewWidget):
             if len(all_obj_pts) < 3:
                 print(f'  Need >=3 valid frames, got {len(all_obj_pts)}')
                 return
-            h, w = self._intr_frames[0].shape[:2]
-            ret, K, dist, _, _ = cv2.calibrateCamera(all_obj_pts, all_img_pts, (w, h), None, None)
-            print(f'  Intrinsics RMS error: {ret:.3f}')
+            h, w = frames[0].shape[:2]
+            ret, K, dist, _, _ = cv2.calibrateCamera(
+                all_obj_pts, all_img_pts, (w, h), None, None)
+            print(f'  {cam_name} intrinsics RMS error: {ret:.3f}')
+
             import yaml
-            intr_path = config_path('camera_intrinsics.yaml')
+            if is_gripper:
+                intr_path = config_path('gripper_intrinsics.yaml')
+            else:
+                intr_path = config_path('camera_intrinsics.yaml')
             data = {
                 'fx': float(K[0, 0]), 'fy': float(K[1, 1]),
                 'ppx': float(K[0, 2]), 'ppy': float(K[1, 2]),
@@ -1242,7 +1292,7 @@ class CheckerboardCalibView(BaseViewWidget):
             }
             with open(intr_path, 'w') as f:
                 yaml.dump(data, f)
-            print(f'  Saved intrinsics to {intr_path}')
+            print(f'  Saved {cam_name} intrinsics to {intr_path}')
         except Exception as e:
             print(f'  Intrinsics calibration error: {e}')
 
