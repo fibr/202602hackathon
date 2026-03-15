@@ -276,13 +276,14 @@ class LeRobotArm101:
     def read_all_angles(self) -> list:
         """Read joint angles in degrees for all motors.
 
-        Center position (2048) maps to 0°. Range is approximately ±180°.
+        Uses calibrated per-motor zero offsets from servo_offsets.yaml.
 
         Returns:
             List of 6 angle values in degrees.
         """
         positions = self.read_all_positions()
-        return [self._pos_to_deg(p) for p in positions]
+        return [self._pos_to_deg_motor(p, mid)
+                for p, mid in zip(positions, self.motor_ids)]
 
     # --- Position writing ---
 
