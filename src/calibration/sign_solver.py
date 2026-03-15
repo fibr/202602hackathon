@@ -527,6 +527,14 @@ def _brute_force_signs(captures, solver, current_offsets_raw, verbose=True,
         print(f"  Mean pos error: {best['mean_err_mm']:.2f}mm")
         print(f"  Ori spread:     {final_ori_spread:.2f}°")
 
+        # Quality warning: high orientation spread suggests unreliable solution
+        # (typically caused by too few captures or insufficient pose diversity)
+        if final_ori_spread > 20.0:
+            print(f"\n  WARNING: Orientation spread {final_ori_spread:.1f}° > 20° "
+                  f"— result may be unreliable.")
+            print(f"           Collect more captures with greater pose diversity,")
+            print(f"           especially varying wrist angles.")
+
         # T_cam_tcp diagnostics
         tcam_dist_mm = np.linalg.norm(T_cam_tcp[:3, 3]) * 1000
         print(f"  T_cam_tcp dist: {tcam_dist_mm:.1f}mm from TCP")
@@ -559,6 +567,9 @@ def _brute_force_signs(captures, solver, current_offsets_raw, verbose=True,
         'per_point_err': best['per_point_err'],
         'ambiguous_joints': ambiguous_joints,
         'all_results': all_results,
+        # Quality flag: True when orientation spread is low (< 20°) and
+        # there are enough captures for a reliable result.
+        'solution_reliable': (final_ori_spread < 20.0 and n >= MIN_CAPTURES),
     }
 
 

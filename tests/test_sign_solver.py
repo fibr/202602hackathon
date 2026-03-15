@@ -295,6 +295,18 @@ class TestBruteForceSignSolverSynthetic:
         for j in result['ambiguous_joints']:
             assert 0 <= j < 5
 
+    def test_solution_reliable_present(self, solver_result):
+        """solution_reliable key must be present in result dict."""
+        result, _ = solver_result
+        assert 'solution_reliable' in result
+
+    def test_solution_reliable_true_on_clean_data(self, solver_result):
+        """With clean noise-free data and enough captures, result is reliable."""
+        result, _ = solver_result
+        assert result['solution_reliable'] is True, (
+            f"Expected solution_reliable=True on clean synthetic data, "
+            f"ori_spread={result.get('ori_spread_deg', 'N/A'):.2f}°")
+
 
 class TestConstraintHelpers:
     """Test the individual constraint helper functions."""

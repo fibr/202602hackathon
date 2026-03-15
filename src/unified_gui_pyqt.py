@@ -2805,10 +2805,16 @@ class ServoDirectionCalibView(BaseViewWidget):
         lines = [f'Signs: {result["signs_str"]}',
                  f'Mean error: {result["mean_err_mm"]:.1f}mm']
 
+        ori_spread = result.get('ori_spread_deg', 999.0)
+        reliable = result.get('solution_reliable', True)
         quality = ('EXCELLENT' if result['mean_err_mm'] < 5 else
                    'GOOD' if result['mean_err_mm'] < 15 else
                    'OK' if result['mean_err_mm'] < 30 else 'POOR')
+        if not reliable:
+            quality += ' (UNRELIABLE — collect more diverse captures)'
         lines.append(f'Quality: {quality}')
+        lines.append(f'Ori spread: {ori_spread:.1f}° '
+                     f'({"OK" if ori_spread < 20 else "HIGH — unreliable"})')
 
         ambiguous = result.get('ambiguous_joints', set())
         if ambiguous:
