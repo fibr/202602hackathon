@@ -259,6 +259,7 @@ class ArmRenderer:
 
         # Mesh rendering
         self.render_mesh_mode = False   # False = skeleton (default), True = mesh
+        self.draw_mesh_wireframe = False  # Draw thin edge outlines on mesh
         self._link_meshes = {}          # link_name -> list[_LinkMeshData]
         self._urdf_path = urdf
         self._mesh_loaded = False
@@ -652,6 +653,18 @@ class ArmRenderer:
             tri = screen_cat[idx]  # (3, 2)
             c = colors_cat[idx]    # (3,)
             cv2.fillPoly(canvas, [tri], (int(c[0]), int(c[1]), int(c[2])))
+
+        # Draw wireframe edges if enabled
+        if self.draw_mesh_wireframe:
+            wireframe_color = (100, 100, 100)  # Dark gray edges
+            wireframe_thickness = 1
+            for idx in order:
+                tri = screen_cat[idx]  # (3, 2)
+                # Draw three edges of the triangle
+                for i in range(3):
+                    pt1 = tuple(tri[i].astype(int))
+                    pt2 = tuple(tri[(i + 1) % 3].astype(int))
+                    cv2.line(canvas, pt1, pt2, wireframe_color, wireframe_thickness)
 
         return canvas
 

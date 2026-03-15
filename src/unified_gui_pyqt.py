@@ -3630,6 +3630,8 @@ class LiveTwinView(BaseViewWidget):
         ctrl_layout.addWidget(section_label('View Controls'))
         self._mesh_btn = make_button('Mesh View', self._toggle_mesh)
         ctrl_layout.addWidget(self._mesh_btn)
+        self._wireframe_btn = make_button('Wireframe: Off', self._toggle_wireframe)
+        ctrl_layout.addWidget(self._wireframe_btn)
         self._mv_btn = make_button('Single View', self._toggle_multiview)
         ctrl_layout.addWidget(self._mv_btn)
         ctrl_layout.addWidget(make_button('Toggle Angle Table', self._toggle_table))
@@ -3811,6 +3813,12 @@ class LiveTwinView(BaseViewWidget):
             self._renderer.render_mesh_mode = not self._renderer.render_mesh_mode
             mode = 'Skeleton View' if self._renderer.render_mesh_mode else 'Mesh View'
             self._mesh_btn.setText(mode)
+
+    def _toggle_wireframe(self):
+        if self._renderer:
+            self._renderer.draw_mesh_wireframe = not self._renderer.draw_mesh_wireframe
+            status = 'On' if self._renderer.draw_mesh_wireframe else 'Off'
+            self._wireframe_btn.setText(f'Wireframe: {status}')
 
     def _toggle_multiview(self):
         self._multi_view = not self._multi_view
