@@ -22,6 +22,7 @@ Zero-offset calibration:
 """
 
 import os
+import threading
 import time
 import numpy as np
 import yaml
@@ -132,6 +133,7 @@ class LeRobotArm101:
         self._enabled = False
 
         # Initialize SDK
+        self._lock = threading.Lock()
         self.port_handler = PortHandler(port)
         self.packet_handler = PacketHandler(0)  # Protocol 0 for STS/SCS
 
@@ -253,9 +255,10 @@ class LeRobotArm101:
 
     def read_position(self, motor_id: int) -> int:
         """Read raw position (0-4095) of a single motor."""
-        pos, result, error = self.packet_handler.read2ByteTxRx(
-            self.port_handler, motor_id, ADDR_PRESENT_POSITION
-        )
+        with self._lock:
+            pos, result, error = self.packet_handler.read2ByteTxRx(
+                self.port_handler, motor_id, ADDR_PRESENT_POSITION
+            )
         if result != COMM_SUCCESS:
             return -1
         return pos
@@ -266,9 +269,13 @@ class LeRobotArm101:
         Returns:
             List of 6 position values.
         """
-        positions = []
-        for mid in self.motor_ids:
-            positions.append(self.read_position(mid))
+        with self._lock:
+            positions = []
+            for mid in self.motor_ids:
+                pos, result, error = self.packet_handler.read2ByteTxRx(
+                    self.port_handler, mid, ADDR_PRESENT_POSITION
+                )
+                positions.append(pos if result == COMM_SUCCESS else -1)
         self._cached_positions = positions
         self._last_query_time = time.time()
         return positions
@@ -444,9 +451,10 @@ class LeRobotArm101:
 
     def _write1(self, motor_id: int, address: int, value: int):
         """Write 1-byte value to motor register."""
-        result, error = self.packet_handler.write1ByteTxRx(
-            self.port_handler, motor_id, address, value
-        )
+        with self._lock:
+            result, error = self.packet_handler.write1ByteTxRx(
+                self.port_handler, motor_id, address, value
+            )
         if result != COMM_SUCCESS:
             raise IOError(
                 f"Write1 failed motor {motor_id} addr {address}: "
@@ -455,9 +463,10 @@ class LeRobotArm101:
 
     def _write2(self, motor_id: int, address: int, value: int):
         """Write 2-byte value to motor register."""
-        result, error = self.packet_handler.write2ByteTxRx(
-            self.port_handler, motor_id, address, value
-        )
+        with self._lock:
+            result, error = self.packet_handler.write2ByteTxRx(
+                self.port_handler, motor_id, address, value
+            )
         if result != COMM_SUCCESS:
             raise IOError(
                 f"Write2 failed motor {motor_id} addr {address}: "
