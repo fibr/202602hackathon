@@ -26,6 +26,7 @@ Controls (live mode):
     SPACE       Capture current frame
     d           Toggle detection overlay
     r           Toggle robot skeleton overlay (base always shown)
+    t           Toggle overlay calibration panel
     g           Move robot to hover 200mm above detected rod
     s           Save base offset + rotation to calibration file
     Arrows      Nudge base overlay position XY (10mm steps)
@@ -34,6 +35,9 @@ Controls (live mode):
     9/0         Nudge base pitch ±2°
     [/]         Nudge base yaw ±2°
     q / Esc     Quit
+
+Note: For robot jogging (jog joints, gripper, speed), use the PyQt control
+    panel (./run.sh src/unified_gui_pyqt.py --view control) alongside this.
 """
 
 import sys
@@ -49,32 +53,10 @@ from vision.rod_detector import RodDetector
 from calibration import CoordinateTransform
 from config_loader import load_config
 from visualization import RobotOverlay
-from gui.robot_controls import RobotControlPanel, PANEL_WIDTH
 from gui.overlay_calib import OverlayCalibPanel
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'rod_dataset')
 
-
-class DobotPanelAdapter:
-    """Adapter to make DobotNova5 compatible with RobotControlPanel.
-
-    The panel expects send(), get_pose() -> list, get_angles() -> list.
-    DobotNova5 has _send(), get_pose() -> np.ndarray, get_joint_angles().
-    """
-
-    def __init__(self, robot):
-        self._robot = robot
-
-    def send(self, cmd):
-        return self._robot._send(cmd)
-
-    def get_pose(self):
-        p = self._robot.get_pose()
-        return list(p) if p is not None else None
-
-    def get_angles(self):
-        a = self._robot.get_joint_angles()
-        return list(a) if a is not None else None
 
 
 HOVER_HEIGHT_MM = 200.0    # Height above rod centroid
@@ -510,14 +492,6 @@ def main():
         print("Connecting to robot...")
         robot = try_connect_robot(config)
 
-    # GUI panel (only if robot connected)
-    panel = None
-    if robot:
-        adapter = DobotPanelAdapter(robot)
-        panel = RobotControlPanel(adapter, panel_x=width, panel_height=height, config=config)
-        robot_speed = config.get('robot', {}).get('speed_percent', 30)
-        panel.speed = robot_speed
-
     # Overlay calibration GUI panel (always available)
     calib_panel = OverlayCalibPanel(robot_overlay, transform, calibration_path)
 
@@ -542,10 +516,7 @@ def main():
     width, height = camera.width, camera.height
 
     def on_mouse(event, x, y, flags, param):
-        if calib_panel.handle_mouse(event, x, y):
-            return
-        if panel and x >= width:
-            panel.handle_mouse(event, x, y, flags)
+        calib_panel.handle_mouse(event, x, y)
 
     cv2.namedWindow('Collect Dataset')
     cv2.setMouseCallback('Collect Dataset', on_mouse)
@@ -565,8 +536,7 @@ def main():
             if color is None:
                 continue
 
-            canvas_w = width + PANEL_WIDTH if panel else width
-            canvas = np.zeros((height, canvas_w, 3), dtype=np.uint8)
+            canvas = np.zeros((height, width, 3), dtype=np.uint8)
             vis = color.copy()
 
             # Run detection overlay if toggled
@@ -619,8 +589,6 @@ def main():
 
             calib_panel.draw(vis)
             canvas[0:height, 0:width] = vis
-            if panel:
-                panel.draw(canvas)
 
             cv2.imshow('Collect Dataset', canvas)
             key_raw = cv2.waitKeyEx(1)
@@ -634,11 +602,7 @@ def main():
             except cv2.error:
                 break
 
-            # Panel keyboard handling
-            if key != 255 and panel and panel.handle_key(key):
-                pass
-
-            elif key == ord('d'):
+            if key == ord('d'):
                 show_detection = not show_detection
                 print(f"  Detection overlay: {'ON' if show_detection else 'OFF'}")
 
@@ -737,8 +701,6 @@ def main():
                 count += 1
 
     finally:
-        if panel and panel.jogging:
-            panel._stop_jog()
         camera.stop()
         cv2.destroyAllWindows()
         if robot:

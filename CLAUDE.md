@@ -29,21 +29,18 @@ Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `disc
 
 ### Individual scripts (still work standalone)
 ```bash
-./run.sh scripts/control_panel.py        # Camera + GUI control panel (uses robot_type from config)
-./run.sh scripts/control_panel.py --safe             # arm101 with reduced torque/speed
-./run.sh scripts/control_panel.py --no-camera        # Without camera
-./run.sh scripts/calibration_gui.py              # GUI servo calibration (torque off, camera + live readout)
-./run.sh scripts/calibration_gui.py --handeye    # GUI hand-eye calibration (manual poses + yellow tape)
-./run.sh scripts/collect_dataset.py --no-robot   # Live camera feed with detection
-./run.sh scripts/collect_dataset.py --snapshot   # Single-frame detection debug (6-stage images)
-./run.sh scripts/detect_checkerboard.py          # Interactive calibration (GUI panel + click corners)
-./run.sh scripts/detect_checkerboard.py --verify # Verify calibration: hover above board corners
 ./run.sh scripts/demo_cube.py            # Random reachable poses demo (default)
 ./run.sh scripts/demo_cube.py --mode cube # Trace cube corners
 ./scripts/run_digital_twin.sh            # Isaac Sim digital twin (arm101 + cubes)
 ./scripts/run_digital_twin.sh --headless # Digital twin headless mode
 ./scripts/run_digital_twin.sh --enable_cameras  # With simulated cameras
 ./scripts/run_digital_twin.sh --mirror   # Mirror real arm joints in sim
+```
+
+Dataset collection is available via the PyQt GUI (`--view dataset`) or directly:
+```bash
+./run.sh scripts/collect_dataset.py --no-robot   # Live camera feed with detection (no robot)
+./run.sh scripts/collect_dataset.py --snapshot   # Single-frame detection debug (6-stage images)
 ```
 
 ## Logging
@@ -78,7 +75,7 @@ Pipeline: **Camera → Vision → Calibration Transform → Planner → Robot Dr
 - `src/main.py` — State machine orchestrator (INIT → DETECT → PLAN → EXECUTE → DONE)
 - `src/config_loader.py` — Loads `robot_config.yaml` with `settings.yaml` overrides (deep merge); `connect_robot(config)` factory returns connected robot based on `robot_type`
 - `src/unified_gui_pyqt.py` — PyQt5 unified GUI: sidebar navigation, all views, all actions via buttons
-- `src/gui/robot_controls.py` — Shared OpenCV GUI panel for standalone scripts (control_panel.py, etc.)
+- `src/gui/robot_controls.py` — Legacy OpenCV GUI panel (retained for reference; superseded by PyQt views)
 - `src/calibration/sign_solver.py` — Brute-force servo sign/offset solver (ChArUco-based, used by servo direction calib)
 - `src/vision/` — RealSense camera wrapper + rod detection via HSV color/depth segmentation (not ML)
 - `src/calibration/` — 4×4 homogeneous transforms for camera-to-robot-base frame conversion
