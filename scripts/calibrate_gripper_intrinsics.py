@@ -45,6 +45,7 @@ import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from config_loader import load_config, config_path
 from vision.board_detector import BoardDetector
+from rig_lock import RigLock
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Camera helpers
@@ -310,313 +311,323 @@ def main():
                         help='Skip moving to home at startup (arm already positioned)')
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("  GRIPPER CAMERA INTRINSICS CALIBRATION")
-    print("=" * 60)
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='calibrate_gripper_intrinsics')
+    rig_lock.acquire()
+    print("[INFO] Rig lock acquired.")
+    
+    try:
 
-    config = load_config()
-    bd_cfg = config.get('calibration_board', {})
-    home_angles = config.get('arm101', {}).get('home_angles',
-                                                [0.0, 0.0, 90.0, 90.0, 0.0, 0.0])
-    print(f"  Board: {bd_cfg.get('type', 'charuco')} {bd_cfg.get('cols')}x"
-          f"{bd_cfg.get('rows')} ({bd_cfg.get('square_size_mm')}mm squares)")
-    print(f"  Home angles (J1-J6): {home_angles}")
-    print(f"  Jog range: home ±{args.max_jog_deg}° (step={args.jog_deg}°)")
+        print("=" * 60)
+        print("  GRIPPER CAMERA INTRINSICS CALIBRATION")
+        print("=" * 60)
 
-    detector = BoardDetector.from_config(config)
-    print(f"  Detector: {detector.describe()}")
+        config = load_config()
+        bd_cfg = config.get('calibration_board', {})
+        home_angles = config.get('arm101', {}).get('home_angles',
+                                                    [0.0, 0.0, 90.0, 90.0, 0.0, 0.0])
+        print(f"  Board: {bd_cfg.get('type', 'charuco')} {bd_cfg.get('cols')}x"
+              f"{bd_cfg.get('rows')} ({bd_cfg.get('square_size_mm')}mm squares)")
+        print(f"  Home angles (J1-J6): {home_angles}")
+        print(f"  Jog range: home ±{args.max_jog_deg}° (step={args.jog_deg}°)")
 
-    # ── Open camera ──
-    cap = open_gripper_camera(config)
+        detector = BoardDetector.from_config(config)
+        print(f"  Detector: {detector.describe()}")
 
-    # ── Connect to robot ──
-    arm = None
-    if not args.no_robot:
-        try:
-            from config_loader import connect_robot
-            print("\n--- Connecting to arm ---")
-            arm = connect_robot(config, safe_mode=True)
-            arm.enable_torque()
-            print(f"  Arm connected, torque enabled (safe mode)")
+        # ── Open camera ──
+        cap = open_gripper_camera(config)
 
-            # Move to home position first
-            if not args.no_move_home:
-                move_to_home(arm, home_angles, speed=80, settle_s=2.0)
-        except Exception as e:
-            print(f"  WARNING: Could not connect to arm: {e}")
-            print(f"  Falling back to manual capture mode")
-            arm = None
-
-    # ── Display window ──
-    win = None
-    if args.show_window:
-        win = "Gripper Intrinsics Calibration  [c=capture  r=calibrate  q=quit]"
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win, 800, 600)
-
-    # ── Verify board is visible ──
-    print(f"\n--- Verifying board visibility ---")
-    board_found = False
-    for attempt in range(8):
-        frame = capture_frame(cap)
-        detection, annotated = detect_board(frame, detector)
-        if win:
-            cv2.imshow(win, annotated)
-            cv2.waitKey(100)
-        if detection is not None and len(detection.corners) >= args.min_corners:
-            board_found = True
-            print(f"  Board detected: {len(detection.corners)} corners ✓")
-            break
-        time.sleep(0.3)
-
-    if not board_found:
-        print(f"  WARNING: Board not visible at home position.")
-        if arm is not None:
-            print(f"  Will try to find it during jogging...")
-        else:
-            print(f"  Please position the board in view, then press 'c' to capture.")
-
-    # ── Collect frames ──
-    good_frames = []    # list of (BGR frame, BoardDetection)
-    image_size = None   # set on first capture
-    rms_current = None  # latest preliminary RMS
-
-    MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
-                   'wrist_flex', 'wrist_roll']
-
-    def try_capture(frame):
-        """Detect board and append to good_frames. Returns (captured, annotated)."""
-        nonlocal image_size
-        detection, annotated = detect_board(frame, detector)
-        if detection is not None and len(detection.corners) >= args.min_corners:
-            h, w = frame.shape[:2]
-            if image_size is None:
-                image_size = (w, h)
-            good_frames.append((frame.copy(), detection))
-            return True, annotated
-        return False, annotated
-
-    print(f"\n--- Collecting calibration frames ---")
-    print(f"  Target: {args.min_frames} frames  "
-          f"(jog={args.jog_deg}° x {args.n_steps} steps, "
-          f"max_jog=±{args.max_jog_deg}°)")
-
-    # Capture at starting (home) position
-    frame = capture_frame(cap)
-    ok, _ = try_capture(frame)
-    if ok:
-        print(f"  [home] Captured: {len(good_frames[-1][1].corners)} corners ✓ "
-              f"({len(good_frames)})")
-    else:
-        print(f"  [home] No board at home — continuing with jog sequence")
-
-    # ── Automated jogging ──
-    if arm is not None:
-        pose_idx = 0
-        # Track current absolute angles per joint (start at home)
-        current_angles = list(home_angles[:6])
-
-        for joint, target_abs in jog_sequence(home_angles, args.jog_deg,
-                                               args.n_steps, args.max_jog_deg):
-            pose_idx += 1
-            delta = target_abs - home_angles[joint]
-            sign_str = f"+{delta:.0f}" if delta >= 0 else f"{delta:.0f}"
-
-            # Build full angle command: only change the target joint
-            new_angles = list(current_angles)
-            new_angles[joint] = target_abs
-            # Keep gripper at home
-            new_angles[5] = home_angles[5] if len(home_angles) > 5 else 0.0
-
+        # ── Connect to robot ──
+        arm = None
+        if not args.no_robot:
             try:
-                arm.write_all_angles(new_angles, speed=80)
-                current_angles[joint] = target_abs
-            except ValueError as e:
-                print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
-                      f"{sign_str}°: SAFETY {e}")
-                # Reset joint to home to be safe
-                try:
-                    reset = list(current_angles)
-                    reset[joint] = home_angles[joint]
-                    arm.write_all_angles(reset, speed=80)
-                    current_angles[joint] = home_angles[joint]
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                continue
+                from config_loader import connect_robot
+                print("\n--- Connecting to arm ---")
+                arm = connect_robot(config, safe_mode=True)
+                arm.enable_torque()
+                print(f"  Arm connected, torque enabled (safe mode)")
+
+                # Move to home position first
+                if not args.no_move_home:
+                    move_to_home(arm, home_angles, speed=80, settle_s=2.0)
             except Exception as e:
-                print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
-                      f"{sign_str}°: ERROR {e}")
-                continue
+                print(f"  WARNING: Could not connect to arm: {e}")
+                print(f"  Falling back to manual capture mode")
+                arm = None
 
-            time.sleep(args.settle_s)
+        # ── Display window ──
+        win = None
+        if args.show_window:
+            win = "Gripper Intrinsics Calibration  [c=capture  r=calibrate  q=quit]"
+            cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(win, 800, 600)
 
-            # Capture frame
+        # ── Verify board is visible ──
+        print(f"\n--- Verifying board visibility ---")
+        board_found = False
+        for attempt in range(8):
             frame = capture_frame(cap)
-            ok, annotated = try_capture(frame)
-            n_caps = len(good_frames)
-
-            if ok:
-                nc = len(good_frames[-1][1].corners)
-                label = f"home{sign_str}°" if delta != 0 else "home"
-                print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
-                      f"{label}: {nc} corners ✓ ({n_caps})")
-            else:
-                label = f"home{sign_str}°" if delta != 0 else "home"
-                print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
-                      f"{label}: no board")
-
-            # Update window
-            if win and annotated is not None:
-                img = draw_status(annotated.copy(), n_caps,
-                                  args.min_frames, rms_current)
-                cv2.imshow(win, img)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("  Quit requested.")
-                    break
-                elif key == ord('c') or key == ord(' '):
-                    f2 = capture_frame(cap)
-                    ok2, _ = try_capture(f2)
-                    if ok2:
-                        print(f"  [manual] Captured: "
-                              f"{len(good_frames[-1][1].corners)} corners")
-                elif key == ord('r'):
-                    print("  Early calibration requested.")
-                    break
-
-            # Run preliminary calibration when we first hit target
-            if n_caps >= args.min_frames and rms_current is None:
-                print(f"\n  Reached {args.min_frames} frames — "
-                      f"running preliminary calibration...")
-                sz = image_size or (640, 480)
-                dets = [d for _, d in good_frames]
-                rms, K, dist = run_calibration(dets, sz, detector)
-                if K is not None:
-                    rms_current = rms
-                    print(f"  Preliminary RMS: {rms:.3f}px  "
-                          f"(continuing for better coverage)")
-
-        # Always return arm to home when done
-        print(f"\n  Returning arm to home position...")
-        try:
-            arm.write_all_angles(list(home_angles[:6]), speed=80)
-            time.sleep(1.5)
-        except Exception as e:
-            print(f"  WARNING: Could not return to home: {e}")
-        try:
-            arm.disable_torque()
-            print(f"  Torque disabled.")
-        except Exception:
-            pass
-
-    else:
-        # Manual capture mode
-        print(f"  Manual mode — press 'c' or SPACE to capture, 'r' to calibrate, 'q' to quit.")
-        auto_interval = 2.0  # seconds between auto-captures in headless mode
-        last_capture = time.time()
-        while len(good_frames) < args.min_frames:
-            frame = capture_frame(cap, n_warmup=1)
             detection, annotated = detect_board(frame, detector)
             if win:
-                img = draw_status(annotated.copy() if annotated is not None else np.zeros((480, 640, 3), np.uint8),
-                                  len(good_frames), args.min_frames, rms_current)
-                cv2.imshow(win, img)
-                key = cv2.waitKey(50) & 0xFF
-                if key == ord('c') or key == ord(' '):
-                    ok, _ = try_capture(frame)
-                    if ok:
-                        print(f"  Captured: {len(good_frames[-1][1].corners)} corners "
-                              f"({len(good_frames)})")
-                    else:
-                        print(f"  No board detected")
-                elif key == ord('r'):
-                    break
-                elif key == ord('q'):
-                    cap.release()
-                    if win:
-                        cv2.destroyAllWindows()
-                    return 0
+                cv2.imshow(win, annotated)
+                cv2.waitKey(100)
+            if detection is not None and len(detection.corners) >= args.min_corners:
+                board_found = True
+                print(f"  Board detected: {len(detection.corners)} corners ✓")
+                break
+            time.sleep(0.3)
+
+        if not board_found:
+            print(f"  WARNING: Board not visible at home position.")
+            if arm is not None:
+                print(f"  Will try to find it during jogging...")
             else:
-                # Headless: auto-capture periodically if board visible
-                now = time.time()
-                if now - last_capture >= auto_interval:
-                    ok, _ = try_capture(frame)
-                    if ok:
-                        print(f"  Auto-captured: "
-                              f"{len(good_frames[-1][1].corners)} corners "
-                              f"({len(good_frames)})")
-                        last_capture = now
-                    else:
+                print(f"  Please position the board in view, then press 'c' to capture.")
+
+        # ── Collect frames ──
+        good_frames = []    # list of (BGR frame, BoardDetection)
+        image_size = None   # set on first capture
+        rms_current = None  # latest preliminary RMS
+
+        MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
+                       'wrist_flex', 'wrist_roll']
+
+        def try_capture(frame):
+            """Detect board and append to good_frames. Returns (captured, annotated)."""
+            nonlocal image_size
+            detection, annotated = detect_board(frame, detector)
+            if detection is not None and len(detection.corners) >= args.min_corners:
+                h, w = frame.shape[:2]
+                if image_size is None:
+                    image_size = (w, h)
+                good_frames.append((frame.copy(), detection))
+                return True, annotated
+            return False, annotated
+
+        print(f"\n--- Collecting calibration frames ---")
+        print(f"  Target: {args.min_frames} frames  "
+              f"(jog={args.jog_deg}° x {args.n_steps} steps, "
+              f"max_jog=±{args.max_jog_deg}°)")
+
+        # Capture at starting (home) position
+        frame = capture_frame(cap)
+        ok, _ = try_capture(frame)
+        if ok:
+            print(f"  [home] Captured: {len(good_frames[-1][1].corners)} corners ✓ "
+                  f"({len(good_frames)})")
+        else:
+            print(f"  [home] No board at home — continuing with jog sequence")
+
+        # ── Automated jogging ──
+        if arm is not None:
+            pose_idx = 0
+            # Track current absolute angles per joint (start at home)
+            current_angles = list(home_angles[:6])
+
+            for joint, target_abs in jog_sequence(home_angles, args.jog_deg,
+                                                   args.n_steps, args.max_jog_deg):
+                pose_idx += 1
+                delta = target_abs - home_angles[joint]
+                sign_str = f"+{delta:.0f}" if delta >= 0 else f"{delta:.0f}"
+
+                # Build full angle command: only change the target joint
+                new_angles = list(current_angles)
+                new_angles[joint] = target_abs
+                # Keep gripper at home
+                new_angles[5] = home_angles[5] if len(home_angles) > 5 else 0.0
+
+                try:
+                    arm.write_all_angles(new_angles, speed=80)
+                    current_angles[joint] = target_abs
+                except ValueError as e:
+                    print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
+                          f"{sign_str}°: SAFETY {e}")
+                    # Reset joint to home to be safe
+                    try:
+                        reset = list(current_angles)
+                        reset[joint] = home_angles[joint]
+                        arm.write_all_angles(reset, speed=80)
+                        current_angles[joint] = home_angles[joint]
                         time.sleep(0.5)
+                    except Exception:
+                        pass
+                    continue
+                except Exception as e:
+                    print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
+                          f"{sign_str}°: ERROR {e}")
+                    continue
 
-    cap.release()
+                time.sleep(args.settle_s)
 
-    # ── Final calibration ──
-    print(f"\n--- Final calibration ({len(good_frames)} frames) ---")
+                # Capture frame
+                frame = capture_frame(cap)
+                ok, annotated = try_capture(frame)
+                n_caps = len(good_frames)
 
-    if len(good_frames) < 3:
-        print(f"  ERROR: Need at least 3 frames, got {len(good_frames)}.")
-        print(f"  Tips:")
-        print(f"    - Make sure CharUco board is flat on the table and visible")
-        print(f"    - Try --max-jog-deg 30 for wider coverage")
-        print(f"    - Reduce --min-corners to accept partial detections")
+                if ok:
+                    nc = len(good_frames[-1][1].corners)
+                    label = f"home{sign_str}°" if delta != 0 else "home"
+                    print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
+                          f"{label}: {nc} corners ✓ ({n_caps})")
+                else:
+                    label = f"home{sign_str}°" if delta != 0 else "home"
+                    print(f"  [{pose_idx}] J{joint+1} {MOTOR_NAMES[joint]} "
+                          f"{label}: no board")
+
+                # Update window
+                if win and annotated is not None:
+                    img = draw_status(annotated.copy(), n_caps,
+                                      args.min_frames, rms_current)
+                    cv2.imshow(win, img)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        print("  Quit requested.")
+                        break
+                    elif key == ord('c') or key == ord(' '):
+                        f2 = capture_frame(cap)
+                        ok2, _ = try_capture(f2)
+                        if ok2:
+                            print(f"  [manual] Captured: "
+                                  f"{len(good_frames[-1][1].corners)} corners")
+                    elif key == ord('r'):
+                        print("  Early calibration requested.")
+                        break
+
+                # Run preliminary calibration when we first hit target
+                if n_caps >= args.min_frames and rms_current is None:
+                    print(f"\n  Reached {args.min_frames} frames — "
+                          f"running preliminary calibration...")
+                    sz = image_size or (640, 480)
+                    dets = [d for _, d in good_frames]
+                    rms, K, dist = run_calibration(dets, sz, detector)
+                    if K is not None:
+                        rms_current = rms
+                        print(f"  Preliminary RMS: {rms:.3f}px  "
+                              f"(continuing for better coverage)")
+
+            # Always return arm to home when done
+            print(f"\n  Returning arm to home position...")
+            try:
+                arm.write_all_angles(list(home_angles[:6]), speed=80)
+                time.sleep(1.5)
+            except Exception as e:
+                print(f"  WARNING: Could not return to home: {e}")
+            try:
+                arm.disable_torque()
+                print(f"  Torque disabled.")
+            except Exception:
+                pass
+
+        else:
+            # Manual capture mode
+            print(f"  Manual mode — press 'c' or SPACE to capture, 'r' to calibrate, 'q' to quit.")
+            auto_interval = 2.0  # seconds between auto-captures in headless mode
+            last_capture = time.time()
+            while len(good_frames) < args.min_frames:
+                frame = capture_frame(cap, n_warmup=1)
+                detection, annotated = detect_board(frame, detector)
+                if win:
+                    img = draw_status(annotated.copy() if annotated is not None else np.zeros((480, 640, 3), np.uint8),
+                                      len(good_frames), args.min_frames, rms_current)
+                    cv2.imshow(win, img)
+                    key = cv2.waitKey(50) & 0xFF
+                    if key == ord('c') or key == ord(' '):
+                        ok, _ = try_capture(frame)
+                        if ok:
+                            print(f"  Captured: {len(good_frames[-1][1].corners)} corners "
+                                  f"({len(good_frames)})")
+                        else:
+                            print(f"  No board detected")
+                    elif key == ord('r'):
+                        break
+                    elif key == ord('q'):
+                        cap.release()
+                        if win:
+                            cv2.destroyAllWindows()
+                        return 0
+                else:
+                    # Headless: auto-capture periodically if board visible
+                    now = time.time()
+                    if now - last_capture >= auto_interval:
+                        ok, _ = try_capture(frame)
+                        if ok:
+                            print(f"  Auto-captured: "
+                                  f"{len(good_frames[-1][1].corners)} corners "
+                                  f"({len(good_frames)})")
+                            last_capture = now
+                        else:
+                            time.sleep(0.5)
+
+        cap.release()
+
+        # ── Final calibration ──
+        print(f"\n--- Final calibration ({len(good_frames)} frames) ---")
+
+        if len(good_frames) < 3:
+            print(f"  ERROR: Need at least 3 frames, got {len(good_frames)}.")
+            print(f"  Tips:")
+            print(f"    - Make sure CharUco board is flat on the table and visible")
+            print(f"    - Try --max-jog-deg 30 for wider coverage")
+            print(f"    - Reduce --min-corners to accept partial detections")
+            if win:
+                cv2.destroyAllWindows()
+            return 1
+
+        h, w = good_frames[0][0].shape[:2]
+        sz = image_size or (w, h)
+        detections = [det for _, det in good_frames]
+
+        rms, K, dist = run_calibration(detections, sz, detector)
+        if K is None:
+            print(f"  Calibration failed.")
+            if win:
+                cv2.destroyAllWindows()
+            return 1
+
+        # ── Print results ──
+        print(f"\n{'='*60}")
+        print(f"  CALIBRATION RESULTS")
+        print(f"{'='*60}")
+        print(f"  Frames used:  {len(detections)}")
+        print(f"  Image size:   {sz[0]}x{sz[1]}")
+        quality = '[EXCELLENT]' if rms < 0.5 else '[GOOD]' if rms < 1.0 else '[ACCEPTABLE]' if rms < 2.0 else '[HIGH — collect more frames]'
+        print(f"  RMS error:    {rms:.4f} px  {quality}")
+        print(f"  Focal length: fx={K[0,0]:.2f}  fy={K[1,1]:.2f}")
+        print(f"  Principal pt: cx={K[0,2]:.2f}  cy={K[1,2]:.2f}")
+        k = dist.ravel()
+        print(f"  Distortion:   k1={k[0]:.4f}  k2={k[1]:.4f}  "
+              f"p1={k[2]:.4f}  p2={k[3]:.4f}  k3={k[4]:.4f}")
+
+        if rms < 0.5:
+            print(f"\n  Excellent calibration! RMS < 0.5px.")
+        elif rms < 1.0:
+            print(f"\n  Good calibration. RMS < 1.0px.")
+        elif rms < 2.0:
+            print(f"\n  Acceptable. Consider more diverse frames.")
+        else:
+            print(f"\n  High error. Collect more frames from varied angles.")
+
+        # Show undistortion comparison
+        if win and good_frames:
+            try:
+                show_undistort_comparison(good_frames[-1][0].copy(), K, dist)
+            except Exception:
+                pass
+
+        # ── Save ──
+        save_intrinsics(K, dist, sz, rms, args.camera_name)
+
+        print(f"\n  Done! Next step: run servo direction calibration.")
+        print(f"  ./run.sh scripts/auto_servo_calib.py --save")
+
         if win:
             cv2.destroyAllWindows()
-        return 1
 
-    h, w = good_frames[0][0].shape[:2]
-    sz = image_size or (w, h)
-    detections = [det for _, det in good_frames]
+        return 0
 
-    rms, K, dist = run_calibration(detections, sz, detector)
-    if K is None:
-        print(f"  Calibration failed.")
-        if win:
-            cv2.destroyAllWindows()
-        return 1
 
-    # ── Print results ──
-    print(f"\n{'='*60}")
-    print(f"  CALIBRATION RESULTS")
-    print(f"{'='*60}")
-    print(f"  Frames used:  {len(detections)}")
-    print(f"  Image size:   {sz[0]}x{sz[1]}")
-    quality = '[EXCELLENT]' if rms < 0.5 else '[GOOD]' if rms < 1.0 else '[ACCEPTABLE]' if rms < 2.0 else '[HIGH — collect more frames]'
-    print(f"  RMS error:    {rms:.4f} px  {quality}")
-    print(f"  Focal length: fx={K[0,0]:.2f}  fy={K[1,1]:.2f}")
-    print(f"  Principal pt: cx={K[0,2]:.2f}  cy={K[1,2]:.2f}")
-    k = dist.ravel()
-    print(f"  Distortion:   k1={k[0]:.4f}  k2={k[1]:.4f}  "
-          f"p1={k[2]:.4f}  p2={k[3]:.4f}  k3={k[4]:.4f}")
-
-    if rms < 0.5:
-        print(f"\n  Excellent calibration! RMS < 0.5px.")
-    elif rms < 1.0:
-        print(f"\n  Good calibration. RMS < 1.0px.")
-    elif rms < 2.0:
-        print(f"\n  Acceptable. Consider more diverse frames.")
-    else:
-        print(f"\n  High error. Collect more frames from varied angles.")
-
-    # Show undistortion comparison
-    if win and good_frames:
-        try:
-            show_undistort_comparison(good_frames[-1][0].copy(), K, dist)
-        except Exception:
-            pass
-
-    # ── Save ──
-    save_intrinsics(K, dist, sz, rms, args.camera_name)
-
-    print(f"\n  Done! Next step: run servo direction calibration.")
-    print(f"  ./run.sh scripts/auto_servo_calib.py --save")
-
-    if win:
-        cv2.destroyAllWindows()
-
-    return 0
-
+    finally:
+        rig_lock.release()
 
 if __name__ == '__main__':
     sys.exit(main())

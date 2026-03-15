@@ -20,6 +20,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from config_loader import load_config, connect_robot
 from planner.trajectory import quintic_trajectory
+from rig_lock import RigLock
 
 
 # Cube corner visit order (Hamiltonian path)
@@ -173,6 +174,11 @@ def main():
 
     print(f"\n{len(target_joints)} targets ready. Connecting to {robot_type}...")
 
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='demo_cube')
+    rig_lock.acquire()
+    print("[INFO] Rig lock acquired.")
+
     robot = connect_robot(config)
     is_arm101 = getattr(robot, 'robot_type', None) == 'arm101'
 
@@ -250,6 +256,7 @@ def main():
         else:
             robot.disable()
             robot.disconnect()
+        rig_lock.release()
         print("Disconnected.")
 
 

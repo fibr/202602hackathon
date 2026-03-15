@@ -22,6 +22,7 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from vision import RealSenseCamera
+from rig_lock import RigLock
 
 points = []
 current_frame = None
@@ -66,6 +67,11 @@ def main():
     global points, current_frame
     sd = '--sd' in sys.argv
     width, height = (640, 480) if sd else (1280, 720)
+
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='select_roi')
+    rig_lock.acquire()
+    print("[INFO] Rig lock acquired.")
 
     print("=== Workspace ROI Selection ===")
     print(f"Resolution: {width}x{height}")
@@ -181,6 +187,7 @@ def main():
     finally:
         camera.stop()
         cv2.destroyAllWindows()
+        rig_lock.release()
         print("Done.")
 
 

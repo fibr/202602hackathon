@@ -54,6 +54,7 @@ from calibration import CoordinateTransform
 from config_loader import load_config
 from visualization import RobotOverlay
 from gui.overlay_calib import OverlayCalibPanel
+from rig_lock import RigLock
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'rod_dataset')
 
@@ -446,8 +447,16 @@ def main():
 
     config = load_config()
 
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='collect_dataset')
+    rig_lock.acquire()
+    print("[INFO] Rig lock acquired.")
+
     if snapshot:
-        run_snapshot(config, width, height)
+        try:
+            run_snapshot(config, width, height)
+        finally:
+            rig_lock.release()
         return
 
     os.makedirs(DATASET_DIR, exist_ok=True)
@@ -708,6 +717,7 @@ def main():
                 robot.disconnect()
             except Exception:
                 pass
+        rig_lock.release()
         print(f"\nDone. {count} frames captured (indices up to {next_idx - 1}).")
         print(f"Dataset: {os.path.abspath(DATASET_DIR)}")
 

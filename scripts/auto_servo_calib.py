@@ -31,6 +31,7 @@ from config_loader import load_config, connect_robot, config_path
 from vision.camera import CameraIntrinsics
 from vision.board_detector import BoardDetector
 from calibration.calib_helpers import read_all_raw, load_offsets
+from rig_lock import RigLock
 from calibration.sign_solver import (
     _brute_force_signs, save_calibration_results, MOTOR_NAMES)
 from kinematics.arm101_ik_solver import Arm101IKSolver
@@ -119,196 +120,206 @@ def main():
                         help='Save results to servo_offsets.yaml')
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("  AUTO SERVO CALIBRATION")
-    print("=" * 60)
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='auto_servo_calib')
+    rig_lock.acquire()
+    print("[INFO] Rig lock acquired.")
+    
+    try:
 
-    config = load_config()
-    intrinsics = load_gripper_camera_intrinsics(config)
-    bd = config.get('calibration_board', {})
-    print(f"  Board: {bd.get('type', 'charuco')} {bd.get('cols')}x{bd.get('rows')} "
-          f"({bd.get('square_size_mm')}mm squares)")
-    print(f"  Camera intrinsics: fx={intrinsics.fx:.1f} fy={intrinsics.fy:.1f}")
+        print("=" * 60)
+        print("  AUTO SERVO CALIBRATION")
+        print("=" * 60)
 
-    # Load current offsets
-    offsets_dict = load_offsets()
-    offsets_raw = np.array([
-        offsets_dict.get(name, {}).get('zero_raw', 2048)
-        for name in MOTOR_NAMES[:5]
-    ], dtype=float)
-    print(f"  Current offsets: {offsets_raw.astype(int).tolist()}")
+        config = load_config()
+        intrinsics = load_gripper_camera_intrinsics(config)
+        bd = config.get('calibration_board', {})
+        print(f"  Board: {bd.get('type', 'charuco')} {bd.get('cols')}x{bd.get('rows')} "
+              f"({bd.get('square_size_mm')}mm squares)")
+        print(f"  Camera intrinsics: fx={intrinsics.fx:.1f} fy={intrinsics.fy:.1f}")
 
-    # Connect to arm
-    print("\n--- Connecting to arm ---")
-    arm = connect_robot(config, safe_mode=True)
-    cap = open_gripper_camera(config)
-    solver = Arm101IKSolver()
-    print(f"  IK solver: signs={solver.signs.tolist()}")
-    arm.enable_torque()
-    print(f"  Torque enabled (safe mode)")
+        # Load current offsets
+        offsets_dict = load_offsets()
+        offsets_raw = np.array([
+            offsets_dict.get(name, {}).get('zero_raw', 2048)
+            for name in MOTOR_NAMES[:5]
+        ], dtype=float)
+        print(f"  Current offsets: {offsets_raw.astype(int).tolist()}")
 
-    # ---------------------------------------------------------------
-    # Phase 1: Verify board visibility (try a few captures)
-    # ---------------------------------------------------------------
-    print("\n--- Phase 1: Verify board visibility ---")
-    T0, n0, err0 = None, 0, None
-    for attempt in range(5):
-        frame = capture_frame(cap)
-        T0, n0, err0 = detect_board_pose(frame, config, intrinsics)
-        if T0 is not None:
-            break
-        time.sleep(0.3)
-    if T0 is None:
-        print(f"  Board NOT detected at starting position.")
-        print(f"  Will try to find it by jogging joints...")
-    else:
-        board_dist = np.linalg.norm(T0[:3, 3])
-        print(f"  Board detected: {n0} corners, reproj={err0:.2f}px, "
-              f"dist={board_dist*1000:.0f}mm")
+        # Connect to arm
+        print("\n--- Connecting to arm ---")
+        arm = connect_robot(config, safe_mode=True)
+        cap = open_gripper_camera(config)
+        solver = Arm101IKSolver()
+        print(f"  IK solver: signs={solver.signs.tolist()}")
+        arm.enable_torque()
+        print(f"  Torque enabled (safe mode)")
 
-    # ---------------------------------------------------------------
-    # Phase 2: Collect captures by jogging each joint
-    # ---------------------------------------------------------------
-    jog = args.jog_deg
-    n_steps = args.n_steps
-    print(f"\n--- Phase 2: Collecting captures (jog={jog}°, steps={n_steps}) ---")
-
-    captures = []
-
-    # Capture at starting position (if board was detected)
-    raw = read_all_raw(arm)
-    if (T0 is not None and n0 >= args.min_corners
-            and err0 is not None and err0 < args.max_reproj):
-        captures.append({'raw': raw, 'T_board_in_cam': T0})
-        print(f"  [start] Captured: {n0} corners ✓")
-    else:
-        print(f"  [start] No board at start, will collect during jog")
-
-    n_joints = 5
-    total_moves = n_joints * n_steps * 4  # +steps, -steps(return), -steps, +steps(return)
-    move_idx = 0
-
-    for joint in range(n_joints):
-        joint_name = MOTOR_NAMES[joint]
-
-        # Sweep positive: +jog, +2*jog, +3*jog...
-        for step in range(n_steps):
-            move_idx += 1
-            try:
-                arm.jog_joint(joint, +1, step_deg=jog, speed=80)
-            except ValueError as e:
-                print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
-                      f"+: SAFETY {e}")
-                continue
-            time.sleep(args.settle_s)
-
+        # ---------------------------------------------------------------
+        # Phase 1: Verify board visibility (try a few captures)
+        # ---------------------------------------------------------------
+        print("\n--- Phase 1: Verify board visibility ---")
+        T0, n0, err0 = None, 0, None
+        for attempt in range(5):
             frame = capture_frame(cap)
-            raw = read_all_raw(arm)
-            T, nc, err = detect_board_pose(frame, config, intrinsics)
-            if (T is not None and nc >= args.min_corners
-                    and err is not None and err < args.max_reproj):
-                captures.append({'raw': raw, 'T_board_in_cam': T})
-                print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
-                      f"+: {nc} corners, reproj={err:.2f}px ✓ ({len(captures)})")
-            else:
-                status = f"{nc}c" if T is not None else "no board"
-                err_s = f" e={err:.1f}" if err is not None else ""
-                print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
-                      f"+: skip ({status}{err_s})")
-
-        # Return to start (no captures during return)
-        for step in range(n_steps):
-            move_idx += 1
-            arm.jog_joint(joint, -1, step_deg=jog, speed=80)
+            T0, n0, err0 = detect_board_pose(frame, config, intrinsics)
+            if T0 is not None:
+                break
             time.sleep(0.3)
+        if T0 is None:
+            print(f"  Board NOT detected at starting position.")
+            print(f"  Will try to find it by jogging joints...")
+        else:
+            board_dist = np.linalg.norm(T0[:3, 3])
+            print(f"  Board detected: {n0} corners, reproj={err0:.2f}px, "
+                  f"dist={board_dist*1000:.0f}mm")
 
-        # Sweep negative: -jog, -2*jog, -3*jog...
-        for step in range(n_steps):
-            move_idx += 1
-            try:
+        # ---------------------------------------------------------------
+        # Phase 2: Collect captures by jogging each joint
+        # ---------------------------------------------------------------
+        jog = args.jog_deg
+        n_steps = args.n_steps
+        print(f"\n--- Phase 2: Collecting captures (jog={jog}°, steps={n_steps}) ---")
+
+        captures = []
+
+        # Capture at starting position (if board was detected)
+        raw = read_all_raw(arm)
+        if (T0 is not None and n0 >= args.min_corners
+                and err0 is not None and err0 < args.max_reproj):
+            captures.append({'raw': raw, 'T_board_in_cam': T0})
+            print(f"  [start] Captured: {n0} corners ✓")
+        else:
+            print(f"  [start] No board at start, will collect during jog")
+
+        n_joints = 5
+        total_moves = n_joints * n_steps * 4  # +steps, -steps(return), -steps, +steps(return)
+        move_idx = 0
+
+        for joint in range(n_joints):
+            joint_name = MOTOR_NAMES[joint]
+
+            # Sweep positive: +jog, +2*jog, +3*jog...
+            for step in range(n_steps):
+                move_idx += 1
+                try:
+                    arm.jog_joint(joint, +1, step_deg=jog, speed=80)
+                except ValueError as e:
+                    print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
+                          f"+: SAFETY {e}")
+                    continue
+                time.sleep(args.settle_s)
+
+                frame = capture_frame(cap)
+                raw = read_all_raw(arm)
+                T, nc, err = detect_board_pose(frame, config, intrinsics)
+                if (T is not None and nc >= args.min_corners
+                        and err is not None and err < args.max_reproj):
+                    captures.append({'raw': raw, 'T_board_in_cam': T})
+                    print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
+                          f"+: {nc} corners, reproj={err:.2f}px ✓ ({len(captures)})")
+                else:
+                    status = f"{nc}c" if T is not None else "no board"
+                    err_s = f" e={err:.1f}" if err is not None else ""
+                    print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
+                          f"+: skip ({status}{err_s})")
+
+            # Return to start (no captures during return)
+            for step in range(n_steps):
+                move_idx += 1
                 arm.jog_joint(joint, -1, step_deg=jog, speed=80)
-            except ValueError as e:
-                print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
-                      f"-: SAFETY {e}")
-                continue
-            time.sleep(args.settle_s)
+                time.sleep(0.3)
 
-            frame = capture_frame(cap)
-            raw = read_all_raw(arm)
-            T, nc, err = detect_board_pose(frame, config, intrinsics)
-            if (T is not None and nc >= args.min_corners
-                    and err is not None and err < args.max_reproj):
-                captures.append({'raw': raw, 'T_board_in_cam': T})
-                print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
-                      f"-: {nc} corners, reproj={err:.2f}px ✓ ({len(captures)})")
-            else:
-                status = f"{nc}c" if T is not None else "no board"
-                err_s = f" e={err:.1f}" if err is not None else ""
-                print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
-                      f"-: skip ({status}{err_s})")
+            # Sweep negative: -jog, -2*jog, -3*jog...
+            for step in range(n_steps):
+                move_idx += 1
+                try:
+                    arm.jog_joint(joint, -1, step_deg=jog, speed=80)
+                except ValueError as e:
+                    print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
+                          f"-: SAFETY {e}")
+                    continue
+                time.sleep(args.settle_s)
 
-        # Return to start
-        for step in range(n_steps):
-            move_idx += 1
-            arm.jog_joint(joint, +1, step_deg=jog, speed=80)
-            time.sleep(0.3)
+                frame = capture_frame(cap)
+                raw = read_all_raw(arm)
+                T, nc, err = detect_board_pose(frame, config, intrinsics)
+                if (T is not None and nc >= args.min_corners
+                        and err is not None and err < args.max_reproj):
+                    captures.append({'raw': raw, 'T_board_in_cam': T})
+                    print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
+                          f"-: {nc} corners, reproj={err:.2f}px ✓ ({len(captures)})")
+                else:
+                    status = f"{nc}c" if T is not None else "no board"
+                    err_s = f" e={err:.1f}" if err is not None else ""
+                    print(f"  [{move_idx}/{total_moves}] J{joint+1} {joint_name} "
+                          f"-: skip ({status}{err_s})")
 
-    # Done collecting
-    arm.disable_torque()
-    cap.release()
+            # Return to start
+            for step in range(n_steps):
+                move_idx += 1
+                arm.jog_joint(joint, +1, step_deg=jog, speed=80)
+                time.sleep(0.3)
 
-    print(f"\n  Collection complete: {len(captures)} captures")
+        # Done collecting
+        arm.disable_torque()
+        cap.release()
 
-    if len(captures) < 6:
-        print(f"  ERROR: Need at least 6 captures, got {len(captures)}.")
-        print(f"  Try:")
-        print(f"    - Reducing --jog-deg to keep board in view")
-        print(f"    - Increasing --n-steps for more data points")
-        print(f"    - Relaxing --max-reproj or --min-corners")
+        print(f"\n  Collection complete: {len(captures)} captures")
+
+        if len(captures) < 6:
+            print(f"  ERROR: Need at least 6 captures, got {len(captures)}.")
+            print(f"  Try:")
+            print(f"    - Reducing --jog-deg to keep board in view")
+            print(f"    - Increasing --n-steps for more data points")
+            print(f"    - Relaxing --max-reproj or --min-corners")
+            arm.disconnect()
+            return 1
+
+        # ---------------------------------------------------------------
+        # Phase 3: Run brute-force sign solver
+        # ---------------------------------------------------------------
+        print(f"\n--- Phase 3: Brute-force sign solver ({len(captures)} captures) ---")
+
+        result = _brute_force_signs(captures, solver, offsets_raw, verbose=True)
+
+        # ---------------------------------------------------------------
+        # Summary
+        # ---------------------------------------------------------------
+        print(f"\n{'='*60}")
+        print(f"  RESULTS")
+        print(f"{'='*60}")
+        print(f"  Signs:      {result['signs_str']}")
+        print(f"  Mean error: {result['mean_err_mm']:.2f}mm")
+        print(f"  Offsets:    {result['offsets_raw'].astype(int).tolist()}")
+
+        for i, name in enumerate(MOTOR_NAMES[:5]):
+            s = '+' if result['signs'][i] > 0 else '-'
+            print(f"    {name:<16}: sign={s}  offset={int(result['offsets_raw'][i])}")
+
+        if result['ambiguous_joints']:
+            amb = [MOTOR_NAMES[j] for j in result['ambiguous_joints']]
+            print(f"\n  Ambiguous joints: {', '.join(amb)}")
+            print(f"  The error spread between sign combos is too small.")
+            print(f"  Try larger --jog-deg or more diverse arm positions.")
+
+        if args.save:
+            print(f"\n--- Saving calibration ---")
+            save_calibration_results(
+                result['signs'],
+                result['offsets_raw'],
+                result['T_cam_in_tcp'],
+            )
+            print(f"  Restart control panel to use new calibration.")
+        else:
+            print(f"\n  (Add --save to write results to servo_offsets.yaml)")
+
         arm.disconnect()
-        return 1
+        return 0
 
-    # ---------------------------------------------------------------
-    # Phase 3: Run brute-force sign solver
-    # ---------------------------------------------------------------
-    print(f"\n--- Phase 3: Brute-force sign solver ({len(captures)} captures) ---")
 
-    result = _brute_force_signs(captures, solver, offsets_raw, verbose=True)
-
-    # ---------------------------------------------------------------
-    # Summary
-    # ---------------------------------------------------------------
-    print(f"\n{'='*60}")
-    print(f"  RESULTS")
-    print(f"{'='*60}")
-    print(f"  Signs:      {result['signs_str']}")
-    print(f"  Mean error: {result['mean_err_mm']:.2f}mm")
-    print(f"  Offsets:    {result['offsets_raw'].astype(int).tolist()}")
-
-    for i, name in enumerate(MOTOR_NAMES[:5]):
-        s = '+' if result['signs'][i] > 0 else '-'
-        print(f"    {name:<16}: sign={s}  offset={int(result['offsets_raw'][i])}")
-
-    if result['ambiguous_joints']:
-        amb = [MOTOR_NAMES[j] for j in result['ambiguous_joints']]
-        print(f"\n  Ambiguous joints: {', '.join(amb)}")
-        print(f"  The error spread between sign combos is too small.")
-        print(f"  Try larger --jog-deg or more diverse arm positions.")
-
-    if args.save:
-        print(f"\n--- Saving calibration ---")
-        save_calibration_results(
-            result['signs'],
-            result['offsets_raw'],
-            result['T_cam_in_tcp'],
-        )
-        print(f"  Restart control panel to use new calibration.")
-    else:
-        print(f"\n  (Add --save to write results to servo_offsets.yaml)")
-
-    arm.disconnect()
-    return 0
-
+    finally:
+        rig_lock.release()
 
 if __name__ == '__main__':
     sys.exit(main())

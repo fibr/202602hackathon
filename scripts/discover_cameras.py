@@ -25,6 +25,7 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
 from config_loader import config_path, _SHARED_CONFIG_DIR
+from rig_lock import RigLock
 
 # Optional RealSense support
 try:
@@ -631,76 +632,85 @@ def _update_robot_config(cameras: dict):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Discover connected cameras and write config/cameras.yaml')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Print discovered cameras without writing file')
-    parser.add_argument('--merge', action='store_true',
-                        help='Merge with existing cameras.yaml (preserve mount/extrinsics)')
-    parser.add_argument('--no-heuristic', action='store_true',
-                        help='Skip ARM101 gripper camera auto-detection heuristic')
-    args = parser.parse_args()
+    # Acquire exclusive rig lock before touching hardware
+    rig_lock = RigLock(holder='discover_cameras')
+    rig_lock.acquire()
+    print("[INFO] Rig lock acquired.")
+    
+    try:
+        parser = argparse.ArgumentParser(
+            description='Discover connected cameras and write config/cameras.yaml')
+        parser.add_argument('--dry-run', action='store_true',
+                            help='Print discovered cameras without writing file')
+        parser.add_argument('--merge', action='store_true',
+                            help='Merge with existing cameras.yaml (preserve mount/extrinsics)')
+        parser.add_argument('--no-heuristic', action='store_true',
+                            help='Skip ARM101 gripper camera auto-detection heuristic')
+        args = parser.parse_args()
 
-    print("Discovering cameras...")
-    cameras = discover_all()
+        print("Discovering cameras...")
+        cameras = discover_all()
 
-    if not cameras:
-        print("No cameras detected.")
-        return
+        if not cameras:
+            print("No cameras detected.")
+            return
 
-    # Apply ARM101 heuristic unless disabled
-    if not args.no_heuristic:
-        cameras = _apply_arm101_heuristic(cameras)
+        # Apply ARM101 heuristic unless disabled
+        if not args.no_heuristic:
+            cameras = _apply_arm101_heuristic(cameras)
 
-    # Merge with existing if requested
-    if args.merge:
-        existing = _load_existing_cameras()
-        if existing:
-            print(f"  Merging with {len(existing)} existing camera entries...")
-            # Match by serial or device_path
-            existing_by_serial = {}
-            existing_by_path = {}
-            for name, cam in existing.items():
-                if cam.get('serial') and cam['serial'] != 'unknown':
-                    existing_by_serial[cam['serial']] = cam
-                if cam.get('device_path'):
-                    existing_by_path[cam['device_path']] = cam
+        # Merge with existing if requested
+        if args.merge:
+            existing = _load_existing_cameras()
+            if existing:
+                print(f"  Merging with {len(existing)} existing camera entries...")
+                # Match by serial or device_path
+                existing_by_serial = {}
+                existing_by_path = {}
+                for name, cam in existing.items():
+                    if cam.get('serial') and cam['serial'] != 'unknown':
+                        existing_by_serial[cam['serial']] = cam
+                    if cam.get('device_path'):
+                        existing_by_path[cam['device_path']] = cam
 
-            merged = {}
-            for name, cam in cameras.items():
-                old = None
-                if cam.get('serial') and cam['serial'] != 'unknown':
-                    old = existing_by_serial.get(cam['serial'])
-                if old is None and cam.get('device_path'):
-                    old = existing_by_path.get(cam['device_path'])
-                merged[name] = _merge_camera(cam, old)
-            cameras = merged
+                merged = {}
+                for name, cam in cameras.items():
+                    old = None
+                    if cam.get('serial') and cam['serial'] != 'unknown':
+                        old = existing_by_serial.get(cam['serial'])
+                    if old is None and cam.get('device_path'):
+                        old = existing_by_path.get(cam['device_path'])
+                    merged[name] = _merge_camera(cam, old)
+                cameras = merged
 
-    # Build output
-    output = {'cameras': cameras}
+        # Build output
+        output = {'cameras': cameras}
 
-    if args.dry_run:
-        print("\n--- Discovered cameras (dry run) ---")
-        print(yaml.dump(output, default_flow_style=False, sort_keys=False))
-        return
+        if args.dry_run:
+            print("\n--- Discovered cameras (dry run) ---")
+            print(yaml.dump(output, default_flow_style=False, sort_keys=False))
+            return
 
-    # Write
-    os.makedirs(os.path.dirname(_CAMERAS_YAML), exist_ok=True)
-    with open(_CAMERAS_YAML, 'w') as f:
-        f.write('# Camera registry — auto-populated by scripts/discover_cameras.py\n')
-        f.write(f'# Last updated: {datetime.datetime.now().isoformat(timespec="seconds")}\n')
-        f.write('# Edit mount/extrinsics by hand; re-run with --merge to preserve them.\n\n')
-        yaml.dump(output, f, default_flow_style=False, sort_keys=False)
+        # Write
+        os.makedirs(os.path.dirname(_CAMERAS_YAML), exist_ok=True)
+        with open(_CAMERAS_YAML, 'w') as f:
+            f.write('# Camera registry — auto-populated by scripts/discover_cameras.py\n')
+            f.write(f'# Last updated: {datetime.datetime.now().isoformat(timespec="seconds")}\n')
+            f.write('# Edit mount/extrinsics by hand; re-run with --merge to preserve them.\n\n')
+            yaml.dump(output, f, default_flow_style=False, sort_keys=False)
 
-    print(f"\nWrote {len(cameras)} camera(s) to {_CAMERAS_YAML}")
-    for name, cam in cameras.items():
-        mount_type = cam.get('mount', {}).get('type', 'other')
-        intr_src = cam.get('intrinsics', {}).get('source', '?')
-        print(f"  {name}: {cam['type']}, mount={mount_type}, intrinsics={intr_src}")
+        print(f"\nWrote {len(cameras)} camera(s) to {_CAMERAS_YAML}")
+        for name, cam in cameras.items():
+            mount_type = cam.get('mount', {}).get('type', 'other')
+            intr_src = cam.get('intrinsics', {}).get('source', '?')
+            print(f"  {name}: {cam['type']}, mount={mount_type}, intrinsics={intr_src}")
 
-    # Update robot_config.yaml device indices to match discovered cameras
-    _update_robot_config(cameras)
+        # Update robot_config.yaml device indices to match discovered cameras
+        _update_robot_config(cameras)
 
+
+    finally:
+        rig_lock.release()
 
 if __name__ == '__main__':
     main()
