@@ -942,6 +942,11 @@ class CheckerboardCalibView(BaseViewWidget):
         self._intr_frames = []
         self._ground_samples = []
         self._last_frame = None  # most recent camera frame (for click handler)
+        # Gripper camera intrinsics
+        self._gripper_intr_frames = []  # captured frames for gripper intrinsics calib
+        self._gripper_cap = None        # cv2.VideoCapture for the gripper camera
+        self._gripper_timer = None      # QTimer for live gripper preview
+        self._last_gripper_frame = None  # most recent gripper frame
         self._build_ui()
 
     def _build_ui(self):
@@ -973,6 +978,21 @@ class CheckerboardCalibView(BaseViewWidget):
                                           'Run camera calibration', '#3c5a70'))
         ctrl_layout.addWidget(make_button('Visualize Intrinsics', self._visualize_intr,
                                           '', '#3c5a70'))
+
+        ctrl_layout.addWidget(section_label('Gripper Camera Intrinsics'))
+        self._gripper_intr_status = QLabel('Frames: 0  |  Preview: off')
+        self._gripper_intr_status.setStyleSheet('color: #aaa; font-size: 10px;')
+        ctrl_layout.addWidget(self._gripper_intr_status)
+        ctrl_layout.addWidget(make_button('Preview Gripper Cam', self._gripper_preview_toggle,
+                                          'Toggle live feed from gripper-mounted camera', '#3c5a70'))
+        ctrl_layout.addWidget(make_button('Capture Gripper Frame', self._capture_gripper_frame,
+                                          'Capture a checkerboard frame from gripper camera', '#3c5a70'))
+        ctrl_layout.addWidget(make_button('Calibrate Gripper Camera', self._calibrate_gripper_intr,
+                                          'Run intrinsics calibration for gripper camera', '#3c5a70'))
+        ctrl_layout.addWidget(make_button('Visualize Gripper Intrinsics', self._visualize_gripper_intr,
+                                          'Show undistorted frame from gripper camera', '#3c5a70'))
+        ctrl_layout.addWidget(make_button('Clear Gripper Frames', self._clear_gripper_frames,
+                                          'Discard all captured gripper frames', '#643232'))
 
         ctrl_layout.addWidget(section_label('Ground Plane'))
         ctrl_layout.addWidget(make_button('Capture Plane Sample', self._capture_ground,
@@ -1030,6 +1050,7 @@ class CheckerboardCalibView(BaseViewWidget):
         if self._cam_thread:
             self._cam_thread.stop()
             self._cam_thread = None
+        self._stop_gripper_preview()
 
     def _on_frame(self, frame):
         h, w = frame.shape[:2]
@@ -1268,6 +1289,280 @@ class CheckerboardCalibView(BaseViewWidget):
         self._cam_label.setPixmap(pix)
         print(f'  Visualised intrinsics: fx={K[0,0]:.1f} fy={K[1,1]:.1f} '
               f'ppx={K[0,2]:.1f} ppy={K[1,2]:.1f}')
+
+    # ------------------------------------------------------------------
+    # Gripper Camera Intrinsics
+    # ------------------------------------------------------------------
+
+    def _get_gripper_device_index(self):
+        """Return the device index for the gripper-mounted camera.
+
+        Priority:
+        1. cameras.yaml gripper camera entry
+        2. robot_config.yaml gripper_camera.device_index
+        3. Fallback: 8
+        """
+        try:
+            from camera_config import CameraRegistry
+            registry = CameraRegistry.load()
+            gripper_cam = registry.find_gripper_camera()
+            if gripper_cam is not None and gripper_cam.device_index >= 0:
+                return gripper_cam.device_index, gripper_cam.name
+        except Exception:
+            pass
+        idx = self.app.config.get('gripper_camera', {}).get('device_index', 8)
+        return idx, None
+
+    def _update_gripper_status(self):
+        """Refresh the gripper intrinsics status label."""
+        n = len(self._gripper_intr_frames)
+        preview = 'on' if self._gripper_cap is not None else 'off'
+        self._gripper_intr_status.setText(f'Frames: {n}  |  Preview: {preview}')
+
+    def _gripper_preview_toggle(self):
+        """Toggle live preview of the gripper-mounted camera."""
+        if self._gripper_cap is not None:
+            self._stop_gripper_preview()
+        else:
+            self._start_gripper_preview()
+        self._update_gripper_status()
+
+    def _start_gripper_preview(self):
+        """Open the gripper camera and start the live preview timer."""
+        dev_idx, cam_name = self._get_gripper_device_index()
+        gc = self.app.config.get('gripper_camera', {})
+        w = gc.get('width', 640)
+        h = gc.get('height', 480)
+        print(f'  Opening gripper camera /dev/video{dev_idx} ({w}x{h})...')
+        cap = cv2.VideoCapture(dev_idx)
+        if not cap.isOpened():
+            print(f'  Cannot open gripper camera at /dev/video{dev_idx}')
+            return
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        # Flush stale buffer frames
+        for _ in range(10):
+            cap.read()
+        self._gripper_cap = cap
+        self._gripper_timer = QTimer()
+        self._gripper_timer.timeout.connect(self._gripper_timer_tick)
+        self._gripper_timer.start(100)  # ~10 fps preview
+        label = cam_name or f'/dev/video{dev_idx}'
+        print(f'  Gripper camera preview started ({label})')
+
+    def _stop_gripper_preview(self):
+        """Stop the gripper preview timer and release the camera."""
+        if self._gripper_timer is not None:
+            self._gripper_timer.stop()
+            self._gripper_timer = None
+        if self._gripper_cap is not None:
+            self._gripper_cap.release()
+            self._gripper_cap = None
+
+    def _gripper_timer_tick(self):
+        """Called by QTimer to update the camera label with a gripper frame."""
+        if self._gripper_cap is None:
+            return
+        # Flush one stale frame, then read fresh
+        self._gripper_cap.read()
+        ok, frame = self._gripper_cap.read()
+        if not ok or frame is None:
+            return
+        self._last_gripper_frame = frame.copy()
+        annotated = frame.copy()
+        n = len(self._gripper_intr_frames)
+        cv2.putText(annotated, f'Gripper cam  |  Frames: {n}', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 200, 255), 2)
+        img = cv_to_qimage(annotated)
+        pix = QPixmap.fromImage(img).scaled(
+            self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.setPixmap(pix)
+
+    def _capture_gripper_frame(self):
+        """Capture a checkerboard frame from the gripper camera for intrinsics calibration."""
+        if self._gripper_cap is None:
+            print('  Start gripper preview first (click "Preview Gripper Cam")')
+            return
+        # Flush stale frames then grab a fresh one
+        for _ in range(3):
+            self._gripper_cap.read()
+        ok, frame = self._gripper_cap.read()
+        if not ok or frame is None:
+            print('  Failed to read frame from gripper camera')
+            return
+        self._gripper_intr_frames.append(frame.copy())
+        n = len(self._gripper_intr_frames)
+        print(f'  Captured gripper intrinsics frame #{n}')
+        # Flash captured annotation on the label
+        annotated = frame.copy()
+        cv2.putText(annotated, f'Captured #{n}', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        img = cv_to_qimage(annotated)
+        pix = QPixmap.fromImage(img).scaled(
+            self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.setPixmap(pix)
+        self._update_gripper_status()
+
+    def _calibrate_gripper_intr(self):
+        """Run intrinsics calibration on captured gripper frames (threaded)."""
+        if len(self._gripper_intr_frames) < 3:
+            print(f'  Need at least 3 gripper frames, have {len(self._gripper_intr_frames)}')
+            return
+        print('  Running gripper camera intrinsics calibration...')
+        threading.Thread(target=self._run_gripper_intr_calib, daemon=True).start()
+
+    def _run_gripper_intr_calib(self):
+        """Worker: detect board corners in gripper frames and calibrate."""
+        try:
+            from vision.board_detector import BoardDetector
+            detector = BoardDetector.from_config(self.app.config)
+            print(f'  Using board: {detector.describe()}')
+            all_obj_pts, all_img_pts = [], []
+            for i, frame in enumerate(self._gripper_intr_frames):
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                detection = detector.detect(gray)
+                if detection is not None:
+                    obj_pts = detector.get_object_points(detection)
+                    all_obj_pts.append(obj_pts)
+                    all_img_pts.append(detection.corners)
+                else:
+                    print(f'  Frame {i+1}: no board detected — skipped')
+            if len(all_obj_pts) < 3:
+                print(f'  Need >=3 valid frames, got {len(all_obj_pts)} with board')
+                return
+            h, w = self._gripper_intr_frames[0].shape[:2]
+            rms, K, dist, _, _ = cv2.calibrateCamera(
+                all_obj_pts, all_img_pts, (w, h), None, None)
+            print(f'  Gripper intrinsics RMS error: {rms:.3f} px  '
+                  f'(fx={K[0,0]:.1f} fy={K[1,1]:.1f} '
+                  f'ppx={K[0,2]:.1f} ppy={K[1,2]:.1f})')
+            self._save_gripper_intrinsics(K, dist, (w, h), rms)
+        except Exception as exc:
+            import traceback
+            print(f'  Gripper calibration error: {exc}')
+            traceback.print_exc()
+
+    def _save_gripper_intrinsics(self, K, dist, image_size, rms):
+        """Persist calibrated gripper intrinsics to YAML files.
+
+        Saves to:
+          - config/gripper_camera_intrinsics.yaml  (dedicated file)
+          - config/cameras.yaml  (updates the gripper camera entry)
+        """
+        import yaml as _yaml
+        from datetime import datetime as _dt
+
+        fx = float(K[0, 0])
+        fy = float(K[1, 1])
+        ppx = float(K[0, 2])
+        ppy = float(K[1, 2])
+        dist_list = [float(d) for d in dist.ravel()]
+        w, h = int(image_size[0]), int(image_size[1])
+        calibrated_at = _dt.now().isoformat()
+
+        # ── gripper_camera_intrinsics.yaml ──
+        gripper_intr_path = config_path('gripper_camera_intrinsics.yaml')
+        data = {
+            'camera_matrix': [[fx, 0.0, ppx], [0.0, fy, ppy], [0.0, 0.0, 1.0]],
+            'dist_coeffs': dist_list,
+            'image_size': [w, h],
+            # Legacy flat keys for compatibility
+            'fx': fx, 'fy': fy, 'ppx': ppx, 'ppy': ppy,
+            'dist': dist_list,
+            'width': w, 'height': h,
+            'rms_error': float(rms),
+            'calibrated_at': calibrated_at,
+        }
+        with open(gripper_intr_path, 'w') as f:
+            _yaml.dump(data, f, default_flow_style=False)
+        print(f'  Saved gripper intrinsics → {gripper_intr_path}')
+
+        # ── cameras.yaml — update gripper camera entry ──
+        cameras_path = config_path('cameras.yaml')
+        if os.path.exists(cameras_path):
+            with open(cameras_path, 'r') as f:
+                cameras_data = _yaml.safe_load(f) or {}
+            # Find gripper camera by mount type
+            updated_name = None
+            for cam_name, cam_entry in (cameras_data.get('cameras') or {}).items():
+                mount = cam_entry.get('mount', {}) or {}
+                if mount.get('type') == 'gripper':
+                    cam_entry['intrinsics'] = {
+                        'camera_matrix': [[fx, 0, ppx], [0, fy, ppy], [0, 0, 1]],
+                        'dist_coeffs': dist_list,
+                        'image_size': [w, h],
+                        'source': 'calibrated',
+                        'rms_error': float(rms),
+                        'calibrated_at': calibrated_at,
+                    }
+                    updated_name = cam_name
+                    break
+            if updated_name:
+                with open(cameras_path, 'w') as f:
+                    _yaml.dump(cameras_data, f, default_flow_style=False)
+                print(f'  Updated cameras.yaml ({updated_name}) → source: calibrated')
+            else:
+                print('  Warning: no gripper-mounted camera found in cameras.yaml; '
+                      'intrinsics saved to gripper_camera_intrinsics.yaml only')
+
+        QTimer.singleShot(0, self._update_gripper_status)
+
+    def _visualize_gripper_intr(self):
+        """Show undistorted gripper camera frame to verify calibration."""
+        import yaml as _yaml
+        gripper_intr_path = config_path('gripper_camera_intrinsics.yaml')
+        if not os.path.exists(gripper_intr_path):
+            print('  No gripper_camera_intrinsics.yaml — run "Calibrate Gripper Camera" first')
+            return
+        try:
+            with open(gripper_intr_path) as f:
+                d = _yaml.safe_load(f)
+            K = np.array([
+                [d['fx'], 0, d['ppx']],
+                [0, d['fy'], d['ppy']],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            dist = np.array(d.get('dist', [0] * 5), dtype=np.float64)
+            w, h = d.get('width', 640), d.get('height', 480)
+        except Exception as exc:
+            print(f'  Error loading gripper intrinsics: {exc}')
+            return
+        # Use last gripper frame, or grab a fresh one
+        frame = None
+        if self._last_gripper_frame is not None:
+            frame = self._last_gripper_frame.copy()
+        elif self._gripper_cap is not None:
+            for _ in range(3):
+                self._gripper_cap.read()
+            ok, frame = self._gripper_cap.read()
+            if not ok:
+                frame = None
+        if frame is None and self._gripper_intr_frames:
+            frame = self._gripper_intr_frames[-1].copy()
+        if frame is None:
+            print('  No gripper frame available for visualisation — start preview first')
+            return
+        new_K, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
+        undistorted = cv2.undistort(frame, K, dist, None, new_K)
+        for img, label in [(frame, 'Gripper-Orig'), (undistorted, 'Gripper-Undist')]:
+            cv2.putText(img, label, (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        combined = np.hstack([frame, undistorted])
+        img_q = cv_to_qimage(combined)
+        pix = QPixmap.fromImage(img_q).scaled(
+            self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.setPixmap(pix)
+        rms = d.get('rms_error', float('nan'))
+        print(f'  Visualised gripper intrinsics: fx={K[0,0]:.1f} fy={K[1,1]:.1f} '
+              f'ppx={K[0,2]:.1f} ppy={K[1,2]:.1f}  rms={rms:.3f}px')
+
+    def _clear_gripper_frames(self):
+        """Discard all captured gripper intrinsics frames."""
+        self._gripper_intr_frames.clear()
+        self._last_gripper_frame = None
+        print('  Cleared all gripper intrinsics frames')
+        self._update_gripper_status()
 
     def _capture_ground(self):
         if self.app.camera is None:
