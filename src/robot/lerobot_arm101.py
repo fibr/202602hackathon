@@ -353,7 +353,8 @@ class LeRobotArm101:
             except Exception:
                 pass  # Other errors (e.g., bad angles), skip check
 
-        positions = [self._deg_to_pos(a) for a in angles]
+        positions = [self._deg_to_pos_motor(a, mid)
+                     for a, mid in zip(angles, self.motor_ids)]
         self.write_all_positions(positions, speed)
 
     # --- Gripper ---
@@ -488,6 +489,20 @@ class LeRobotArm101:
             Clamped raw position in [0, 4095].
         """
         pos = int(round(deg * POS_PER_DEG + POS_CENTER))
+        return max(0, min(4095, pos))
+
+    def _deg_to_pos_motor(self, deg: float, motor_id: int) -> int:
+        """Convert degrees to raw position using per-motor zero offset.
+
+        Args:
+            deg: Angle in degrees (0° = calibrated zero for this motor).
+            motor_id: Motor ID for offset lookup.
+
+        Returns:
+            Clamped raw position in [0, 4095].
+        """
+        center = self._zero_offsets.get(motor_id, POS_CENTER)
+        pos = int(round(deg * POS_PER_DEG + center))
         return max(0, min(4095, pos))
 
     def _pos_to_deg_motor(self, pos: int, motor_id: int) -> float:
