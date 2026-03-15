@@ -322,7 +322,7 @@ class BoardDetector:
         obj_pts = self.get_object_points(detection)
         corners_2d = detection.corners.reshape(-1, 2)
 
-        if len(obj_pts) < 4:
+        if len(obj_pts) < 6:
             return None, None, None
 
         camera_matrix = np.array([
