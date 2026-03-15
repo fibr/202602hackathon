@@ -894,7 +894,7 @@ class CheckerboardCalibView(BaseViewWidget):
         super().__init__(app, parent)
         self._cam_thread = None
         self._poll_thread = None
-        self._he_points = []  # hand-eye correspondences: list of (p_robot_m, p_cam)
+        self._he_points = []  # hand-eye correspondences: list of (p_robot_m, p_cam, pixel_x, pixel_y)
         self._intr_frames = []
         self._ground_samples = []
         self._last_frame = None  # most recent camera frame (for click handler)
@@ -988,12 +988,56 @@ class CheckerboardCalibView(BaseViewWidget):
 
     def _on_frame(self, frame):
         h, w = frame.shape[:2]
-        img = cv_to_qimage(frame)
+        # Apply numbered markers for hand-eye click points
+        frame_with_markers = self._draw_he_markers(frame)
+        img = cv_to_qimage(frame_with_markers)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cam_label.set_source_size(w, h)
         self._cam_label.setPixmap(pix)
         self._last_frame = frame.copy()
+
+    def _draw_he_markers(self, frame):
+        """Draw numbered markers at each recorded hand-eye click point on the frame.
+
+        Args:
+            frame: BGR numpy array from camera
+
+        Returns:
+            Frame with numbered markers drawn at each recorded pixel location
+        """
+        frame_marked = frame.copy()
+        h, w = frame.shape[:2]
+
+        # Draw a marker for each recorded hand-eye point
+        for idx, point in enumerate(self._he_points, start=1):
+            # point is now (p_robot_m, p_cam, x, y)
+            if len(point) >= 4:
+                x, y = int(point[2]), int(point[3])
+                # Ensure coordinates are within frame bounds
+                if 0 <= x < w and 0 <= y < h:
+                    # Draw a circle at the clicked position
+                    radius = 15
+                    color = (0, 255, 0)  # Green circle
+                    thickness = 2
+                    cv2.circle(frame_marked, (x, y), radius, color, thickness)
+
+                    # Draw the point number inside or near the circle
+                    text = str(idx)
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.6
+                    text_thickness = 2
+                    text_color = (0, 255, 0)
+
+                    # Get text size to center it
+                    text_size = cv2.getTextSize(text, font, font_scale, text_thickness)[0]
+                    text_x = x - text_size[0] // 2
+                    text_y = y + text_size[1] // 2
+
+                    cv2.putText(frame_marked, text, (text_x, text_y), font,
+                               font_scale, text_color, text_thickness)
+
+        return frame_marked
 
     def _on_cam_click(self, x: int, y: int) -> None:
         """Handle left-click on the camera image: record a hand-eye correspondence.
@@ -1071,12 +1115,13 @@ class CheckerboardCalibView(BaseViewWidget):
                 return
             p_robot_m = np.array(pose[:3], dtype=float) / 1000.0
 
-            self._he_points.append((p_robot_m, p_cam))
+            self._he_points.append((p_robot_m, p_cam, x, y))  # Store pixel coords (x, y) as well
             self._he_status.setText(f'Points: {len(self._he_points)}')
             print(
                 f'  [HE click] Point {len(self._he_points)}: '
                 f'cam=[{p_cam[0]:.4f}, {p_cam[1]:.4f}, {p_cam[2]:.4f}] '
                 f'robot=[{pose[0]:.1f}, {pose[1]:.1f}, {pose[2]:.1f}] mm  '
+                f'pixel=({x}, {y}) '
                 f'(reproj {reproj_err:.2f} px)'
             )
 
