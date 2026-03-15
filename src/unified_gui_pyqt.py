@@ -1515,6 +1515,9 @@ class HandEyeYellowView(BaseViewWidget):
     show_in_sidebar = False
     parent_view_id = 'calibration'
 
+    # Signal emitted by worker thread to update progress bar
+    progress_updated = pyqtSignal(int, int)  # (current, total)
+
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self._cam_thread = None
@@ -1532,6 +1535,8 @@ class HandEyeYellowView(BaseViewWidget):
         # Manual click override: set when user clicks camera; None = use auto-detect
         self._manual_pixel = None
         self._build_ui()
+        # Connect progress signal to update progress bar
+        self.progress_updated.connect(self._on_progress_update)
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
@@ -1565,6 +1570,21 @@ class HandEyeYellowView(BaseViewWidget):
         self._detail.setStyleSheet('color: #888; font-family: monospace; font-size: 11px;')
         self._detail.setWordWrap(True)
         ctrl_layout.addWidget(self._detail)
+
+        # Progress bar for joint solve optimization
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setStyleSheet('''
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 3px;
+                background-color: #222;
+            }
+            QProgressBar::chunk {
+                background-color: #3c705a;
+            }
+        ''')
+        ctrl_layout.addWidget(self._progress_bar)
 
         # Pixel mode indicator (auto-detect vs. manual click override)
         self._pixel_mode_label = QLabel('Pixel: auto-detect')
@@ -1791,6 +1811,8 @@ class HandEyeYellowView(BaseViewWidget):
             self._status.setText('ERROR: solver or intrinsics not available')
             return
         self._status.setText('Solving...')
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(0)
         print(f'\n  Joint solve: {n} points, optimising offsets + extrinsics...')
         # Run in thread to avoid blocking GUI
         threading.Thread(target=self._run_joint_solve, daemon=True).start()
@@ -1800,9 +1822,15 @@ class HandEyeYellowView(BaseViewWidget):
         from calibration.calib_helpers import joint_solve, save_offsets_dict, \
             save_handeye_calibration, load_offsets, HANDEYE_FILE
         try:
+            # Create progress callback that emits the signal
+            def progress_callback(current, total):
+                """Called from optimization loop with progress updates."""
+                self.progress_updated.emit(current, total)
+
             opt_offsets, T_c2b = joint_solve(
                 self._raw_positions_list, self._pts_2d,
-                self._K, self._dist_coeffs, self._solver)
+                self._K, self._dist_coeffs, self._solver,
+                progress_callback=progress_callback)
             if opt_offsets is not None:
                 save_offsets_dict(opt_offsets)
                 save_handeye_calibration(T_c2b, HANDEYE_FILE)
@@ -1812,14 +1840,17 @@ class HandEyeYellowView(BaseViewWidget):
                 QTimer.singleShot(0, lambda: self._status.setText(msg))
                 QTimer.singleShot(0, lambda: self._detail.setText(
                     f'Saved to servo_offsets.yaml + {os.path.basename(HANDEYE_FILE)}'))
+                QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
             else:
                 msg = 'Joint solve FAILED — check captures'
                 print(f'  {msg}')
                 QTimer.singleShot(0, lambda: self._status.setText(msg))
+                QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
         except Exception as e:
             msg = f'Solve error: {e}'
             print(f'  {msg}')
             QTimer.singleShot(0, lambda: self._status.setText(msg))
+            QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
 
     def _undo(self):
         if self._captures:
@@ -1838,6 +1869,15 @@ class HandEyeYellowView(BaseViewWidget):
         self._pts_3d_robot.clear()
         self._status.setText('Captures: 0 (need >= 6)')
         self._detail.setText('All captures cleared')
+
+    def _on_progress_update(self, current, total):
+        """Slot to update progress bar from worker thread signal."""
+        self._progress_bar.setMaximum(total)
+        self._progress_bar.setValue(current)
+        # Update percentage in status
+        if total > 0:
+            pct = int(100 * current / total)
+            self._status.setText(f'Solving... {pct}%')
 
 
 class GripperCameraThread(QThread):

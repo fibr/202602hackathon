@@ -350,7 +350,7 @@ def solve_and_save_handeye(pts_3d_robot, pts_2d, K, dist):
     return False
 
 
-def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver):
+def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver, progress_callback=None):
     """Jointly optimise servo zero offsets + camera extrinsics.
 
     Instead of trusting FK (which uses potentially wrong offsets), we
@@ -372,6 +372,8 @@ def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver):
         K: 3x3 camera intrinsic matrix.
         dist_coeffs: Distortion coefficients.
         solver: Arm101IKSolver instance.
+        progress_callback: Optional callable(iteration: int, max_iterations: int)
+            called during optimization to report progress.
 
     Returns:
         (offsets_dict, T_cam2base) or (None, None) on failure.
@@ -454,7 +456,18 @@ def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver):
     e0 = np.linalg.norm(r0, axis=1)
     print(f"  Initial error: mean={np.mean(e0):.1f}px, max={np.max(e0):.1f}px")
 
-    result = least_squares(residuals, x0, method='lm', max_nfev=5000)
+    # Setup progress tracking
+    iteration_count = [0]  # Use list to allow modification in nested function
+    max_iterations = 5000
+
+    def progress_wrapper(xk, *args, **kwargs):
+        """Wrapper to track optimization progress."""
+        iteration_count[0] += 1
+        if progress_callback is not None:
+            progress_callback(iteration_count[0], max_iterations)
+
+    result = least_squares(residuals, x0, method='lm', max_nfev=max_iterations,
+                          callback=progress_wrapper)
 
     offsets_opt = result.x[:5]
     rvec_opt = result.x[5:8]
