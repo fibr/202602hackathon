@@ -266,21 +266,41 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     # Optional: connect to real arm for mirroring
     real_arm = None
-    ik_solver = None
+    joint_signs = None
     if args_cli.mirror:
         try:
             sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
-            print(f"[INFO]: Importing arm101 driver...", flush=True)
+            print("[INFO]: Importing arm101 driver...", flush=True)
             from robot.lerobot_arm101 import LeRobotArm101
-            print(f"[INFO]: Importing IK solver...", flush=True)
-            from kinematics.arm101_ik_solver import Arm101IKSolver
+
+            # Load joint signs from servo_offsets.yaml (avoids importing
+            # Pinocchio which conflicts with Isaac Sim's Assimp library).
+            import yaml
+            _SIGN_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
+                           "wrist_flex", "wrist_roll"]
+            _DEFAULT_SIGNS = np.array([-1.0, 1.0, -1.0, 1.0, 1.0])
+            joint_signs = _DEFAULT_SIGNS.copy()
+            _offsets_path = os.path.expanduser(
+                "~/.config/202602hackathon/servo_offsets.yaml")
+            if os.path.exists(_offsets_path):
+                with open(_offsets_path) as _f:
+                    _data = yaml.safe_load(_f)
+                _sd = _data.get("joint_signs") if _data else None
+                if _sd and isinstance(_sd, dict):
+                    joint_signs = np.array([
+                        float(_sd.get(n, _DEFAULT_SIGNS[i]))
+                        for i, n in enumerate(_SIGN_NAMES)
+                    ])
+                print(f"[INFO]: Loaded joint signs from {_offsets_path}", flush=True)
+            else:
+                print(f"[WARN]: {_offsets_path} not found, using defaults", flush=True)
+
             port = LeRobotArm101.find_port()
             print(f"[INFO]: Found port {port}, connecting...", flush=True)
             real_arm = LeRobotArm101(port=port)
             real_arm.connect()
-            ik_solver = Arm101IKSolver()
             print(f"[INFO]: Connected to real arm on {port} for mirroring", flush=True)
-            print(f"[INFO]: Joint signs: {ik_solver.signs}", flush=True)
+            print(f"[INFO]: Joint signs: {joint_signs}", flush=True)
         except Exception as e:
             import traceback
             print(f"[WARN]: Could not connect to real arm: {e}", flush=True)
@@ -322,9 +342,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 # Mirror real arm joint angles (convert motor→URDF via signs)
                 try:
                     motor_angles = real_arm.read_all_angles()  # 6 motor angles in degrees
-                    # Apply joint signs: urdf_deg = motor_deg * sign
-                    urdf_rad = ik_solver._motor_to_urdf(
-                        np.array(motor_angles[:5], dtype=float))
+                    # Apply joint signs inline: urdf_rad = motor_deg * sign * pi/180
+                    motor_deg = np.array(motor_angles[:5], dtype=float)
+                    urdf_rad = np.zeros(6)
+                    urdf_rad[:5] = motor_deg * joint_signs * (math.pi / 180.0)
                     # Include gripper (no sign correction)
                     urdf_rad[5] = math.radians(motor_angles[5]) if len(motor_angles) > 5 else 0.0
                     targets = torch.tensor(
