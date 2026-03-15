@@ -18,8 +18,7 @@ except ImportError:
     HAS_PINOCCHIO = False
 
 
-# Joint chain: list of (frame_name, color_bgr) pairs in kinematic order.
-# We draw line segments between consecutive frames.
+# Joint chain: frame names in kinematic order.
 _JOINT_CHAIN = [
     'base_link',
     'shoulder_link',
@@ -28,6 +27,17 @@ _JOINT_CHAIN = [
     'wrist_link',
     'gripper_link',
     'gripper_frame_link',
+]
+
+# Short labels for each joint (drawn next to the joint circle)
+_JOINT_LABELS = [
+    'Base',        # base_link
+    'J1:Pan',      # shoulder_link
+    'J2:Lift',     # upper_arm_link
+    'J3:Elbow',    # lower_arm_link
+    'J4:Wrist',    # wrist_link
+    'J5:Roll',     # gripper_link
+    'Grip',        # gripper_frame_link
 ]
 
 # Colors for each link segment (BGR)
@@ -252,6 +262,7 @@ class ArmRenderer:
                      _shade(color, avg_depth), _thick(avg_depth))
 
         if draw_joints:
+            font = cv2.FONT_HERSHEY_SIMPLEX
             for i, pt in enumerate(points_2d):
                 d = depths[i] if depths else 0
                 r = max(3, int(6 * (1 - (d - d_min) / d_range)))  # near=6px, far=3px
@@ -271,6 +282,13 @@ class ArmRenderer:
                     cv2.circle(canvas, pt, r,
                                _shade(color_override or (255, 255, 255), d), -1)
                     cv2.circle(canvas, pt, r, (60, 60, 60), 1)
+
+                # Joint label
+                if i < len(_JOINT_LABELS) and not color_override:
+                    label = _JOINT_LABELS[i]
+                    lx, ly = pt[0] + r + 4, pt[1] - 2
+                    cv2.putText(canvas, label, (lx, ly), font, 0.3,
+                                _shade((180, 180, 180), d), 1)
 
     def render_comparison(self, canvas: np.ndarray,
                           actual_angles: np.ndarray,
