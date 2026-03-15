@@ -131,10 +131,12 @@ def arm(clear_servo_offsets):
     """LeRobotArm101 with mock serial port; all motors at center (0°).
 
     Uses clear_servo_offsets fixture to isolate from hardware calibration.
+    Simulates a connected arm (servos enabled).
     """
     robot = LeRobotArm101('/dev/ttyACM0')
     robot.port_handler = _ph()
     robot.packet_handler = _pkt(read_pos=POS_CENTER)
+    robot._enabled = True  # simulate post-connect state
     return robot
 
 
@@ -367,7 +369,7 @@ class TestTorqueControl:
 
     def test_set_safe_mode_on_while_disabled_no_torque_write(self, arm):
         """set_safe_mode(True) while disabled should NOT write max-torque register."""
-        assert arm._enabled is False
+        arm._enabled = False  # simulate disabled state
         arm.packet_handler.write2ByteTxRx.reset_mock()
         arm.set_safe_mode(True)
         assert len([c for c in arm.packet_handler.write2ByteTxRx.call_args_list
@@ -851,8 +853,10 @@ class TestInitialisation:
     def test_safe_mode_off_by_default(self, arm):
         assert arm.safe_mode is False
 
-    def test_not_enabled_by_default(self, arm):
-        assert arm._enabled is False
+    def test_not_enabled_before_connect(self):
+        """Before connect(), _enabled should be False."""
+        robot = LeRobotArm101('/dev/ttyACM0')
+        assert robot._enabled is False
 
     def test_custom_baudrate(self):
         robot = LeRobotArm101('/dev/ttyACM0', baudrate=115200)

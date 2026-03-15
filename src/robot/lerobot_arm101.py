@@ -178,6 +178,9 @@ class LeRobotArm101:
                 print(f"  Motor {motor_id} ({MOTOR_NAMES[motor_id-1]}): OK "
                       f"(model {model})")
 
+        # Servos are enabled by default after power-on
+        self._enabled = True
+
     def disconnect(self):
         """Disable torque and close serial port."""
         try:
@@ -207,11 +210,15 @@ class LeRobotArm101:
         self._enabled = True
 
     def disable_torque(self, motor_ids: Optional[list] = None):
-        """Disable torque on specified motors (default: all)."""
+        """Disable torque on specified motors (default: all).
+
+        Also sets _enabled = False which blocks subsequent write commands
+        until enable_torque() is called again.
+        """
+        self._enabled = False  # block writes immediately
         ids = motor_ids or self.motor_ids
         for mid in ids:
             self._write1(mid, ADDR_TORQUE_ENABLE, 0)
-        self._enabled = False
 
     def set_safe_mode(self, enabled: bool):
         """Toggle safe mode (reduced torque and speed).
@@ -297,11 +304,15 @@ class LeRobotArm101:
     def write_position(self, motor_id: int, position: int, speed: int = None):
         """Write goal position to a single motor.
 
+        Silently ignored if servos are disabled (torque off).
+
         Args:
             motor_id: Motor ID (1-6).
             position: Target position (0-4095).
             speed: Movement speed (0-4095). None = use default.
         """
+        if not self._enabled:
+            return
         position = max(0, min(4095, position))
         spd = speed if speed is not None else self.speed
         self._write2(motor_id, ADDR_GOAL_SPEED, spd)
