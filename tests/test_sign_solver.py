@@ -38,7 +38,9 @@ except ImportError:
 
 try:
     from calibration.sign_solver import (
-        _brute_force_signs, _pose_to_matrix)
+        _brute_force_signs, _pose_to_matrix, _rotation_error,
+        _build_consistency_residuals, _compute_board_poses,
+        ORIENTATION_WEIGHT, OFFSET_REG_WEIGHT)
     HAS_SIGN_SOLVER = True
 except Exception:
     HAS_SIGN_SOLVER = False
@@ -265,3 +267,156 @@ class TestBruteForceSignSolverSynthetic:
         signs = result['signs']
         expected_str = ''.join('+' if s > 0 else '-' for s in signs)
         assert result['signs_str'] == expected_str
+
+    def test_ori_spread_deg_present(self, solver_result):
+        """New constrained solver returns orientation spread diagnostic."""
+        result, _ = solver_result
+        assert 'ori_spread_deg' in result
+        assert result['ori_spread_deg'] >= 0
+
+    def test_ori_spread_low_on_synthetic(self, solver_result):
+        """With correct signs, orientation spread should be near zero."""
+        result, _ = solver_result
+        assert result['ori_spread_deg'] < 5.0, (
+            f"Expected orientation spread < 5° on synthetic data, "
+            f"got {result['ori_spread_deg']:.2f}°")
+
+    def test_all_results_have_ori_spread(self, solver_result):
+        """Every sign combo result should include orientation spread."""
+        result, _ = solver_result
+        for r in result['all_results']:
+            assert 'ori_spread_deg' in r
+            assert isinstance(r['ori_spread_deg'], float)
+
+    def test_ambiguous_joints_is_set(self, solver_result):
+        """ambiguous_joints should be a set of joint indices."""
+        result, _ = solver_result
+        assert isinstance(result['ambiguous_joints'], set)
+        for j in result['ambiguous_joints']:
+            assert 0 <= j < 5
+
+
+class TestConstraintHelpers:
+    """Test the individual constraint helper functions."""
+
+    def test_rotation_error_identity(self):
+        """Rotation error between identical matrices is zero."""
+        R = np.eye(3)
+        assert _rotation_error(R, R) == pytest.approx(0.0, abs=1e-10)
+
+    def test_rotation_error_90deg(self):
+        """Rotation error for 90° rotation around Z."""
+        R1 = np.eye(3)
+        R2 = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=float)
+        err = _rotation_error(R1, R2)
+        assert err == pytest.approx(np.pi / 2, abs=1e-6)
+
+    def test_rotation_error_180deg(self):
+        """Rotation error for 180° rotation."""
+        R1 = np.eye(3)
+        R2 = np.diag([1.0, -1.0, -1.0])  # 180° around X
+        err = _rotation_error(R1, R2)
+        assert err == pytest.approx(np.pi, abs=1e-6)
+
+    def test_rotation_error_symmetric(self):
+        """Rotation error should be symmetric."""
+        rng = np.random.default_rng(99)
+        from scipy.spatial.transform import Rotation
+        R1 = Rotation.random(random_state=rng).as_matrix()
+        R2 = Rotation.random(random_state=rng).as_matrix()
+        assert _rotation_error(R1, R2) == pytest.approx(
+            _rotation_error(R2, R1), abs=1e-10)
+
+
+class TestConstrainedSolverSynthetic:
+    """Tests specific to the constrained solver features."""
+
+    def test_wrong_signs_have_higher_error(self, synthetic_setup):
+        """Sign combos far from truth should have worse combined error."""
+        s = synthetic_setup
+        result = _brute_force_signs(
+            captures=s['captures'],
+            solver=s['solver'],
+            current_offsets_raw=s['current_offsets_raw'],
+            verbose=False,
+        )
+        best = result['all_results'][0]
+        # Find a result with all signs flipped (maximally wrong)
+        worst_signs_str = ''.join(
+            '-' if s > 0 else '+' for s in result['signs'])
+        worst = [r for r in result['all_results']
+                 if r['signs_str'] == worst_signs_str]
+        if worst:
+            # Flipped signs should have much worse position error
+            assert worst[0]['mean_err_mm'] > best['mean_err_mm'] * 1.5, (
+                f"All-flipped signs ({worst_signs_str}) should have "
+                f"much worse error than best ({best['signs_str']}): "
+                f"{worst[0]['mean_err_mm']:.1f} vs {best['mean_err_mm']:.1f}")
+
+    def test_offset_regularization_prevents_drift(self, synthetic_setup):
+        """With strong regularization, offsets should stay near initial values."""
+        s = synthetic_setup
+        result = _brute_force_signs(
+            captures=s['captures'],
+            solver=s['solver'],
+            current_offsets_raw=s['current_offsets_raw'],
+            verbose=False,
+            offset_reg_weight=0.01,  # Strong regularization
+        )
+        # Offsets should be close to initial (true) values
+        offset_drift = np.abs(result['offsets_raw'] - s['true_offsets_raw'])
+        max_drift = np.max(offset_drift)
+        assert max_drift < 100, (
+            f"With strong offset regularization, max drift should be < 100 "
+            f"raw units, got {max_drift:.0f}")
+
+    def test_custom_weights_accepted(self, synthetic_setup):
+        """Solver accepts custom constraint weights without error."""
+        s = synthetic_setup
+        result = _brute_force_signs(
+            captures=s['captures'],
+            solver=s['solver'],
+            current_offsets_raw=s['current_offsets_raw'],
+            verbose=False,
+            orientation_weight=0.2,
+            offset_reg_weight=1e-4,
+            tcam_prior_weight=0.02,
+        )
+        assert result['mean_err_mm'] < 50.0
+        assert len(result['all_results']) == 32
+
+    def test_wrist_roll_resolved_with_orientation(self, synthetic_setup):
+        """Orientation constraints should help resolve wrist_roll ambiguity.
+
+        Wrist_roll (J5) rotates the camera around the gripper axis.  Position-
+        only consistency can't detect a wrong J5 sign because the board origin
+        barely moves.  But the board *orientation* changes, so orientation
+        residuals should disambiguate.
+        """
+        s = synthetic_setup
+        result = _brute_force_signs(
+            captures=s['captures'],
+            solver=s['solver'],
+            current_offsets_raw=s['current_offsets_raw'],
+            verbose=False,
+        )
+        # J5 (index 4) should ideally not be ambiguous with orientation
+        # constraints.  We test that it's either correct or at least the
+        # orientation spread separates it.
+        best = result['all_results'][0]
+        # Find the combo that differs only in J5
+        j5_flipped_str = best['signs_str'][:4] + (
+            '-' if best['signs_str'][4] == '+' else '+')
+        j5_flipped = [r for r in result['all_results']
+                      if r['signs_str'] == j5_flipped_str]
+        if j5_flipped:
+            # The J5-flipped combo should have clearly worse error
+            # or worse orientation spread
+            assert (j5_flipped[0]['mean_err_mm'] > best['mean_err_mm'] * 1.05
+                    or j5_flipped[0]['ori_spread_deg'] >
+                    best['ori_spread_deg'] * 1.5), (
+                f"J5-flipped combo should be distinguishable: "
+                f"best={best['mean_err_mm']:.1f}mm/"
+                f"{best['ori_spread_deg']:.2f}°, "
+                f"flipped={j5_flipped[0]['mean_err_mm']:.1f}mm/"
+                f"{j5_flipped[0]['ori_spread_deg']:.2f}°")
