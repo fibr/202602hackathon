@@ -412,7 +412,7 @@ class ArmRenderer:
             persp = 1.0 + y3 * 0.8  # subtle foreshortening
             persp = max(persp, 0.3)
 
-            sx = int(cx - x2 * self.zoom * persp)  # negated: screen matches robot's perspective
+            sx = int(cx + x2 * self.zoom * persp)
             sy = int(cy - z3 * self.zoom * persp)
             results.append((sx, sy, y3))
 
@@ -515,7 +515,7 @@ class ArmRenderer:
         # Perspective
         persp = np.clip(1.0 + y3 * 0.8, 0.3, None)
 
-        sx = cx - x2 * self.zoom * persp  # negated: screen matches robot's perspective
+        sx = cx + x2 * self.zoom * persp
         sy = cy - z3 * self.zoom * persp
 
         return np.column_stack([sx, sy, y3])
