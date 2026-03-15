@@ -376,12 +376,14 @@ def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver, progress_cal
             called during optimization to report progress.
 
     Returns:
-        (offsets_dict, T_cam2base) or (None, None) on failure.
+        (offsets_dict, T_cam2base, errs_px) or (None, None, None) on failure.
+        errs_px is a 1-D numpy array of per-point Euclidean reprojection errors
+        (pixels), one value per observation, in the same order as raw_positions_list.
     """
     n = len(pts_2d)
     if n < 6:
         print(f"  Need >= 6 points for joint solve (have {n})")
-        return None, None
+        return None, None, None
 
     # Current offsets as initial guess
     current_offsets = load_offsets()
@@ -563,7 +565,7 @@ def joint_solve(raw_positions_list, pts_2d, K, dist_coeffs, solver, progress_cal
             'zero_raw': int(round(offsets_opt[i])),
         }
 
-    return offsets_dict, T_c2b
+    return offsets_dict, T_c2b, errs_px
 
 
 # ---------------------------------------------------------------------------

@@ -1881,6 +1881,8 @@ class HandEyeYellowView(BaseViewWidget):
         self._last_tcp = None
         # Manual click override: set when user clicks camera; None = use auto-detect
         self._manual_pixel = None
+        # Per-capture reprojection errors (px) set after joint_solve; None before first solve
+        self._reproj_errors = None
         self._build_ui()
         # Connect progress signal to update progress bar
         self.progress_updated.connect(self._on_progress_update)
@@ -1913,10 +1915,10 @@ class HandEyeYellowView(BaseViewWidget):
         self._status.setStyleSheet('color: #aaa; font-family: monospace;')
         ctrl_layout.addWidget(self._status)
 
-        # Scrollable table of all captures
-        self._capture_table = QTableWidget(0, 6)
+        # Scrollable table of all captures (7 columns: 6 data + reprojection error after solve)
+        self._capture_table = QTableWidget(0, 7)
         self._capture_table.setHorizontalHeaderLabels(
-            ['#', 'TCP X', 'TCP Y', 'TCP Z', 'Px', 'Py'])
+            ['#', 'TCP X', 'TCP Y', 'TCP Z', 'Px', 'Py', 'Err(px)'])
         self._capture_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._capture_table.verticalHeader().setVisible(False)
         self._capture_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1980,6 +1982,14 @@ class HandEyeYellowView(BaseViewWidget):
         # Collect all pixels to detect duplicates
         all_pixels = [c.get('pixel') for c in self._captures]
 
+        # Pre-compute reprojection error threshold for outlier highlighting.
+        # Use 2 × median so that rows notably worse than the rest stand out.
+        reproj_threshold = None
+        if (self._reproj_errors is not None
+                and len(self._reproj_errors) >= 2):
+            median_err = float(np.median(self._reproj_errors))
+            reproj_threshold = 2.0 * median_err
+
         for i, cap in enumerate(self._captures):
             tcp = cap.get('tcp')
             px, py = cap.get('pixel', (None, None))
@@ -1988,7 +1998,19 @@ class HandEyeYellowView(BaseViewWidget):
             # Duplicate pixel detection: same pixel as any earlier capture
             is_duplicate = (px, py) in all_pixels[:i]
 
-            # Build row values
+            # Per-row reprojection error (available after joint_solve)
+            err_px = None
+            if (self._reproj_errors is not None
+                    and i < len(self._reproj_errors)):
+                err_px = float(self._reproj_errors[i])
+            err_str = f'{err_px:.1f}' if err_px is not None else '-'
+
+            # High-error flag: err > 2 × median (only meaningful post-solve)
+            is_high_error = (reproj_threshold is not None
+                             and err_px is not None
+                             and err_px > reproj_threshold)
+
+            # Build row values (7 columns)
             if tcp is not None:
                 vals = [
                     str(i + 1),
@@ -1997,11 +2019,13 @@ class HandEyeYellowView(BaseViewWidget):
                     f'{tcp[2]:.0f}',
                     str(int(px)) if px is not None else '?',
                     str(int(py)) if py is not None else '?',
+                    err_str,
                 ]
             else:
                 vals = [str(i + 1), '?', '?', '?',
                         str(int(px)) if px is not None else '?',
-                        str(int(py)) if py is not None else '?']
+                        str(int(py)) if py is not None else '?',
+                        err_str]
 
             row = t.rowCount()
             t.insertRow(row)
@@ -2009,10 +2033,20 @@ class HandEyeYellowView(BaseViewWidget):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignCenter)
 
-                # Colour coding: red=FK fail, yellow=duplicate pixel, green=good
+                # Colour coding priority:
+                #   1. red  — FK solve failed
+                #   2. red  — high reprojection error (outlier after solve)
+                #   3. yellow — duplicate pixel
+                #   4. green  — good
                 if not fk_ok:
                     item.setForeground(QColor('#ff6060'))
                     item.setToolTip('FK solve failed for this pose')
+                elif is_high_error:
+                    item.setForeground(QColor('#ff6060'))
+                    item.setToolTip(
+                        f'High reprojection error ({err_px:.1f} px) — '
+                        f'outlier (threshold {reproj_threshold:.1f} px); '
+                        f'consider deleting and re-solving')
                 elif is_duplicate:
                     item.setForeground(QColor('#ffcc44'))
                     item.setToolTip('Duplicate pixel — same as an earlier capture')
@@ -2211,6 +2245,8 @@ class HandEyeYellowView(BaseViewWidget):
         detail = (f'#{n}: TCP=[{tcp_pos[0]:.0f},{tcp_pos[1]:.0f},{tcp_pos[2]:.0f}] '
                   f'px=({cx},{cy})')
         print(f'  Captured pose {detail}')
+        # New capture invalidates previous solve errors
+        self._reproj_errors = None
         self._refresh_table()
 
     def _on_cam_click(self, img_x: int, img_y: int):
@@ -2256,23 +2292,30 @@ class HandEyeYellowView(BaseViewWidget):
                 """Called from optimization loop with progress updates."""
                 self.progress_updated.emit(current, total)
 
-            opt_offsets, T_c2b = joint_solve(
+            opt_offsets, T_c2b, errs_px = joint_solve(
                 self._raw_positions_list, self._pts_2d,
                 self._K, self._dist_coeffs, self._solver,
                 progress_callback=progress_callback)
             if opt_offsets is not None:
                 save_offsets_dict(opt_offsets)
                 save_handeye_calibration(T_c2b, HANDEYE_FILE)
+                # Store per-capture reprojection errors for table display
+                self._reproj_errors = errs_px.tolist()
                 msg = 'Joint solve OK — saved offsets + extrinsics'
                 print(f'  {msg}')
-                # Update status from main thread
+                # Update status and table from main thread
                 saved_fname = os.path.basename(HANDEYE_FILE)
-                status_msg = f'Joint solve OK — saved offsets + {saved_fname}'
+                mean_err = float(np.mean(errs_px))
+                status_msg = (f'Joint solve OK — saved offsets + {saved_fname}'
+                              f'  (mean reproj {mean_err:.1f} px)')
                 QTimer.singleShot(0, lambda m=status_msg: self._status.setText(m))
                 QTimer.singleShot(0, lambda: self._status.setStyleSheet(
                     'color: #88dd88; font-family: monospace;'))
                 QTimer.singleShot(0, lambda: self._progress_bar.setVisible(False))
+                # Refresh table to show per-row reprojection errors
+                QTimer.singleShot(0, self._refresh_table)
             else:
+                self._reproj_errors = None
                 msg = 'Joint solve FAILED — check captures'
                 print(f'  {msg}')
                 QTimer.singleShot(0, lambda m=msg: self._status.setText(m))
@@ -2293,6 +2336,8 @@ class HandEyeYellowView(BaseViewWidget):
             self._raw_positions_list.pop()
             self._pts_2d.pop()
             self._pts_3d_robot.pop()
+        # Capture list changed — reproj errors are stale
+        self._reproj_errors = None
         self._refresh_table()
 
     def _clear_all(self):
@@ -2300,6 +2345,7 @@ class HandEyeYellowView(BaseViewWidget):
         self._raw_positions_list.clear()
         self._pts_2d.clear()
         self._pts_3d_robot.clear()
+        self._reproj_errors = None
         self._refresh_table()
 
     def _on_progress_update(self, current, total):
