@@ -1528,17 +1528,20 @@ class HandEyeYellowView(BaseViewWidget):
         self._last_frame = None
         self._last_yellow = (None, None)
         self._last_tcp = None
+        # Manual click override: set when user clicks camera; None = use auto-detect
+        self._manual_pixel = None
         self._build_ui()
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # Camera feed (left)
-        self._cam_label = QLabel('Camera')
+        # Camera feed (left) — ClickableLabel so user can manually set pixel
+        self._cam_label = ClickableLabel('Camera')
         self._cam_label.setAlignment(Qt.AlignCenter)
         self._cam_label.setMinimumSize(480, 360)
         self._cam_label.setStyleSheet('background-color: #1a1a1a;')
+        self._cam_label.clicked.connect(self._on_cam_click)
         layout.addWidget(self._cam_label, stretch=3)
 
         # Controls (right)
@@ -1562,8 +1565,17 @@ class HandEyeYellowView(BaseViewWidget):
         self._detail.setWordWrap(True)
         ctrl_layout.addWidget(self._detail)
 
+        # Pixel mode indicator (auto-detect vs. manual click override)
+        self._pixel_mode_label = QLabel('Pixel: auto-detect')
+        self._pixel_mode_label.setStyleSheet(
+            'color: #aaa; font-family: monospace; font-size: 11px;')
+        self._pixel_mode_label.setWordWrap(True)
+        ctrl_layout.addWidget(self._pixel_mode_label)
+
         ctrl_layout.addWidget(make_button('Capture Pose', self._capture,
                                           'Capture FK + yellow tape position', '#506430'))
+        ctrl_layout.addWidget(make_button('Clear Click Override', self._clear_manual_pixel,
+                                          'Revert to auto-detect yellow tape', '#4a4a22'))
         ctrl_layout.addWidget(make_button('Solve', self._solve,
                                           'Run joint solve (>= 6 captures)', '#3c705a'))
         ctrl_layout.addWidget(make_button('Undo', self._undo, 'Remove last capture', '#644832'))
@@ -1662,6 +1674,7 @@ class HandEyeYellowView(BaseViewWidget):
         """Show camera feed with yellow tape overlay."""
         from calibration.calib_helpers import find_yellow_tape, draw_handeye_overlay
         self._last_frame = frame.copy()
+        h, w = frame.shape[:2]
         # Detect yellow tape for live overlay
         cx, cy, mask = find_yellow_tape(frame)
         self._last_yellow = (cx, cy)
@@ -1675,8 +1688,19 @@ class HandEyeYellowView(BaseViewWidget):
                     self._last_tcp = tcp_pos
             except Exception:
                 pass
+        # Choose which pixel to show in the overlay: manual override takes priority
+        overlay_pixel = (cx, cy)
+        if self._manual_pixel is not None:
+            overlay_pixel = self._manual_pixel
         # Draw overlay
-        draw_handeye_overlay(frame, tcp_pos, (cx, cy), len(self._pts_2d))
+        draw_handeye_overlay(frame, tcp_pos, overlay_pixel, len(self._pts_2d))
+        # Draw a prominent cyan crosshair when manual override is active
+        if self._manual_pixel is not None:
+            mx, my = self._manual_pixel
+            cv2.drawMarker(frame, (mx, my), (0, 255, 255),
+                           cv2.MARKER_CROSS, 24, 3, cv2.LINE_AA)
+            cv2.putText(frame, 'MANUAL', (mx + 14, my - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
         # Show small yellow mask in corner
         if mask is not None:
             try:
@@ -1688,6 +1712,7 @@ class HandEyeYellowView(BaseViewWidget):
         img = cv_to_qimage(frame)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._cam_label.set_source_size(w, h)
         self._cam_label.setPixmap(pix)
 
     def _capture(self):
@@ -1713,10 +1738,13 @@ class HandEyeYellowView(BaseViewWidget):
         if tcp_pos is None:
             self._status.setText('SKIP: cannot compute FK')
             return
-        # Yellow tape detection from last frame
-        cx, cy = self._last_yellow
+        # Pixel source: manual click override takes priority over auto-detect
+        if self._manual_pixel is not None:
+            cx, cy = self._manual_pixel
+        else:
+            cx, cy = self._last_yellow
         if cx is None:
-            self._status.setText('SKIP: no yellow tape detected')
+            self._status.setText('SKIP: no yellow tape detected — click camera to set manually')
             return
         # Store capture
         self._raw_positions_list.append(dict(raw_positions))
@@ -1734,6 +1762,21 @@ class HandEyeYellowView(BaseViewWidget):
                   f'px=({cx},{cy})')
         self._detail.setText(detail)
         print(f'  Captured pose {detail}')
+
+    def _on_cam_click(self, img_x: int, img_y: int):
+        """Store a manual pixel override when the user clicks the camera feed."""
+        self._manual_pixel = (img_x, img_y)
+        self._pixel_mode_label.setText(
+            f'Pixel: MANUAL ({img_x}, {img_y})\nClick camera to update')
+        self._pixel_mode_label.setStyleSheet(
+            'color: #00ffff; font-family: monospace; font-size: 11px; font-weight: bold;')
+
+    def _clear_manual_pixel(self):
+        """Remove manual pixel override; revert to auto-detect."""
+        self._manual_pixel = None
+        self._pixel_mode_label.setText('Pixel: auto-detect')
+        self._pixel_mode_label.setStyleSheet(
+            'color: #aaa; font-family: monospace; font-size: 11px;')
 
     def _solve(self):
         """Run joint_solve to optimise servo offsets + camera extrinsics."""
