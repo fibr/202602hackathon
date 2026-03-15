@@ -226,7 +226,7 @@ def main():
     pos_log_count = 0
 
     # GUI panel
-    panel = RobotControlPanel(robot, panel_x=cam_width, panel_height=cam_height)
+    panel = RobotControlPanel(robot, panel_x=cam_width, panel_height=cam_height, config=config)
     panel.speed = speed
 
     robot_name = "arm101" if use_arm101 else "Dobot Nova5"

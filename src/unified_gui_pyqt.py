@@ -779,7 +779,9 @@ class ControlPanelView(BaseViewWidget):
 
         def _home():
             if self._is_arm101():
-                self.app.robot.move_joints([0] * 6, speed=100)
+                home = self.app.config.get('arm101', {}).get(
+                    'home_angles', [0.0, 0.0, 90.0, 90.0, 0.0, 0.0])
+                self.app.robot.move_joints(home, speed=100)
             else:
                 self.app.robot.send('SpeedFactor(10)')
                 self.app.robot.send('MovJ(joint={43.5,-13.9,-85.4,196.3,-90.0,43.5})')

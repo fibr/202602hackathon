@@ -514,7 +514,7 @@ def main():
     panel = None
     if robot:
         adapter = DobotPanelAdapter(robot)
-        panel = RobotControlPanel(adapter, panel_x=width, panel_height=height)
+        panel = RobotControlPanel(adapter, panel_x=width, panel_height=height, config=config)
         robot_speed = config.get('robot', {}).get('speed_percent', 30)
         panel.speed = robot_speed
 

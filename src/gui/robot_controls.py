@@ -80,11 +80,12 @@ class RobotControlPanel:
         panel_height: Total panel height (= canvas height).
     """
 
-    def __init__(self, robot, panel_x, panel_height=480):
+    def __init__(self, robot, panel_x, panel_height=480, config=None):
         self.robot = robot
         self.panel_x = panel_x
         self.panel_width = PANEL_WIDTH
         self.panel_height = panel_height
+        self._config = config or {}
 
         # Detect robot type
         self._arm101 = getattr(robot, 'robot_type', None) == 'arm101'
@@ -821,7 +822,9 @@ class RobotControlPanel:
 
         if self._arm101:
             try:
-                home = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # center position
+                cfg = getattr(self, '_config', None) or {}
+                home = cfg.get('arm101', {}).get(
+                    'home_angles', [0.0, 0.0, 90.0, 90.0, 0.0, 0.0])
                 self.robot.move_joints(home, speed=100)
                 time.sleep(1.0)
                 self.status_msg = "Home done"

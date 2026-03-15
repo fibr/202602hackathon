@@ -411,7 +411,7 @@ def main():
     print(f"Camera started ({width}x{height}).\n")
 
     # GUI panel (always shown; robot=None disables arm controls)
-    panel = RobotControlPanel(robot, panel_x=width, panel_height=height)
+    panel = RobotControlPanel(robot, panel_x=width, panel_height=height, config=config)
     if robot:
         panel.speed = speed
         if use_arm101:
