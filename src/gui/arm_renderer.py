@@ -281,6 +281,111 @@ class ArmRenderer:
 
         return canvas
 
+    def draw_on_camera_frame(self, canvas: np.ndarray,
+                             motor_angles_deg: np.ndarray,
+                             K: np.ndarray,
+                             dist_coeffs: np.ndarray,
+                             T_base_to_camera: np.ndarray,
+                             color_override: tuple = None,
+                             alpha: float = 1.0,
+                             thickness: int = None,
+                             draw_joints: bool = True) -> np.ndarray:
+        """Draw the FK skeleton onto a camera frame using the calibration transform.
+
+        Projects 3D joint positions (robot base frame) into the camera image
+        using the hand-eye calibration transform and camera intrinsics.
+
+        Args:
+            canvas: BGR camera frame to draw on.
+            motor_angles_deg: 5 or 6 motor angles in degrees.
+            K: 3x3 camera intrinsic matrix.
+            dist_coeffs: Distortion coefficients (5-element array).
+            T_base_to_camera: 4x4 homogeneous transform from robot base frame
+                to camera frame (i.e. the inverse of T_camera_to_base).
+            color_override: Optional single color for all links (BGR).
+            alpha: Opacity (1.0 = opaque).
+            thickness: Override link thickness.
+            draw_joints: Whether to draw joint circles.
+
+        Returns:
+            The modified canvas.
+        """
+        positions_3d = self.get_joint_positions(motor_angles_deg)
+        if not positions_3d:
+            return canvas
+
+        # Stack positions into (N, 3) array (meters, in base frame)
+        pts_base = np.array(positions_3d, dtype=np.float64)
+
+        # Extract rotation and translation from T_base_to_camera
+        R = T_base_to_camera[:3, :3]
+        t = T_base_to_camera[:3, 3]
+        rvec, _ = cv2.Rodrigues(R)
+        tvec = t.reshape(3, 1)
+
+        # Project 3D points into camera image
+        pts_img, _ = cv2.projectPoints(
+            pts_base.reshape(-1, 1, 3),
+            rvec, tvec,
+            K.astype(np.float64),
+            dist_coeffs.astype(np.float64),
+        )
+        # pts_img shape: (N, 1, 2)
+        points_2d = [(int(round(p[0][0])), int(round(p[0][1]))) for p in pts_img]
+
+        # Filter out-of-frame points (mark as None)
+        h, w = canvas.shape[:2]
+        valid = [0 <= px < w and 0 <= py < h for px, py in points_2d]
+
+        lw = thickness or (_LINK_THICKNESS + 1)
+
+        if alpha < 1.0:
+            overlay = canvas.copy()
+            self._draw_skeleton_with_validity(
+                overlay, points_2d, valid, color_override, lw, draw_joints)
+            cv2.addWeighted(overlay, alpha, canvas, 1.0 - alpha, 0, canvas)
+        else:
+            self._draw_skeleton_with_validity(
+                canvas, points_2d, valid, color_override, lw, draw_joints)
+
+        return canvas
+
+    def _draw_skeleton_with_validity(self, canvas, points_2d, valid,
+                                     color_override, thickness, draw_joints):
+        """Draw skeleton segments, skipping invalid (off-frame) points."""
+        for i in range(len(points_2d) - 1):
+            if not valid[i] or not valid[i + 1]:
+                continue
+            color = color_override or _LINK_COLORS[min(i, len(_LINK_COLORS) - 1)]
+            cv2.line(canvas, points_2d[i], points_2d[i + 1], color, thickness)
+
+        if draw_joints:
+            for i, (pt, is_valid) in enumerate(zip(points_2d, valid)):
+                if not is_valid:
+                    continue
+                if i == 0:
+                    # Base: small square marker
+                    cv2.rectangle(canvas, (pt[0] - 6, pt[1] - 6),
+                                  (pt[0] + 6, pt[1] + 6),
+                                  color_override or (180, 180, 180), 2)
+                elif i == len(points_2d) - 1:
+                    # End-effector: diamond
+                    size = 7
+                    pts = np.array([
+                        [pt[0], pt[1] - size],
+                        [pt[0] + size, pt[1]],
+                        [pt[0], pt[1] + size],
+                        [pt[0] - size, pt[1]],
+                    ], dtype=np.int32)
+                    cv2.fillPoly(canvas, [pts],
+                                 color_override or (0, 200, 255))
+                    cv2.polylines(canvas, [pts], True, (0, 0, 0), 1)
+                else:
+                    # Regular joint: circle
+                    cv2.circle(canvas, pt, 5,
+                               color_override or (255, 255, 255), -1)
+                    cv2.circle(canvas, pt, 5, (0, 0, 0), 1)
+
     def render_angle_table(self, canvas: np.ndarray,
                            actual_angles: np.ndarray,
                            commanded_angles: np.ndarray = None,

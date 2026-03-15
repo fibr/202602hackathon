@@ -23,9 +23,10 @@ Rod pick-and-stand system for a robotics hackathon. Uses an Intel RealSense D435
 ./run.sh src/unified_gui.py --direct --view demo_cube  # Direct actuation (skip GUI)
 ./run.sh src/unified_gui.py --no-camera --view control # Control panel without camera
 ./run.sh src/unified_gui.py --safe --view control      # Safe mode (arm101)
+./run.sh src/unified_gui.py --view camera_overlay      # AR skeleton overlay on camera feed
 ```
 
-Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `digital_twin`, `verify_calib`. Use `--list` to see all with descriptions.
+Available views: `home`, `control`, `calibration`, `dataset`, `demo_cube`, `discover`, `pipeline`, `extras`, `digital_twin`, `live_twin`, `camera_overlay`, `verify_calib`. Use `--list` to see all with descriptions.
 
 ### Individual scripts (still work standalone)
 ```bash

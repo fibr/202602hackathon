@@ -339,6 +339,9 @@ class LiveTwinView(BaseView):
         help_text = 'M=multi/single  T=table  C=trail  1-4=view  R=reset'
         cv2.putText(canvas, help_text, (10, help_y),
                     FONT, 0.28, (80, 80, 80), 1)
+        # Hint for camera overlay mode
+        cv2.putText(canvas, 'AR overlay: use "camera_overlay" view',
+                    (10, vh - 20), FONT, 0.27, (60, 60, 80), 1)
 
     def handle_key(self, key):
         if key == ord('m') or key == ord('M'):
