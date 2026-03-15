@@ -97,6 +97,10 @@ class ArmRenderer:
         self.width = width
         self.height = height
 
+        # Table height relative to arm base (negative = below base)
+        # Arm base is typically ~100mm above the table surface.
+        self.table_z_m = -0.10  # meters below base origin
+
         # Camera parameters for 3D->2D projection
         # Viewpoint: azimuth and elevation in degrees
         self.azimuth = -30.0   # degrees around Y axis
@@ -209,6 +213,10 @@ class ArmRenderer:
         points_2d = [(x + offset_x, y + offset_y) for x, y, _ in projected]
         depths = [d for _, _, d in projected]
 
+        # Draw table surface
+        if draw_grid and self.table_z_m is not None:
+            self._draw_table(canvas, offset_x, offset_y)
+
         lw = thickness or _LINK_THICKNESS
 
         if alpha < 1.0:
@@ -232,6 +240,28 @@ class ArmRenderer:
                         color_override or (200, 200, 200), 1)
 
         return canvas
+
+    def _draw_table(self, canvas, offset_x=0, offset_y=0):
+        """Draw a semi-transparent table surface at table_z_m."""
+        # Project 4 corners of a table rectangle at table height
+        half = 0.30  # 300mm half-width
+        corners_3d = [
+            np.array([-half, -half, self.table_z_m]),
+            np.array([+half, -half, self.table_z_m]),
+            np.array([+half, +half, self.table_z_m]),
+            np.array([-half, +half, self.table_z_m]),
+        ]
+        projected = self.project_3d_to_2d(corners_3d)
+        pts = np.array([(x + offset_x, y + offset_y)
+                        for x, y, _ in projected], dtype=np.int32)
+        overlay = canvas.copy()
+        cv2.fillPoly(overlay, [pts], (40, 35, 30))
+        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+        cv2.polylines(canvas, [pts], True, (80, 70, 60), 1)
+        # Label
+        mid = pts.mean(axis=0).astype(int)
+        cv2.putText(canvas, 'table', (mid[0] - 15, mid[1] + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 90, 80), 1)
 
     def _draw_skeleton(self, canvas, points_2d, depths, color_override, thickness, draw_joints):
         """Draw line segments and joint circles with depth-based shading."""
