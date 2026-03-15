@@ -30,6 +30,24 @@ if [ ! -x "$ISAACLAB_DIR/isaaclab.sh" ]; then
     exit 1
 fi
 
+# ── Check runtime dependencies for mirror mode ──────────────────────────
+# Isaac Lab uses its own Python; feetech-servo-sdk and pyserial must be
+# installed there (setup.sh does this, but warn if they're missing).
+ISAACLAB_PY="$ISAACLAB_DIR/_isaac_sim/python.sh"
+if [ -x "$ISAACLAB_PY" ]; then
+    _missing=()
+    "$ISAACLAB_PY" -c "import serial" 2>/dev/null || _missing+=("pyserial")
+    "$ISAACLAB_PY" -c "import scservo_sdk" 2>/dev/null || _missing+=("feetech-servo-sdk")
+    if [ ${#_missing[@]} -gt 0 ]; then
+        echo ""
+        echo "WARNING: Missing deps in Isaac Lab Python: ${_missing[*]}"
+        echo "  Mirror mode (--mirror) will NOT work without these."
+        echo "  Fix: run ./setup.sh, or manually:"
+        echo "    $ISAACLAB_PY -m pip install ${_missing[*]}"
+        echo ""
+    fi
+fi
+
 echo "=== SO-ARM101 Digital Twin ==="
 echo "Isaac Lab: $ISAACLAB_DIR"
 echo "Script:    $SCRIPT_DIR/digital_twin.py"

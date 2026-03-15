@@ -268,45 +268,72 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     real_arm = None
     joint_signs = None
     if args_cli.mirror:
+        # ── Check runtime dependencies before attempting connection ────
+        _missing_deps = []
         try:
-            sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
-            print("[INFO]: Importing arm101 driver...", flush=True)
-            from robot.lerobot_arm101 import LeRobotArm101
+            import serial  # noqa: F401  (pyserial)
+        except ImportError:
+            _missing_deps.append("pyserial")
+        try:
+            import scservo_sdk  # noqa: F401  (feetech-servo-sdk)
+        except ImportError:
+            _missing_deps.append("feetech-servo-sdk")
 
-            # Load joint signs from servo_offsets.yaml (avoids importing
-            # Pinocchio which conflicts with Isaac Sim's Assimp library).
-            import yaml
-            _SIGN_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
-                           "wrist_flex", "wrist_roll"]
-            _DEFAULT_SIGNS = np.array([-1.0, 1.0, -1.0, 1.0, 1.0])
-            joint_signs = _DEFAULT_SIGNS.copy()
-            _offsets_path = os.path.expanduser(
-                "~/.config/202602hackathon/servo_offsets.yaml")
-            if os.path.exists(_offsets_path):
-                with open(_offsets_path) as _f:
-                    _data = yaml.safe_load(_f)
-                _sd = _data.get("joint_signs") if _data else None
-                if _sd and isinstance(_sd, dict):
-                    joint_signs = np.array([
-                        float(_sd.get(n, _DEFAULT_SIGNS[i]))
-                        for i, n in enumerate(_SIGN_NAMES)
-                    ])
-                print(f"[INFO]: Loaded joint signs from {_offsets_path}", flush=True)
-            else:
-                print(f"[WARN]: {_offsets_path} not found, using defaults", flush=True)
+        if _missing_deps:
+            print(
+                f"[ERROR]: --mirror requires packages not found in this Python: "
+                f"{', '.join(_missing_deps)}", flush=True,
+            )
+            print(
+                "[ERROR]: Install them with:  "
+                "<isaaclab_python> -m pip install feetech-servo-sdk pyserial",
+                flush=True,
+            )
+            print(
+                "[ERROR]: Or run ./setup.sh which installs them automatically.",
+                flush=True,
+            )
+            print("[WARN]: Falling back to demo mode (no mirroring).", flush=True)
+        else:
+            try:
+                sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+                print("[INFO]: Importing arm101 driver...", flush=True)
+                from robot.lerobot_arm101 import LeRobotArm101
 
-            port = LeRobotArm101.find_port()
-            print(f"[INFO]: Found port {port}, connecting...", flush=True)
-            real_arm = LeRobotArm101(port=port)
-            real_arm.connect()
-            print(f"[INFO]: Connected to real arm on {port} for mirroring", flush=True)
-            print(f"[INFO]: Joint signs: {joint_signs}", flush=True)
-        except Exception as e:
-            import traceback
-            print(f"[WARN]: Could not connect to real arm: {e}", flush=True)
-            traceback.print_exc()
-            print("[INFO]: Running without mirroring", flush=True)
-            real_arm = None
+                # Load joint signs from servo_offsets.yaml (avoids importing
+                # Pinocchio which conflicts with Isaac Sim's Assimp library).
+                import yaml
+                _SIGN_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
+                               "wrist_flex", "wrist_roll"]
+                _DEFAULT_SIGNS = np.array([-1.0, 1.0, -1.0, 1.0, 1.0])
+                joint_signs = _DEFAULT_SIGNS.copy()
+                _offsets_path = os.path.expanduser(
+                    "~/.config/202602hackathon/servo_offsets.yaml")
+                if os.path.exists(_offsets_path):
+                    with open(_offsets_path) as _f:
+                        _data = yaml.safe_load(_f)
+                    _sd = _data.get("joint_signs") if _data else None
+                    if _sd and isinstance(_sd, dict):
+                        joint_signs = np.array([
+                            float(_sd.get(n, _DEFAULT_SIGNS[i]))
+                            for i, n in enumerate(_SIGN_NAMES)
+                        ])
+                    print(f"[INFO]: Loaded joint signs from {_offsets_path}", flush=True)
+                else:
+                    print(f"[WARN]: {_offsets_path} not found, using defaults", flush=True)
+
+                port = LeRobotArm101.find_port()
+                print(f"[INFO]: Found port {port}, connecting...", flush=True)
+                real_arm = LeRobotArm101(port=port)
+                real_arm.connect()
+                print(f"[INFO]: Connected to real arm on {port} for mirroring", flush=True)
+                print(f"[INFO]: Joint signs: {joint_signs}", flush=True)
+            except Exception as e:
+                import traceback
+                print(f"[WARN]: Could not connect to real arm: {e}", flush=True)
+                traceback.print_exc()
+                print("[WARN]: Falling back to demo mode (no mirroring).", flush=True)
+                real_arm = None
 
     # Prepare image output directory
     if args_cli.save_images:
