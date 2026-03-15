@@ -25,6 +25,17 @@ import time
 from datetime import datetime
 from typing import Optional
 
+# Fix Qt plugin conflict: opencv-python ships its own Qt plugins which clash
+# with PyQt5.  Point Qt to PyQt5's plugins BEFORE any Qt import.
+os.environ.pop('QT_PLUGIN_PATH', None)
+os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
+try:
+    from PyQt5.QtCore import QLibraryInfo
+    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = QLibraryInfo.location(
+        QLibraryInfo.PluginsPath) + '/platforms'
+except Exception:
+    pass
+
 import cv2
 import numpy as np
 
