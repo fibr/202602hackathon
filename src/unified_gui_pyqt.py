@@ -947,6 +947,7 @@ class CheckerboardCalibView(BaseViewWidget):
         self._gripper_cap = None        # cv2.VideoCapture for the gripper camera
         self._gripper_timer = None      # QTimer for live gripper preview
         self._last_gripper_frame = None  # most recent gripper frame
+        self._board_detector = None     # BoardDetector for live detection overlay
         self._build_ui()
 
     def _build_ui(self):
@@ -1036,6 +1037,13 @@ class CheckerboardCalibView(BaseViewWidget):
     def on_activate(self):
         self.app.ensure_camera()
         self.app.ensure_robot()
+        # Lazily create a board detector for live detection overlay
+        if self._board_detector is None:
+            try:
+                from vision.board_detector import BoardDetector
+                self._board_detector = BoardDetector.from_config(self.app.config)
+            except Exception:
+                self._board_detector = None
         if self.app.camera:
             self._cam_thread = CameraThread(self.app.camera)
             self._cam_thread.frame_ready.connect(self._on_frame)
@@ -1087,14 +1095,38 @@ class CheckerboardCalibView(BaseViewWidget):
         if self._gripper_cap is not None:
             return
         h, w = frame.shape[:2]
+        display = frame.copy()
+
+        # Live board detection overlay
+        self._draw_board_overlay(display)
+
         # Apply numbered markers for hand-eye click points
-        frame_with_markers = self._draw_he_markers(frame)
-        img = cv_to_qimage(frame_with_markers)
+        display = self._draw_he_markers(display)
+        img = cv_to_qimage(display)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._cam_label.set_source_size(w, h)
         self._cam_label.setPixmap(pix)
         self._last_frame = frame.copy()
+
+    def _draw_board_overlay(self, frame):
+        """Run board detection and draw corners overlay on the frame (in-place)."""
+        from calibration.calib_helpers import detect_corners
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        found, corners, detection = detect_corners(gray, self._board_detector)
+        if found:
+            if self._board_detector and detection:
+                self._board_detector.draw_corners(frame, detection)
+            else:
+                cv2.drawChessboardCorners(
+                    frame, (7, 9), corners, found)
+            cv2.putText(frame, f'{len(corners)} corners',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, 'No board detected',
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0, 0, 255), 2)
 
     def _draw_he_markers(self, frame):
         """Draw numbered markers at each recorded hand-eye click point on the frame.
@@ -1424,9 +1456,11 @@ class CheckerboardCalibView(BaseViewWidget):
             return
         self._last_gripper_frame = frame.copy()
         annotated = frame.copy()
+        # Live board detection overlay on gripper camera
+        self._draw_board_overlay(annotated)
         n = len(self._gripper_intr_frames)
-        cv2.putText(annotated, f'Gripper cam  |  Frames: {n}', (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 200, 255), 2)
+        cv2.putText(annotated, f'Gripper cam  |  Frames: {n}', (10, annotated.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
         img = cv_to_qimage(annotated)
         pix = QPixmap.fromImage(img).scaled(
             self._cam_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
