@@ -31,7 +31,7 @@ _URDF_PATH = os.path.join(
 # Default per-joint sign correction: +1 = motor and URDF agree, -1 = inverted.
 # Order: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
 # These are used if servo_offsets.yaml does not contain a joint_signs section.
-_DEFAULT_JOINT_SIGNS = np.array([+1, -1, -1, -1, -1], dtype=float)
+_DEFAULT_JOINT_SIGNS = np.array([-1, -1, +1, +1, -1], dtype=float)
 
 _MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
                 'wrist_flex', 'wrist_roll']
