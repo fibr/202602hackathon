@@ -569,7 +569,7 @@ class ControlPanelView(BaseViewWidget):
         # Enable / Home / Safe
         ctrl_layout.addWidget(section_label('Robot Control'))
         eh_row = QHBoxLayout()
-        self._enable_btn = make_button('Enable', self._do_enable, color='#006400')
+        self._enable_btn = make_button('Servos ON', self._do_enable, color='#006400')
         eh_row.addWidget(self._enable_btn)
         eh_row.addWidget(make_button('Home', self._do_home, color='#644800'))
         eh_row.addWidget(make_button('Set Home', self._set_home, color='#4a3200',
@@ -659,10 +659,13 @@ class ControlPanelView(BaseViewWidget):
         if mode is not None:
             name = MODE_NAMES.get(mode, '?')
             lines.append(f'Mode: {mode} ({name})')
-        # Update enable button label
+        # Update servo on/off button label
         if self._is_arm101():
             enabled = getattr(self.app.robot, '_enabled', False)
-            self._enable_btn.setText('Relax' if enabled else 'Torque')
+            self._enable_btn.setText('Servos OFF' if enabled else 'Servos ON')
+            self._enable_btn.setStyleSheet(
+                f'background-color: {"#640000" if enabled else "#006400"}; '
+                f'color: white; padding: 4px; border-radius: 3px;')
         self._status_label.setText('\n'.join(lines) if lines else 'No robot')
 
     def _cart_step(self, axis_idx, sign):
@@ -1002,7 +1005,8 @@ class CheckerboardCalibView(BaseViewWidget):
         grip_row.addWidget(make_button('Grip Close', self._grip_close, color='#660000'))
         ctrl_layout.addLayout(grip_row)
 
-        ctrl_layout.addWidget(make_button('Enable/Torque', self._enable_robot, color='#006400'))
+        self._calib_enable_btn = make_button('Servos ON', self._enable_robot, color='#006400')
+        ctrl_layout.addWidget(self._calib_enable_btn)
 
         ctrl_layout.addWidget(make_button('< Back to Calibration',
                                           lambda: self.app.switch_view('calibration'), color='#444'))
@@ -1432,6 +1436,13 @@ class CheckerboardCalibView(BaseViewWidget):
                 self.app.robot.disable_torque()
             else:
                 self.app.robot.enable_torque()
+            enabled = getattr(self.app.robot, '_enabled', False)
+            btn = getattr(self, '_calib_enable_btn', None)
+            if btn:
+                btn.setText('Servos OFF' if enabled else 'Servos ON')
+                btn.setStyleSheet(
+                    f'background-color: {"#640000" if enabled else "#006400"}; '
+                    f'color: white; padding: 4px; border-radius: 3px;')
         else:
             self.app.robot.send('DisableRobot()')
             time.sleep(1)
