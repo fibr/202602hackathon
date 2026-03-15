@@ -399,6 +399,9 @@ class ArmRenderer:
 
         for p in points_3d:
             x, y, z = p - self.center_offset
+            # Negate Y so the view matches "behind the robot looking forward"
+            # (robot's left = screen left, matching physical observation)
+            y = -y
 
             # Rotate around Z (vertical) axis by azimuth
             x2 = x * cos_az - y * sin_az
@@ -503,6 +506,8 @@ class ArmRenderer:
         # Shift by center offset
         pts = points_3d - self.center_offset
         x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+        # Negate Y so view matches "behind the robot looking forward"
+        y = -y
 
         # Azimuth rotation around Z
         x2 = x * cos_az - y * sin_az
