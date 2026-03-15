@@ -985,8 +985,8 @@ class ArmRenderer:
         if not positions_3d:
             return canvas
 
-        # Stack positions into (N, 3) array (meters, in base frame)
-        pts_base = np.array(positions_3d, dtype=np.float64)
+        # Stack positions into (N, 3) array in mm (calibration uses mm)
+        pts_base = np.array(positions_3d, dtype=np.float64) * 1000.0
 
         # Extract rotation and translation from T_base_to_camera
         R = T_base_to_camera[:3, :3]
