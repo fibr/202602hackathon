@@ -84,7 +84,7 @@ class TestWidgetCreation:
 
     def test_sidebar_shows_top_level_views(self, app_window):
         """Sidebar list contains exactly the top-level (show_in_sidebar=True) views."""
-        assert app_window._nav_list.count() == 13
+        assert app_window._nav_list.count() == 14
 
     def test_stacked_widget_has_all_views(self, app_window):
         """QStackedWidget has one page per registered view."""

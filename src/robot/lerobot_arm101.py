@@ -106,6 +106,11 @@ GRIPPER_CLOSE_POS = 1800
 # Default speed for moves (0-4095, ~0 means max speed for STS)
 DEFAULT_MOVE_SPEED = 200
 
+# STS3215 EEPROM registers for angle limits (2-byte each)
+ADDR_MIN_ANGLE_LIMIT = 9       # Minimum angle limit (0-4095), EEPROM
+ADDR_MAX_ANGLE_LIMIT = 11      # Maximum angle limit (0-4095), EEPROM
+ADDR_LOCK = 55                 # EEPROM write lock (0=unlocked, 1=locked)
+
 # Safe mode defaults (reduced torque / speed for cautious operation)
 SAFE_MODE_SPEED = 80            # Slow movement speed
 SAFE_MODE_MAX_TORQUE = 300      # Reduced max torque (0-1023 register range)
@@ -268,6 +273,118 @@ class LeRobotArm101:
         self._min_safe_z_mm = min_z_mm
         print(f"  Z safety {'ON' if enabled else 'OFF'}"
               f"{f' (min_z={min_z_mm:.0f}mm)' if enabled else ''}")
+
+    # --- Servo angle limit configuration (EEPROM) ---
+
+    def read_angle_limits(self, motor_id: int) -> tuple:
+        """Read the min/max angle limits from servo EEPROM.
+
+        These are raw position values (0-4095) stored in the servo's EEPROM
+        that restrict the servo's movement range.  When both are 0, the
+        servo operates in continuous rotation mode (no limits).
+
+        Args:
+            motor_id: Motor ID (1-6).
+
+        Returns:
+            (min_raw, max_raw) tuple of raw position values, or (-1, -1) on error.
+        """
+        with self._lock:
+            min_val, res1, _ = self.packet_handler.read2ByteTxRx(
+                self.port_handler, motor_id, ADDR_MIN_ANGLE_LIMIT
+            )
+            max_val, res2, _ = self.packet_handler.read2ByteTxRx(
+                self.port_handler, motor_id, ADDR_MAX_ANGLE_LIMIT
+            )
+        if res1 != COMM_SUCCESS or res2 != COMM_SUCCESS:
+            return (-1, -1)
+        return (min_val, max_val)
+
+    def read_all_angle_limits(self) -> list:
+        """Read angle limits for all motors.
+
+        Returns:
+            List of (min_raw, max_raw) tuples, one per motor.
+        """
+        return [self.read_angle_limits(mid) for mid in self.motor_ids]
+
+    def write_angle_limits(self, motor_id: int, min_raw: int, max_raw: int):
+        """Write min/max angle limits to servo EEPROM.
+
+        IMPORTANT: Torque must be disabled on the target servo before writing
+        EEPROM registers.  This method handles the EEPROM unlock/lock sequence
+        automatically.  Setting both to 0 removes limits (continuous rotation).
+
+        Args:
+            motor_id: Motor ID (1-6).
+            min_raw: Minimum position limit (0-4095).
+            max_raw: Maximum position limit (0-4095).
+
+        Raises:
+            ValueError: If min_raw >= max_raw (unless both are 0).
+            IOError: If servo communication fails.
+        """
+        min_raw = max(0, min(4095, int(min_raw)))
+        max_raw = max(0, min(4095, int(max_raw)))
+        if min_raw > 0 or max_raw > 0:
+            if min_raw >= max_raw:
+                raise ValueError(
+                    f"min_raw ({min_raw}) must be less than max_raw ({max_raw})"
+                )
+
+        # Disable torque on this motor (required for EEPROM writes)
+        self._write1(motor_id, ADDR_TORQUE_ENABLE, 0)
+        time.sleep(0.02)
+
+        # Unlock EEPROM
+        self._write1(motor_id, ADDR_LOCK, 0)
+        time.sleep(0.02)
+
+        # Write limits
+        self._write2(motor_id, ADDR_MIN_ANGLE_LIMIT, min_raw)
+        time.sleep(0.01)
+        self._write2(motor_id, ADDR_MAX_ANGLE_LIMIT, max_raw)
+        time.sleep(0.01)
+
+        # Lock EEPROM
+        self._write1(motor_id, ADDR_LOCK, 1)
+        time.sleep(0.02)
+
+        # Re-enable torque if arm was previously enabled
+        if self._enabled:
+            if self.safe_mode:
+                self._write2(motor_id, ADDR_MAX_TORQUE, SAFE_MODE_MAX_TORQUE)
+            self._write1(motor_id, ADDR_TORQUE_ENABLE, 1)
+
+    def angle_limits_to_deg(self, motor_id: int, min_raw: int,
+                            max_raw: int) -> tuple:
+        """Convert raw angle limits to degrees using the motor's zero offset.
+
+        Args:
+            motor_id: Motor ID for offset lookup.
+            min_raw: Minimum raw position.
+            max_raw: Maximum raw position.
+
+        Returns:
+            (min_deg, max_deg) tuple in degrees.
+        """
+        return (self._pos_to_deg_motor(min_raw, motor_id),
+                self._pos_to_deg_motor(max_raw, motor_id))
+
+    def deg_to_angle_limits(self, motor_id: int, min_deg: float,
+                            max_deg: float) -> tuple:
+        """Convert degree limits to raw positions using the motor's zero offset.
+
+        Args:
+            motor_id: Motor ID for offset lookup.
+            min_deg: Minimum angle in degrees.
+            max_deg: Maximum angle in degrees.
+
+        Returns:
+            (min_raw, max_raw) tuple of raw positions.
+        """
+        return (self._deg_to_pos_motor(min_deg, motor_id),
+                self._deg_to_pos_motor(max_deg, motor_id))
 
     # --- Position reading ---
 

@@ -4674,6 +4674,387 @@ class AppCubeTracker:
         self.status = 'Tracking ON' if self.tracking else 'Tracking OFF'
 
 
+# ---------------------------------------------------------------------------
+# Servo Angle Limits View
+# ---------------------------------------------------------------------------
+
+class ServoLimitsView(BaseViewWidget):
+    """Configure per-servo angle limits stored in STS3215 EEPROM.
+
+    Reads the current min/max position limits from each servo, displays them
+    in degrees, and allows reconfiguration.  Changes are written to servo
+    EEPROM so they persist across power cycles.
+    """
+
+    view_id = 'servo_limits'
+    view_name = 'Servo Limits'
+    description = 'Read/set per-servo angle limits'
+    show_in_sidebar = True
+
+    _JOINT_NAMES = [
+        'J1 Shoulder Pan', 'J2 Shoulder Lift', 'J3 Elbow Flex',
+        'J4 Wrist Flex', 'J5 Wrist Roll', 'J6 Gripper',
+    ]
+
+    def __init__(self, app, parent=None):
+        super().__init__(app, parent)
+        self._spin_min = []
+        self._spin_max = []
+        self._lbl_raw_min = []
+        self._lbl_raw_max = []
+        self._lbl_status = []
+        self._build_ui()
+
+    # ---- UI construction ----
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+
+        # Title
+        title = QLabel('Servo Angle Limits (EEPROM)')
+        title.setStyleSheet('font-size: 16px; font-weight: bold; color: #eee;')
+        root.addWidget(title)
+
+        desc = QLabel(
+            'Read and configure the hardware position limits stored in each '
+            'servo\'s EEPROM.  Values are shown in degrees relative to the '
+            'calibrated zero position.  Changes persist across power cycles.'
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet('color: #aaa; font-size: 11px; margin-bottom: 8px;')
+        root.addWidget(desc)
+
+        # Warning banner
+        warn = QLabel(
+            'WARNING: Widening angle limits beyond the mechanical range can '
+            'damage the arm.  Only increase limits if you are sure the joint '
+            'can physically reach the new range without collision.'
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet(
+            'background-color: #553300; color: #ffcc00; padding: 6px; '
+            'border-radius: 4px; font-size: 11px; margin-bottom: 8px;'
+        )
+        root.addWidget(warn)
+
+        # ---- Top action bar ----
+        bar = QHBoxLayout()
+        bar.addWidget(make_button('Read All Limits', self._read_all,
+                                  tooltip='Read current limits from all servos',
+                                  color='#2a6496'))
+        bar.addWidget(make_button('Write All Limits', self._write_all,
+                                  tooltip='Write limits to all servos (EEPROM)',
+                                  color='#994400'))
+        bar.addWidget(make_button('Remove All Limits', self._remove_all,
+                                  tooltip='Set 0/0 on all servos (full range)',
+                                  color='#772222'))
+        bar.addStretch()
+        root.addLayout(bar)
+
+        # ---- Per-joint table ----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_w = QWidget()
+        grid = QGridLayout(scroll_w)
+        grid.setSpacing(4)
+
+        # Header row
+        headers = ['Joint', 'Min (deg)', 'Max (deg)', 'Raw Min', 'Raw Max',
+                    'Range (deg)', 'Status', '']
+        for col, h in enumerate(headers):
+            lbl = QLabel(h)
+            lbl.setStyleSheet('color: #aaa; font-weight: bold; font-size: 11px;')
+            grid.addWidget(lbl, 0, col)
+
+        for i, name in enumerate(self._JOINT_NAMES):
+            row = i + 1
+
+            # Joint name
+            jlbl = QLabel(name)
+            jlbl.setStyleSheet('color: #ddd; font-family: monospace;')
+            grid.addWidget(jlbl, row, 0)
+
+            # Min spin (-180 to +180)
+            spin_min = QDoubleSpinBox()
+            spin_min.setRange(-180.0, 180.0)
+            spin_min.setDecimals(1)
+            spin_min.setSuffix('\u00b0')
+            spin_min.setValue(-90.0)
+            spin_min.setStyleSheet(
+                'QDoubleSpinBox { background: #2a2a2a; color: #ddd; '
+                'border: 1px solid #555; padding: 2px; }'
+            )
+            grid.addWidget(spin_min, row, 1)
+            self._spin_min.append(spin_min)
+
+            # Max spin
+            spin_max = QDoubleSpinBox()
+            spin_max.setRange(-180.0, 180.0)
+            spin_max.setDecimals(1)
+            spin_max.setSuffix('\u00b0')
+            spin_max.setValue(90.0)
+            spin_max.setStyleSheet(
+                'QDoubleSpinBox { background: #2a2a2a; color: #ddd; '
+                'border: 1px solid #555; padding: 2px; }'
+            )
+            grid.addWidget(spin_max, row, 2)
+            self._spin_max.append(spin_max)
+
+            # Raw min label
+            lbl_rmin = QLabel('--')
+            lbl_rmin.setStyleSheet('color: #888; font-family: monospace; font-size: 10px;')
+            grid.addWidget(lbl_rmin, row, 3)
+            self._lbl_raw_min.append(lbl_rmin)
+
+            # Raw max label
+            lbl_rmax = QLabel('--')
+            lbl_rmax.setStyleSheet('color: #888; font-family: monospace; font-size: 10px;')
+            grid.addWidget(lbl_rmax, row, 4)
+            self._lbl_raw_max.append(lbl_rmax)
+
+            # Range label
+            lbl_range = QLabel('--')
+            lbl_range.setStyleSheet('color: #8f8; font-family: monospace; font-size: 10px;')
+            grid.addWidget(lbl_range, row, 5)
+
+            # Status label
+            lbl_st = QLabel('')
+            lbl_st.setStyleSheet('color: #aaa; font-size: 10px;')
+            grid.addWidget(lbl_st, row, 6)
+            self._lbl_status.append(lbl_st)
+
+            # Per-joint write button
+            btn_w = make_button('Write', lambda checked, idx=i: self._write_one(idx),
+                                tooltip=f'Write limits for {name}', color='#6a4400',
+                                min_w=60, min_h=26)
+            grid.addWidget(btn_w, row, 7)
+
+            # Connect spinbox changes to update the range label
+            def _update_range(val, r_lbl=lbl_range, smin=spin_min, smax=spin_max):
+                rng = smax.value() - smin.value()
+                r_lbl.setText(f'{rng:.1f}\u00b0')
+                r_lbl.setStyleSheet(
+                    f'color: {"#f88" if rng <= 0 else "#8f8"}; '
+                    f'font-family: monospace; font-size: 10px;'
+                )
+            spin_min.valueChanged.connect(_update_range)
+            spin_max.valueChanged.connect(_update_range)
+
+        scroll.setWidget(scroll_w)
+        root.addWidget(scroll, stretch=1)
+
+        # ---- Info footer ----
+        self._info_label = QLabel('Press "Read All Limits" to query the servos.')
+        self._info_label.setStyleSheet(
+            'color: #aaa; font-size: 11px; padding: 4px; '
+            'background: #1e1e1e; border-radius: 3px;'
+        )
+        self._info_label.setWordWrap(True)
+        root.addWidget(self._info_label)
+
+    # ---- Robot access helper ----
+
+    def _get_arm(self):
+        """Return the LeRobotArm101 driver or None."""
+        robot = getattr(self.app, '_robot', None)
+        if robot is None:
+            self._info_label.setText('No robot connected. Start with --safe or connect first.')
+            return None
+        if not hasattr(robot, 'read_angle_limits'):
+            self._info_label.setText(
+                'Connected robot is not an ARM101 (no servo limit support).'
+            )
+            return None
+        return robot
+
+    # ---- Actions ----
+
+    def _read_all(self):
+        arm = self._get_arm()
+        if arm is None:
+            return
+        self._info_label.setText('Reading servo angle limits...')
+        QApplication.processEvents()
+
+        try:
+            limits = arm.read_all_angle_limits()
+        except Exception as e:
+            self._info_label.setText(f'Read error: {e}')
+            return
+
+        no_limit_count = 0
+        for i, (rmin, rmax) in enumerate(limits):
+            mid = arm.motor_ids[i]
+            self._lbl_raw_min[i].setText(str(rmin))
+            self._lbl_raw_max[i].setText(str(rmax))
+
+            if rmin == 0 and rmax == 0:
+                # No limits set (continuous rotation / unlimited)
+                self._spin_min[i].setValue(-180.0)
+                self._spin_max[i].setValue(180.0)
+                self._lbl_status[i].setText('No limit (0/0)')
+                self._lbl_status[i].setStyleSheet('color: #88f; font-size: 10px;')
+                no_limit_count += 1
+            elif rmin < 0 or rmax < 0:
+                self._lbl_status[i].setText('Read error')
+                self._lbl_status[i].setStyleSheet('color: #f44; font-size: 10px;')
+            else:
+                deg_min, deg_max = arm.angle_limits_to_deg(mid, rmin, rmax)
+                self._spin_min[i].setValue(deg_min)
+                self._spin_max[i].setValue(deg_max)
+                self._lbl_status[i].setText('OK')
+                self._lbl_status[i].setStyleSheet('color: #4f4; font-size: 10px;')
+
+        if no_limit_count == len(limits):
+            self._info_label.setText(
+                'All servos report 0/0 limits (no restriction). '
+                'The arm uses the full 0-4095 position range.'
+            )
+        else:
+            self._info_label.setText(
+                f'Read complete. {no_limit_count}/{len(limits)} servos have no limits.'
+            )
+
+    def _write_one(self, idx: int):
+        arm = self._get_arm()
+        if arm is None:
+            return
+
+        mid = arm.motor_ids[idx]
+        min_deg = self._spin_min[idx].value()
+        max_deg = self._spin_max[idx].value()
+
+        if min_deg >= max_deg:
+            self._lbl_status[idx].setText('Min >= Max!')
+            self._lbl_status[idx].setStyleSheet('color: #f44; font-size: 10px;')
+            return
+
+        min_raw, max_raw = arm.deg_to_angle_limits(mid, min_deg, max_deg)
+
+        reply = QMessageBox.question(
+            self, 'Confirm Write',
+            f'Write angle limits for {self._JOINT_NAMES[idx]}?\n\n'
+            f'  Min: {min_deg:.1f}\u00b0 (raw {min_raw})\n'
+            f'  Max: {max_deg:.1f}\u00b0 (raw {max_raw})\n\n'
+            f'This writes to servo EEPROM and persists across power cycles.\n'
+            f'Torque will be briefly disabled on this servo.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            arm.write_angle_limits(mid, min_raw, max_raw)
+            self._lbl_raw_min[idx].setText(str(min_raw))
+            self._lbl_raw_max[idx].setText(str(max_raw))
+            self._lbl_status[idx].setText('Written OK')
+            self._lbl_status[idx].setStyleSheet('color: #4f4; font-size: 10px;')
+            self._info_label.setText(
+                f'{self._JOINT_NAMES[idx]}: limits written '
+                f'({min_deg:.1f}\u00b0 .. {max_deg:.1f}\u00b0).'
+            )
+        except Exception as e:
+            self._lbl_status[idx].setText('Write FAIL')
+            self._lbl_status[idx].setStyleSheet('color: #f44; font-size: 10px;')
+            self._info_label.setText(f'Write error on {self._JOINT_NAMES[idx]}: {e}')
+
+    def _write_all(self):
+        arm = self._get_arm()
+        if arm is None:
+            return
+
+        # Validate all ranges first
+        for i in range(len(self._JOINT_NAMES)):
+            if self._spin_min[i].value() >= self._spin_max[i].value():
+                self._info_label.setText(
+                    f'{self._JOINT_NAMES[i]}: Min must be less than Max.'
+                )
+                return
+
+        # Build summary for confirmation dialog
+        lines = []
+        for i, name in enumerate(self._JOINT_NAMES):
+            mid = arm.motor_ids[i]
+            mn = self._spin_min[i].value()
+            mx = self._spin_max[i].value()
+            rmin, rmax = arm.deg_to_angle_limits(mid, mn, mx)
+            lines.append(f'  {name}: {mn:.1f}\u00b0 .. {mx:.1f}\u00b0 '
+                         f'(raw {rmin}..{rmax})')
+
+        reply = QMessageBox.question(
+            self, 'Confirm Write All',
+            'Write angle limits to ALL servos?\n\n' +
+            '\n'.join(lines) +
+            '\n\nThis writes to servo EEPROM. Torque will be briefly disabled.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        errors = []
+        for i in range(len(self._JOINT_NAMES)):
+            mid = arm.motor_ids[i]
+            mn = self._spin_min[i].value()
+            mx = self._spin_max[i].value()
+            rmin, rmax = arm.deg_to_angle_limits(mid, mn, mx)
+            try:
+                arm.write_angle_limits(mid, rmin, rmax)
+                self._lbl_raw_min[i].setText(str(rmin))
+                self._lbl_raw_max[i].setText(str(rmax))
+                self._lbl_status[i].setText('Written OK')
+                self._lbl_status[i].setStyleSheet('color: #4f4; font-size: 10px;')
+            except Exception as e:
+                errors.append(f'{self._JOINT_NAMES[i]}: {e}')
+                self._lbl_status[i].setText('FAIL')
+                self._lbl_status[i].setStyleSheet('color: #f44; font-size: 10px;')
+
+        if errors:
+            self._info_label.setText(f'Errors: {"; ".join(errors)}')
+        else:
+            self._info_label.setText('All servo limits written successfully.')
+
+    def _remove_all(self):
+        arm = self._get_arm()
+        if arm is None:
+            return
+
+        reply = QMessageBox.question(
+            self, 'Remove All Limits',
+            'Set ALL servo limits to 0/0 (no restriction)?\n\n'
+            'This allows the full 0-4095 position range on every servo.\n'
+            'Make sure the arm has enough mechanical clearance!',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        errors = []
+        for i in range(len(self._JOINT_NAMES)):
+            mid = arm.motor_ids[i]
+            try:
+                arm.write_angle_limits(mid, 0, 0)
+                self._lbl_raw_min[i].setText('0')
+                self._lbl_raw_max[i].setText('0')
+                self._lbl_status[i].setText('No limit')
+                self._lbl_status[i].setStyleSheet('color: #88f; font-size: 10px;')
+            except Exception as e:
+                errors.append(f'{self._JOINT_NAMES[i]}: {e}')
+                self._lbl_status[i].setText('FAIL')
+                self._lbl_status[i].setStyleSheet('color: #f44; font-size: 10px;')
+
+        if errors:
+            self._info_label.setText(f'Errors: {"; ".join(errors)}')
+        else:
+            self._info_label.setText('All limits removed (0/0). Full range enabled.')
+
+    def on_activate(self):
+        """Auto-read limits when view is shown."""
+        arm = self._get_arm()
+        if arm is not None:
+            self._read_all()
+
+
 class UnifiedPyQtApp(QMainWindow):
     """Main PyQt5 application for ArmRobotics."""
 
@@ -4802,6 +5183,7 @@ class UnifiedPyQtApp(QMainWindow):
             FetchGameView,
             CubeTrackerView,
             CameraOverlayView,
+            ServoLimitsView,
             # Sub-views (not in sidebar)
             CheckerboardCalibView,
             ServoCalibView,
@@ -5051,6 +5433,7 @@ def main():
             ('digital_twin', 'Digital Twin', 'Isaac Sim launcher'),
             ('live_twin', 'Live Twin', 'Real-time 3D FK skeleton'),
             ('camera_overlay', 'Camera Overlay', 'AR skeleton on camera feed'),
+            ('servo_limits', 'Servo Limits', 'Read/set per-servo angle limits'),
         ]
         print('Available views:')
         print(f'  {"ID":<20s} {"Name":<20s}  Description')
