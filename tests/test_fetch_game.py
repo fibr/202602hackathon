@@ -1075,3 +1075,417 @@ class TestRunAsync:
         assert ctrl._worker_thread.daemon is True
         done.set()
         ctrl._worker_thread.join(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Thread-safety: concurrent update_detection + step + reset
+# ---------------------------------------------------------------------------
+
+class TestThreadSafety:
+    """Stress-tests for concurrent access to FetchGameController.
+
+    These tests verify that simultaneous update_detection(), step(), and
+    reset() calls from multiple threads do not cause data corruption,
+    exceptions, or deadlocks.
+
+    Design notes:
+    - All tests join() every spawned thread with a hard timeout (TIMEOUT).
+      If a thread is still alive after the join, the test fails immediately
+      with a clear "possible deadlock" message rather than hanging the suite.
+    - detector functions are patched at the class level (decorator) so patches
+      are applied once per test — patching inside per-thread closures would
+      race against each other since mock.patch modifies module globals.
+    - Async worker threads are allowed to run normally (mocks make robot ops
+      instant) so that lock hand-offs between the main state-machine code and
+      the worker thread are exercised under real concurrency.
+    """
+
+    TIMEOUT = 5.0  # seconds; fail fast if deadlock is detected
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _blank_frame():
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+
+    @staticmethod
+    def _join_all(threads, timeout):
+        """Join every thread; return list of threads that are still alive."""
+        for t in threads:
+            t.join(timeout=timeout)
+        return [t for t in threads if t.is_alive()]
+
+    # ------------------------------------------------------------------
+    # Test 1 — concurrent step() calls
+    # ------------------------------------------------------------------
+
+    def test_concurrent_step_calls_no_crash(self):
+        """N threads all call step() at the same moment — no crash, valid state."""
+        ctrl = _make_controller()
+        errors = []
+
+        def do_step():
+            try:
+                ctrl.step()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=do_step, daemon=True) for _ in range(10)]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} step() thread(s) still alive — possible deadlock"
+        assert not errors, f"Exceptions in concurrent step(): {errors}"
+        assert ctrl.state.state in FetchState
+
+    # ------------------------------------------------------------------
+    # Test 2 — concurrent reset() calls
+    # ------------------------------------------------------------------
+
+    def test_concurrent_reset_calls_no_crash(self):
+        """N threads all call reset() simultaneously — no crash, ends at IDLE."""
+        ctrl = _make_controller()
+        ctrl._set_state(FetchState.TRANSPORT, 'moving')
+        errors = []
+
+        def do_reset():
+            try:
+                ctrl.reset()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=do_reset, daemon=True) for _ in range(5)]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} reset() thread(s) still alive — possible deadlock"
+        assert not errors, f"Exceptions in concurrent reset(): {errors}"
+        assert ctrl.state.state == FetchState.IDLE
+
+    # ------------------------------------------------------------------
+    # Test 3 — interleaved step() + reset() loops
+    # ------------------------------------------------------------------
+
+    def test_step_and_reset_interleaved_no_deadlock(self):
+        """One thread hammers step(), another hammers reset() — no deadlock."""
+        ctrl = _make_controller()
+        errors = []
+
+        def step_loop():
+            for _ in range(30):
+                try:
+                    ctrl.step()
+                except Exception as e:
+                    errors.append(('step', e))
+
+        def reset_loop():
+            for _ in range(15):
+                try:
+                    ctrl.reset()
+                    time.sleep(0.002)
+                except Exception as e:
+                    errors.append(('reset', e))
+
+        t_step = threading.Thread(target=step_loop, daemon=True)
+        t_reset = threading.Thread(target=reset_loop, daemon=True)
+        t_step.start()
+        t_reset.start()
+
+        hung = self._join_all([t_step, t_reset], self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — possible deadlock"
+        assert not errors, f"Errors in step+reset interleave: {errors}"
+        assert ctrl.state.state in FetchState
+
+    # ------------------------------------------------------------------
+    # Test 4 — concurrent update_detection() + step()
+    # ------------------------------------------------------------------
+
+    @mock.patch('vision.green_cube_detector.detect_green_cubes', return_value=([], {}))
+    @mock.patch('vision.green_cube_detector.select_target_cube', return_value=-1)
+    def test_update_detection_and_step_concurrent(self, _sel, _det):
+        """Camera thread (update_detection) races with UI thread (step) — no corruption."""
+        ctrl = _make_controller()
+        frame = self._blank_frame()
+        errors = []
+
+        def detection_loop():
+            for _ in range(40):
+                try:
+                    ctrl.update_detection(frame)
+                except Exception as e:
+                    errors.append(('detect', e))
+
+        def step_loop():
+            for _ in range(40):
+                try:
+                    ctrl.step()
+                except Exception as e:
+                    errors.append(('step', e))
+
+        threads = [
+            threading.Thread(target=detection_loop, daemon=True),
+            threading.Thread(target=detection_loop, daemon=True),
+            threading.Thread(target=step_loop, daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — possible deadlock"
+        assert not errors, f"Errors in detection+step concurrency: {errors}"
+        assert ctrl.state.state in FetchState
+
+    # ------------------------------------------------------------------
+    # Test 5 — full stress: all three operations concurrently
+    # ------------------------------------------------------------------
+
+    @mock.patch('vision.green_cube_detector.detect_green_cubes', return_value=([], {}))
+    @mock.patch('vision.green_cube_detector.select_target_cube', return_value=-1)
+    def test_all_three_operations_concurrent_stress(self, _sel, _det):
+        """update_detection + step + reset from many threads simultaneously."""
+        ctrl = _make_controller()
+        frame = self._blank_frame()
+        errors = []
+
+        def detection_loop():
+            for _ in range(25):
+                try:
+                    ctrl.update_detection(frame)
+                except Exception as e:
+                    errors.append(('detect', e))
+
+        def step_loop():
+            for _ in range(25):
+                try:
+                    ctrl.step()
+                except Exception as e:
+                    errors.append(('step', e))
+
+        def reset_loop():
+            for _ in range(8):
+                try:
+                    ctrl.reset()
+                    time.sleep(0.005)
+                except Exception as e:
+                    errors.append(('reset', e))
+
+        threads = [
+            threading.Thread(target=detection_loop, daemon=True),
+            threading.Thread(target=detection_loop, daemon=True),
+            threading.Thread(target=step_loop, daemon=True),
+            threading.Thread(target=step_loop, daemon=True),
+            threading.Thread(target=reset_loop, daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — possible deadlock"
+        assert not errors, f"Errors in full stress test: {errors}"
+        assert ctrl.state.state in FetchState
+
+    # ------------------------------------------------------------------
+    # Test 6 — step_count is never negative under concurrent _set_state
+    # ------------------------------------------------------------------
+
+    def test_step_count_non_negative_under_concurrency(self):
+        """step_count is monotonically non-negative even under concurrent transitions."""
+        ctrl = _make_controller()
+        violations = []
+
+        def observer():
+            for _ in range(200):
+                with ctrl._lock:
+                    count = ctrl.state.step_count
+                if count < 0:
+                    violations.append(count)
+
+        def mutator():
+            for _ in range(80):
+                ctrl._set_state(FetchState.DETECT)
+                ctrl._set_state(FetchState.IDLE)
+
+        threads = (
+            [threading.Thread(target=observer, daemon=True) for _ in range(3)] +
+            [threading.Thread(target=mutator, daemon=True) for _ in range(3)]
+        )
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — possible deadlock"
+        assert not violations, f"Negative step_count values observed: {violations}"
+
+    # ------------------------------------------------------------------
+    # Test 7 — on_state_changed callback is called outside the lock
+    # ------------------------------------------------------------------
+
+    def test_callback_not_invoked_under_lock(self):
+        """_set_state() releases _lock before invoking on_state_changed.
+
+        If the callback were called while _lock is still held, any attempt by
+        the callback to re-acquire _lock on a *different* thread would timeout.
+        We verify that a non-owning thread can always acquire the lock inside
+        the callback within a short timeout.
+        """
+        ctrl = _make_controller()
+        lock_acquired_in_callback = []
+
+        def callback(s):
+            # Try to acquire the lock from within the callback.  Since _set_state
+            # releases _lock before invoking us, this should always succeed quickly.
+            acquired = ctrl._lock.acquire(blocking=True, timeout=1.0)
+            lock_acquired_in_callback.append(acquired)
+            if acquired:
+                ctrl._lock.release()
+
+        ctrl.on_state_changed = callback
+        errors = []
+
+        def do_transitions():
+            for _ in range(20):
+                try:
+                    ctrl._set_state(FetchState.DETECT)
+                    ctrl._set_state(FetchState.IDLE)
+                except Exception as e:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=do_transitions, daemon=True) for _ in range(4)]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — lock held during callback"
+        assert not errors, f"Errors: {errors}"
+        assert lock_acquired_in_callback, "No callbacks were fired"
+        failed = [v for v in lock_acquired_in_callback if not v]
+        assert not failed, (
+            f"{len(failed)}/{len(lock_acquired_in_callback)} callbacks "
+            "could not acquire lock — suggests lock was held during callback invocation"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 8 — reset() sets _abort so a running worker exits promptly
+    # ------------------------------------------------------------------
+
+    def test_reset_signals_running_worker_via_abort(self):
+        """reset() sets _abort so workers checking the flag can exit early."""
+        ctrl = _make_controller()
+        worker_started = threading.Event()
+        worker_saw_abort = threading.Event()
+
+        def slow_worker():
+            worker_started.set()
+            # Poll _abort just like real action methods do.
+            while not ctrl._abort:
+                time.sleep(0.005)
+            worker_saw_abort.set()
+
+        ctrl._worker_thread = threading.Thread(target=slow_worker, daemon=True)
+        ctrl._worker_thread.start()
+
+        assert worker_started.wait(timeout=1.0), "Worker did not start in time"
+
+        # reset() must complete (join the worker) and then clear _abort.
+        reset_done = threading.Event()
+
+        def do_reset():
+            ctrl.reset()
+            reset_done.set()
+
+        t = threading.Thread(target=do_reset, daemon=True)
+        t.start()
+        t.join(timeout=self.TIMEOUT)
+        assert not t.is_alive(), "reset() did not complete — possible deadlock"
+
+        assert worker_saw_abort.is_set(), "Worker never observed _abort=True"
+        assert ctrl._abort is False, "reset() should clear _abort after joining worker"
+        assert ctrl.state.state == FetchState.IDLE
+
+    # ------------------------------------------------------------------
+    # Test 9 — concurrent set_place_target() calls
+    # ------------------------------------------------------------------
+
+    def test_concurrent_set_place_target_no_corruption(self):
+        """Concurrent set_place_target() calls should not corrupt place_pos_mm."""
+        ctrl = _make_controller()
+        errors = []
+
+        positions = [
+            np.array([float(i), float(i * 2), 15.0])
+            for i in range(10)
+        ]
+
+        def writer(pos):
+            for _ in range(20):
+                try:
+                    ctrl.set_place_target(pos)
+                    # Read back immediately under lock
+                    with ctrl._lock:
+                        val = ctrl.state.place_target_3d
+                    if val is not None and len(val) != 3:
+                        errors.append(f"Corrupted place_target_3d: {val}")
+                except Exception as e:
+                    errors.append(e)
+
+        threads = [
+            threading.Thread(target=writer, args=(pos,), daemon=True)
+            for pos in positions[:5]
+        ]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — possible deadlock"
+        assert not errors, f"Errors in concurrent set_place_target: {errors}"
+        # After all writers, place_target_3d must still be a valid 3-element array.
+        with ctrl._lock:
+            val = ctrl.state.place_target_3d
+        assert val is not None
+        assert len(val) == 3
+
+    # ------------------------------------------------------------------
+    # Test 10 — auto-mode toggle concurrent with update_detection
+    # ------------------------------------------------------------------
+
+    @mock.patch('vision.green_cube_detector.detect_green_cubes', return_value=([], {}))
+    @mock.patch('vision.green_cube_detector.select_target_cube', return_value=-1)
+    def test_auto_mode_toggle_concurrent_with_detection(self, _sel, _det):
+        """start_auto/stop_auto interleaved with update_detection — no crash."""
+        ctrl = _make_controller()
+        frame = self._blank_frame()
+        errors = []
+
+        def toggle_auto():
+            for _ in range(8):
+                try:
+                    ctrl.start_auto()
+                    time.sleep(0.005)
+                    ctrl.stop_auto()
+                    time.sleep(0.005)
+                except Exception as e:
+                    errors.append(('toggle', e))
+
+        def detect_loop():
+            for _ in range(30):
+                try:
+                    ctrl.update_detection(frame)
+                except Exception as e:
+                    errors.append(('detect', e))
+
+        threads = [
+            threading.Thread(target=toggle_auto, daemon=True),
+            threading.Thread(target=detect_loop, daemon=True),
+            threading.Thread(target=detect_loop, daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        hung = self._join_all(threads, self.TIMEOUT)
+        assert not hung, f"{len(hung)} thread(s) still alive — possible deadlock"
+        assert not errors, f"Errors in auto-mode toggle + detection: {errors}"
+        assert ctrl.state.state in FetchState
