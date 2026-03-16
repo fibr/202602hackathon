@@ -3565,12 +3565,16 @@ class DigitalTwinView(SubprocessLauncherView):
 # ---------------------------------------------------------------------------
 
 class _DraggableRenderLabel(QLabel):
-    """QLabel with mouse-drag rotation and scroll-wheel zoom for 3D views.
+    """QLabel with mouse-drag rotation/pan and scroll-wheel zoom for 3D views.
 
     Supports two modes:
     - Single view: delegates drag to ``_renderer.start_drag / update_drag / end_drag``.
     - Multi-view (2×2 grid): detects which panel was clicked and updates
-      the corresponding entry in ``_panel_angles`` (a list of [az, el] pairs).
+      the corresponding entry in ``_panels`` (a list of panel-state dicts).
+
+    In multi-view, panels with ``locked=True`` (Side, Top) only allow panning
+    on left-drag; panels with ``locked=False`` (Front, Iso) allow rotation.
+    Right-drag always pans in any panel.
     """
 
     def __init__(self, text='', parent=None):
@@ -3578,33 +3582,50 @@ class _DraggableRenderLabel(QLabel):
         self._renderer = None   # set externally
         self._hover_pos = None  # (x, y) in widget coords, updated on mouse move
         self._multi_view = False
-        # Reference to list of [az, el] pairs for each panel (set externally).
-        # Mutable so in-place updates are visible to the parent view.
-        self._panel_angles = None
+        # Reference to list of panel-state dicts (set externally).
+        # Each dict: {az, el, pan_x, pan_y, zoom, locked, name}
+        self._panels = None
         # Multi-view drag state
         self._mv_drag_panel = None   # which panel index is being dragged
         self._mv_drag_start = None   # (x, y) pixel where drag started
-        self._mv_drag_az0 = 0.0      # panel azimuth at drag start
-        self._mv_drag_el0 = 0.0      # panel elevation at drag start
+        self._mv_drag_mode = None    # 'rotate' or 'pan'
+        self._mv_drag_az0 = 0.0
+        self._mv_drag_el0 = 0.0
+        self._mv_drag_px0 = 0.0      # pan_x at drag start
+        self._mv_drag_py0 = 0.0      # pan_y at drag start
         self.setCursor(Qt.OpenHandCursor)
         self.setMouseTracking(True)
 
+    def _panel_at(self, x, y):
+        """Return panel index for pixel (x, y) in the 2×2 grid."""
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        col = 0 if x < w // 2 else 1
+        row = 0 if y < h // 2 else 1
+        idx = row * 2 + col
+        if self._panels and idx < len(self._panels):
+            return idx
+        return None
+
     def mousePressEvent(self, event):  # noqa: N802
-        if event.button() == Qt.LeftButton:
-            if self._multi_view and self._panel_angles is not None:
-                # Determine which 2×2 panel was clicked
-                x, y = event.x(), event.y()
-                w, h = max(self.width(), 1), max(self.height(), 1)
-                col = 0 if x < w // 2 else 1
-                row = 0 if y < h // 2 else 1
-                panel = row * 2 + col
-                if panel < len(self._panel_angles):
+        btn = event.button()
+        if btn in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+            if self._multi_view and self._panels is not None:
+                panel = self._panel_at(event.x(), event.y())
+                if panel is not None:
+                    p = self._panels[panel]
                     self._mv_drag_panel = panel
-                    self._mv_drag_start = (x, y)
-                    self._mv_drag_az0 = self._panel_angles[panel][0]
-                    self._mv_drag_el0 = self._panel_angles[panel][1]
+                    self._mv_drag_start = (event.x(), event.y())
+                    self._mv_drag_az0 = p['az']
+                    self._mv_drag_el0 = p['el']
+                    self._mv_drag_px0 = p['pan_x']
+                    self._mv_drag_py0 = p['pan_y']
+                    # Right/middle-drag always pans; left-drag pans if locked
+                    if btn in (Qt.RightButton, Qt.MiddleButton) or p['locked']:
+                        self._mv_drag_mode = 'pan'
+                    else:
+                        self._mv_drag_mode = 'rotate'
                     self.setCursor(Qt.ClosedHandCursor)
-            elif self._renderer:
+            elif btn == Qt.LeftButton and self._renderer:
                 self.setCursor(Qt.ClosedHandCursor)
                 self._renderer.start_drag(event.x(), event.y())
         super().mousePressEvent(event)
@@ -3613,30 +3634,44 @@ class _DraggableRenderLabel(QLabel):
         self._hover_pos = (event.x(), event.y())
         if (self._multi_view and self._mv_drag_panel is not None
                 and self._mv_drag_start is not None
-                and self._panel_angles is not None):
+                and self._panels is not None):
             dx = event.x() - self._mv_drag_start[0]
             dy = event.y() - self._mv_drag_start[1]
-            az = self._mv_drag_az0 + dx * 0.5
-            el = float(np.clip(self._mv_drag_el0 - dy * 0.5, -89.0, 89.0))
-            self._panel_angles[self._mv_drag_panel][0] = az
-            self._panel_angles[self._mv_drag_panel][1] = el
+            p = self._panels[self._mv_drag_panel]
+            if self._mv_drag_mode == 'pan':
+                # Pan: shift in pixels (scaled by zoom later)
+                p['pan_x'] = self._mv_drag_px0 + dx
+                p['pan_y'] = self._mv_drag_py0 + dy
+            else:
+                # Rotate
+                p['az'] = self._mv_drag_az0 + dx * 0.5
+                p['el'] = float(np.clip(self._mv_drag_el0 - dy * 0.5,
+                                        -89.0, 89.0))
         elif self._renderer and self._renderer._drag_start is not None:
             self._renderer.update_drag(event.x(), event.y())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # noqa: N802
-        if event.button() == Qt.LeftButton:
+        btn = event.button()
+        if btn in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
             self.setCursor(Qt.OpenHandCursor)
             if self._multi_view:
                 self._mv_drag_panel = None
                 self._mv_drag_start = None
+                self._mv_drag_mode = None
             elif self._renderer:
                 self._renderer.end_drag()
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):  # noqa: N802
-        if self._renderer:
-            delta = event.angleDelta().y()
+        delta = event.angleDelta().y()
+        if self._multi_view and self._panels is not None:
+            panel = self._panel_at(event.x(), event.y())
+            if panel is not None:
+                p = self._panels[panel]
+                factor = 1.1 if delta > 0 else 0.9
+                p['zoom'] = float(np.clip(p['zoom'] * factor, 400, 4000))
+        elif self._renderer:
             self._renderer.handle_scroll(delta)
         super().wheelEvent(event)
 
@@ -3650,6 +3685,14 @@ class LiveTwinView(BaseViewWidget):
     view_name = 'Live Twin'
     description = 'Real-time 3D FK skeleton (drag to rotate, scroll to zoom)'
 
+    # Default panel configs: name, az, el, locked (rotation-locked = pan only)
+    _PANEL_DEFAULTS = [
+        {'name': 'Front', 'az': 0.0,  'el': 0.0,  'locked': False},
+        {'name': 'Side',  'az': 90.0, 'el': 0.0,  'locked': True},
+        {'name': 'Iso',   'az': 45.0, 'el': 30.0, 'locked': False},
+        {'name': 'Top',   'az': 0.0,  'el': 89.0, 'locked': True},
+    ]
+
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self._poll_thread = None
@@ -3659,15 +3702,17 @@ class LiveTwinView(BaseViewWidget):
         self._trail = []
         self._actual_angles = None
         self._commanded_angles = None
-        # Per-panel view angles [az, el] for the 2×2 multi-view grid.
-        # Mutable so the render label can update them in-place on drag.
-        self._panel_angles = [
-            [0.0,  0.0],   # Front
-            [90.0, 0.0],   # Side
-            [45.0, 30.0],  # Iso
-            [0.0,  89.0],  # Top
-        ]
+        # Per-panel state dicts — mutable so the render label updates in-place.
+        self._panels = self._make_default_panels()
         self._build_ui()
+
+    @classmethod
+    def _make_default_panels(cls):
+        """Create fresh per-panel state dicts from defaults."""
+        return [
+            {**d, 'pan_x': 0.0, 'pan_y': 0.0, 'zoom': 1200.0}
+            for d in cls._PANEL_DEFAULTS
+        ]
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
@@ -3679,7 +3724,7 @@ class LiveTwinView(BaseViewWidget):
         self._render_label.setStyleSheet('background-color: #1a1a1a;')
         # Wire multi-view drag support
         self._render_label._multi_view = self._multi_view
-        self._render_label._panel_angles = self._panel_angles
+        self._render_label._panels = self._panels
         layout.addWidget(self._render_label, stretch=3)
 
         # Controls
@@ -3703,7 +3748,7 @@ class LiveTwinView(BaseViewWidget):
             ctrl_layout.addWidget(make_button(name, lambda ch, n=name: self._set_preset(n)))
 
         # Hint text for mouse controls
-        hint = QLabel('Drag to rotate\nScroll to zoom\n(multi-view: drag\neach panel)')
+        hint = QLabel('L-drag: rotate/pan\nR-drag: pan\nScroll: zoom\nSide/Top locked')
         hint.setStyleSheet('color: #666; font-size: 9px; margin-top: 8px;')
         hint.setWordWrap(True)
         ctrl_layout.addWidget(hint)
@@ -3819,6 +3864,7 @@ class LiveTwinView(BaseViewWidget):
         save_el = r.elevation
         save_w = r.width
         save_h = r.height
+        save_zoom = r.zoom
         approx = False  # whether depth is indeterminate
 
         try:
@@ -3829,18 +3875,19 @@ class LiveTwinView(BaseViewWidget):
                 row = min(my // ph, 1) if ph > 0 else 0
                 idx = row * 2 + col
 
-                # Use per-panel angles (which may have been drag-rotated)
-                if idx < len(self._panel_angles):
-                    az, el = self._panel_angles[idx]
+                if idx < len(self._panels):
+                    p = self._panels[idx]
+                    az, el = p['az'], p['el']
                 else:
                     return
 
-                # Local coords within the panel
-                local_x = mx - col * pw
-                local_y = my - row * ph
+                # Local coords within the panel, accounting for pan offset
+                local_x = mx - col * pw - int(p['pan_x'])
+                local_y = my - row * ph - int(p['pan_y'])
 
                 r.azimuth = az
                 r.elevation = el
+                r.zoom = p['zoom']
                 r.width = pw
                 r.height = ph
 
@@ -3857,6 +3904,7 @@ class LiveTwinView(BaseViewWidget):
             r.elevation = save_el
             r.width = save_w
             r.height = save_h
+            r.zoom = save_zoom
 
         if world is None:
             return
@@ -3892,11 +3940,14 @@ class LiveTwinView(BaseViewWidget):
                      _cv2.LINE_AA)
 
     def _render_multiview(self, w, h):
-        """Render a 2x2 grid of orthographic views for full spatial coverage.
+        """Render a 2×2 grid of views with per-panel rotation, pan, and zoom.
 
-        Panels (left-to-right, top-to-bottom):
-            Front (az=0, el=0)   | Side (az=90, el=0)
-            Iso  (az=45, el=30)  | Top  (az=0,  el=89)
+        Layout (left-to-right, top-to-bottom):
+            Front (rotatable) | Side  (locked, pan-only)
+            Iso   (rotatable) | Top   (locked, pan-only)
+
+        Each panel has independent az/el/pan/zoom state stored in
+        ``self._panels`` dicts, mutated in-place by the drag handler.
         """
         import cv2 as _cv2
 
@@ -3909,43 +3960,42 @@ class LiveTwinView(BaseViewWidget):
         save_w = r.width
         save_h = r.height
         save_axes = r.draw_axes
-
-        # Panel configuration: (label, azimuth, elevation) — pulled from
-        # per-panel mutable state so drag rotation takes effect immediately.
-        panel_names = ['Front', 'Side', 'Iso', 'Top']
-        panels = [
-            (panel_names[i], self._panel_angles[i][0], self._panel_angles[i][1])
-            for i in range(4)
-        ]
+        save_zoom = r.zoom
 
         pw = w // 2
         ph = h // 2
 
-        # Set panel dimensions; suppress the built-in axis/HUD so we can
-        # draw our own per-panel axis indicator and name label instead.
-        r.width = pw
-        r.height = ph
+        # Suppress built-in axis/HUD — we draw our own per panel
         r.draw_axes = False
 
-        for i, (name, az, el) in enumerate(panels):
+        for i, p in enumerate(self._panels):
             row = i // 2
             col = i % 2
             ox = col * pw
             oy = row * ph
 
-            r.azimuth = az
-            r.elevation = el
+            r.azimuth = p['az']
+            r.elevation = p['el']
+            r.zoom = p['zoom']
+            r.width = pw
+            r.height = ph
 
-            # Render this panel onto the shared canvas using pixel offsets
+            # Render this panel onto the shared canvas using pixel offsets.
+            # Pan is applied as a pixel shift on top of the base offset.
+            pan_ox = ox + int(p['pan_x'])
+            pan_oy = oy + int(p['pan_y'])
             r.render_comparison(
                 canvas, self._actual_angles, self._commanded_angles,
-                offset_x=ox, offset_y=oy)
+                offset_x=pan_ox, offset_y=pan_oy)
 
-            # Per-panel axis indicator (top-left of each panel)
+            # Per-panel axis indicator (top-left)
             r.draw_axis_indicator(canvas, x=ox + 35, y=oy + 35)
 
-            # Panel name label
-            _cv2.putText(canvas, name, (ox + 5, oy + 15),
+            # Panel name label (with lock icon for locked panels)
+            label = p['name']
+            if p['locked']:
+                label += ' \u25CB'  # ○ = locked indicator
+            _cv2.putText(canvas, label, (ox + 5, oy + 15),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 180, 255), 1,
                          _cv2.LINE_AA)
 
@@ -3962,6 +4012,7 @@ class LiveTwinView(BaseViewWidget):
         r.width = save_w
         r.height = save_h
         r.draw_axes = save_axes
+        r.zoom = save_zoom
 
         # Angle table in the bottom-right (Top panel), below the panel label
         if self._show_table and self._actual_angles:
@@ -3987,6 +4038,12 @@ class LiveTwinView(BaseViewWidget):
         self._multi_view = not self._multi_view
         self._render_label._multi_view = self._multi_view
         self._mv_btn.setText('Single View' if self._multi_view else 'Multi-View')
+        # When switching to single view, sync renderer from Iso panel angles
+        if not self._multi_view and self._renderer:
+            iso = self._panels[2]  # Iso panel
+            self._renderer.azimuth = iso['az']
+            self._renderer.elevation = iso['el']
+            self._renderer.zoom = iso['zoom']
 
     def _toggle_table(self):
         self._show_table = not self._show_table
@@ -4006,11 +4063,10 @@ class LiveTwinView(BaseViewWidget):
             self._renderer.azimuth = 60.0
             self._renderer.elevation = 25.0
             self._renderer.zoom = 1200.0
-        # Reset per-panel angles to defaults
-        defaults = [[0.0, 0.0], [90.0, 0.0], [45.0, 30.0], [0.0, 89.0]]
-        for i, (az, el) in enumerate(defaults):
-            self._panel_angles[i][0] = az
-            self._panel_angles[i][1] = el
+        # Reset per-panel state to defaults
+        defaults = self._make_default_panels()
+        for i, d in enumerate(defaults):
+            self._panels[i].update(d)
 
     def _set_preset(self, name):
         if self._renderer:
