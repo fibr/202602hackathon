@@ -80,10 +80,19 @@ class FetchGameController:
     Args:
         app: The UnifiedPyQtApp instance (for robot, camera, config access).
         hover_height_mm: Height above cube for approach/refine (mm).
+            Default: 40.0 mm. Can be configured in robot_config.yaml under
+            fetch_game.hover_height_mm.
         grasp_height_mm: Height at which to close gripper (mm).
+            Default: 18.0 mm. Can be configured in robot_config.yaml under
+            fetch_game.grasp_height_mm.
         lift_height_mm: Height to lift after grasping (mm).
+            Default: 80.0 mm. Can be configured in robot_config.yaml under
+            fetch_game.lift_height_mm.
         place_pos_mm: [x, y, z] target position for placing (mm).
+            Default: [100, 100, 12] mm. Can be configured in robot_config.yaml
+            under fetch_game.place_position.
         cube_selection_mode: 'largest', 'closest_to_center', 'closest_to_click'.
+            Can be configured in robot_config.yaml under fetch_game.cube_selection_mode.
     """
 
     def __init__(self, app,

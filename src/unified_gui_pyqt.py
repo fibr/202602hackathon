@@ -4217,10 +4217,21 @@ class FetchGameView(BaseViewWidget):
         params_grid = QGridLayout()
         params_grid.setSpacing(4)
 
+        # Load defaults from fetch_game config section
+        config = self.app.config or {}
+        fetch_cfg = config.get('fetch_game', {})
+        hover_default = fetch_cfg.get('hover_height_mm', 40.0)
+        grasp_default = fetch_cfg.get('grasp_height_mm', 18.0)
+        lift_default = fetch_cfg.get('lift_height_mm', 80.0)
+        place_pos = fetch_cfg.get('place_position', [100.0, 100.0, 12.0])
+        place_x_default = place_pos[0] if len(place_pos) > 0 else 100.0
+        place_y_default = place_pos[1] if len(place_pos) > 1 else 100.0
+        place_z_default = place_pos[2] if len(place_pos) > 2 else 12.0
+
         params_grid.addWidget(QLabel('Hover Z:'), 0, 0)
         self._hover_spin = QDoubleSpinBox()
         self._hover_spin.setRange(10, 150)
-        self._hover_spin.setValue(40.0)
+        self._hover_spin.setValue(hover_default)
         self._hover_spin.setSuffix(' mm')
         self._hover_spin.setStyleSheet('background: #333; color: #ddd;')
         self._hover_spin.valueChanged.connect(self._on_params_changed)
@@ -4229,7 +4240,7 @@ class FetchGameView(BaseViewWidget):
         params_grid.addWidget(QLabel('Grasp Z:'), 1, 0)
         self._grasp_spin = QDoubleSpinBox()
         self._grasp_spin.setRange(0, 60)
-        self._grasp_spin.setValue(8.0)
+        self._grasp_spin.setValue(grasp_default)
         self._grasp_spin.setSuffix(' mm')
         self._grasp_spin.setStyleSheet('background: #333; color: #ddd;')
         self._grasp_spin.valueChanged.connect(self._on_params_changed)
@@ -4238,7 +4249,7 @@ class FetchGameView(BaseViewWidget):
         params_grid.addWidget(QLabel('Lift Z:'), 2, 0)
         self._lift_spin = QDoubleSpinBox()
         self._lift_spin.setRange(20, 200)
-        self._lift_spin.setValue(80.0)
+        self._lift_spin.setValue(lift_default)
         self._lift_spin.setSuffix(' mm')
         self._lift_spin.setStyleSheet('background: #333; color: #ddd;')
         self._lift_spin.valueChanged.connect(self._on_params_changed)
@@ -4247,7 +4258,7 @@ class FetchGameView(BaseViewWidget):
         params_grid.addWidget(QLabel('Place X:'), 3, 0)
         self._place_x = QDoubleSpinBox()
         self._place_x.setRange(-200, 200)
-        self._place_x.setValue(100.0)
+        self._place_x.setValue(place_x_default)
         self._place_x.setSuffix(' mm')
         self._place_x.setStyleSheet('background: #333; color: #ddd;')
         self._place_x.valueChanged.connect(self._on_params_changed)
@@ -4256,7 +4267,7 @@ class FetchGameView(BaseViewWidget):
         params_grid.addWidget(QLabel('Place Y:'), 4, 0)
         self._place_y = QDoubleSpinBox()
         self._place_y.setRange(-200, 200)
-        self._place_y.setValue(100.0)
+        self._place_y.setValue(place_y_default)
         self._place_y.setSuffix(' mm')
         self._place_y.setStyleSheet('background: #333; color: #ddd;')
         self._place_y.valueChanged.connect(self._on_params_changed)
