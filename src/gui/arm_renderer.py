@@ -419,6 +419,79 @@ class ArmRenderer:
 
         return results
 
+    def screen_to_world_on_plane(self, sx: float, sy: float,
+                                  z_plane: float = None) -> np.ndarray | None:
+        """Inverse-project a screen pixel onto a world-space Z-plane.
+
+        Given a 2D screen coordinate and a known Z height (in meters),
+        computes the corresponding 3D world point.  Uses iterative
+        refinement to handle the mild perspective distortion.
+
+        Args:
+            sx: Screen x coordinate (pixels).
+            sy: Screen y coordinate (pixels).
+            z_plane: World Z height in meters (default: table_z_m).
+
+        Returns:
+            np.ndarray [x, y, z] in meters (world frame), or None if
+            the projection is degenerate.
+        """
+        if z_plane is None:
+            z_plane = self.table_z_m if self.table_z_m is not None else 0.0
+
+        az = math.radians(self.azimuth)
+        el = math.radians(self.elevation)
+        cos_az, sin_az = math.cos(az), math.sin(az)
+        cos_el, sin_el = math.cos(el), math.sin(el)
+
+        cx = self.width // 2
+        cy = int(self.height * 0.75)
+
+        zc = z_plane - self.center_offset[2]
+
+        # Iterative solve: start with persp=1, refine 3 times
+        persp = 1.0
+        for _ in range(4):
+            # Invert screen equations:
+            #   sx = cx + x2 * zoom * persp
+            #   sy = cy - z3 * zoom * persp
+            if abs(self.zoom * persp) < 1e-6:
+                return None
+            x2 = (sx - cx) / (self.zoom * persp)
+            z3 = (cy - sy) / (self.zoom * persp)
+
+            # Invert elevation rotation:
+            #   z3 = y2 * sin_el + zc * cos_el
+            #   y3 = y2 * cos_el - zc * sin_el
+            # Solve for y2 from z3 equation.
+            if abs(sin_el) > 1e-4:
+                y2 = (z3 - zc * cos_el) / sin_el
+            else:
+                # Near-zero elevation: the z-plane is viewed edge-on,
+                # so depth (y2) is indeterminate from screen coords.
+                # Default to y2=0 (show X/Z at the plane center).
+                y2 = 0.0
+
+            y3 = y2 * cos_el - zc * sin_el
+
+            # Update perspective estimate
+            persp = max(1.0 + y3 * 0.8, 0.3)
+
+        # Invert azimuth rotation:
+        #   x2 = xc * cos_az - yc * sin_az
+        #   y2 = xc * sin_az + yc * cos_az
+        # This is a rotation matrix, inverse is transpose:
+        xc = x2 * cos_az + y2 * sin_az
+        yc = -x2 * sin_az + y2 * cos_az
+
+        # Undo center offset
+        world = np.array([
+            xc + self.center_offset[0],
+            yc + self.center_offset[1],
+            z_plane,
+        ])
+        return world
+
     def render(self, canvas: np.ndarray,
                motor_angles_deg: np.ndarray,
                color_override: tuple = None,

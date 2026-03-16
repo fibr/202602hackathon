@@ -3576,6 +3576,7 @@ class _DraggableRenderLabel(QLabel):
     def __init__(self, text='', parent=None):
         super().__init__(text, parent)
         self._renderer = None   # set externally
+        self._hover_pos = None  # (x, y) in widget coords, updated on mouse move
         self._multi_view = False
         # Reference to list of [az, el] pairs for each panel (set externally).
         # Mutable so in-place updates are visible to the parent view.
@@ -3609,6 +3610,7 @@ class _DraggableRenderLabel(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
+        self._hover_pos = (event.x(), event.y())
         if (self._multi_view and self._mv_drag_panel is not None
                 and self._mv_drag_start is not None
                 and self._panel_angles is not None):
@@ -3637,6 +3639,10 @@ class _DraggableRenderLabel(QLabel):
             delta = event.angleDelta().y()
             self._renderer.handle_scroll(delta)
         super().wheelEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802
+        self._hover_pos = None
+        super().leaveEvent(event)
 
 
 class LiveTwinView(BaseViewWidget):
@@ -3779,10 +3785,111 @@ class LiveTwinView(BaseViewWidget):
                     self._renderer.render_angle_table(
                         canvas, self._actual_angles, self._commanded_angles)
 
+            # Draw hover tooltip with 3D world coordinates
+            self._draw_hover_tooltip(canvas, w, h)
+
             img = cv_to_qimage(canvas)
             self._render_label.setPixmap(QPixmap.fromImage(img))
         except Exception:
             pass
+
+    def _draw_hover_tooltip(self, canvas, w, h):
+        """Draw a tooltip showing 3D world coordinates at the mouse position.
+
+        In multi-view mode, determines which panel the cursor is over and
+        uses that panel's view angle for the inverse projection.  The
+        coordinates are projected onto the table plane (z = table_z_m).
+
+        For views with near-zero elevation (Front, Side), depth along the
+        viewing axis is indeterminate and assumed to be 0, so a '~' prefix
+        indicates the result is approximate.
+        """
+        import cv2 as _cv2
+
+        hover = self._render_label._hover_pos
+        if hover is None or self._renderer is None:
+            return
+
+        mx, my = hover
+        if mx < 0 or my < 0 or mx >= w or my >= h:
+            return
+
+        r = self._renderer
+        save_az = r.azimuth
+        save_el = r.elevation
+        save_w = r.width
+        save_h = r.height
+        approx = False  # whether depth is indeterminate
+
+        try:
+            if self._multi_view:
+                pw = w // 2
+                ph = h // 2
+                col = min(mx // pw, 1) if pw > 0 else 0
+                row = min(my // ph, 1) if ph > 0 else 0
+                idx = row * 2 + col
+
+                # Use per-panel angles (which may have been drag-rotated)
+                if idx < len(self._panel_angles):
+                    az, el = self._panel_angles[idx]
+                else:
+                    return
+
+                # Local coords within the panel
+                local_x = mx - col * pw
+                local_y = my - row * ph
+
+                r.azimuth = az
+                r.elevation = el
+                r.width = pw
+                r.height = ph
+
+                # Near-zero elevation => depth is indeterminate
+                approx = abs(el) < 1.0
+            else:
+                local_x = mx
+                local_y = my
+                approx = abs(r.elevation) < 1.0
+
+            world = r.screen_to_world_on_plane(local_x, local_y)
+        finally:
+            r.azimuth = save_az
+            r.elevation = save_el
+            r.width = save_w
+            r.height = save_h
+
+        if world is None:
+            return
+
+        # Convert to mm for display
+        x_mm, y_mm, z_mm = world * 1000.0
+        prefix = '~' if approx else ''
+        label = f'{prefix}({x_mm:.0f}, {y_mm:.0f}, {z_mm:.0f}) mm'
+
+        # Draw small crosshair at cursor
+        _cv2.drawMarker(canvas, (mx, my), (0, 255, 255), _cv2.MARKER_CROSS,
+                        10, 1, _cv2.LINE_AA)
+
+        # Position tooltip with slight offset; keep within canvas bounds
+        tx = mx + 12
+        ty = my - 8
+        (tw, th), _ = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.4, 1)
+        # Clamp to stay within canvas
+        if tx + tw + 4 > w:
+            tx = mx - tw - 12
+        if ty - th - 4 < 0:
+            ty = my + th + 12
+
+        # Semi-transparent background
+        _cv2.rectangle(canvas, (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
+                       (30, 30, 30), -1)
+        _cv2.rectangle(canvas, (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
+                       (0, 200, 200), 1)
+        color = (0, 200, 200) if approx else (0, 255, 255)
+        _cv2.putText(canvas, label, (tx, ty),
+                     _cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1,
+                     _cv2.LINE_AA)
 
     def _render_multiview(self, w, h):
         """Render a 2x2 grid of orthographic views for full spatial coverage.
