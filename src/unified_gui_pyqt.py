@@ -51,7 +51,8 @@ from PyQt5.QtWidgets import (
     QMessageBox, QStatusBar,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QSize
-from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QIcon, QPalette
+from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QIcon, QPalette, QPainter, QBrush, QPen
+from PyQt5.QtCore import QRect
 
 from config_loader import load_config, config_path
 
@@ -4948,6 +4949,79 @@ class AppCubeTracker:
 
 
 # ---------------------------------------------------------------------------
+# Angle Progress Bar Widget (for servo limits view)
+# ---------------------------------------------------------------------------
+
+class AngleProgressWidget(QWidget):
+    """A simple progress bar widget showing where the current angle sits within min/max range.
+
+    Displays a horizontal bar where:
+    - The bar fills from left (min) to right (max)
+    - The filled portion (progress) represents the current angle position
+    - Color indicates the angle's state:
+      - Green: normal range
+      - Orange: near limit (within 5 degrees)
+      - Red: outside limits
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.min_val = -90.0
+        self.max_val = 90.0
+        self.current_val = 0.0
+        self.setMinimumHeight(20)
+        self.setMaximumHeight(24)
+        self.setMinimumWidth(80)
+
+    def set_values(self, min_val: float, max_val: float, current_val: float):
+        """Update the progress bar values."""
+        self.min_val = min_val
+        self.max_val = max_val
+        self.current_val = current_val
+        self.update()
+
+    def paintEvent(self, event):
+        """Paint the progress bar."""
+        painter = QPainter(self)
+
+        # Background
+        painter.fillRect(self.rect(), QBrush(QColor('#2a2a2a')))
+
+        # Border
+        painter.setPen(QPen(QColor('#555'), 1))
+        painter.drawRect(1, 1, self.width() - 2, self.height() - 2)
+
+        # Calculate position within range
+        range_size = self.max_val - self.min_val
+        if range_size <= 0:
+            # Invalid range
+            return
+
+        # Normalize current value to 0-1
+        position = (self.current_val - self.min_val) / range_size
+        position = max(0.0, min(1.0, position))  # Clamp to 0-1
+
+        # Determine color based on position and limits
+        margin = 5.0 / range_size  # 5 degrees as a fraction of range
+        if self.current_val < self.min_val or self.current_val > self.max_val:
+            # Outside limits
+            color = QColor('#f44')
+        elif position <= margin or position >= (1.0 - margin):
+            # Near limits
+            color = QColor('#ff9800')
+        else:
+            # Normal
+            color = QColor('#4f8f4f')
+
+        # Draw filled portion
+        fill_width = int((self.width() - 2) * position)
+        if fill_width > 0:
+            painter.fillRect(2, 2, fill_width, self.height() - 4, QBrush(color))
+
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
 # Servo Angle Limits View
 # ---------------------------------------------------------------------------
 
@@ -4984,6 +5058,7 @@ class ServoLimitsView(BaseViewWidget):
         self._lbl_raw_max = []
         self._lbl_status = []
         self._lbl_live = []          # live angle labels
+        self._progress_bars = []     # progress bar widgets showing angle within range
         self._lbl_teach_range = []   # teach-range observed range labels
         self._btn_teach = []         # teach start/stop buttons
         self._teaching = [False] * 6  # which servos are in teach mode
@@ -5047,7 +5122,7 @@ class ServoLimitsView(BaseViewWidget):
         grid.setSpacing(4)
 
         # Header row
-        headers = ['Joint', 'Live Angle', 'Min (deg)', 'Max (deg)',
+        headers = ['Joint', 'Live Angle', 'Progress', 'Min (deg)', 'Max (deg)',
                     'Raw Min', 'Raw Max', 'Range (deg)', 'Status', '',
                     'Teach Range', 'Observed']
         for col, h in enumerate(headers):
@@ -5073,7 +5148,13 @@ class ServoLimitsView(BaseViewWidget):
             grid.addWidget(lbl_live, row, 1)
             self._lbl_live.append(lbl_live)
 
-            # Col 2: Min spin (-180 to +180)
+            # Col 2: Progress bar showing angle within min/max range
+            progress = AngleProgressWidget()
+            progress.setToolTip('Visual indicator of current angle within limits')
+            grid.addWidget(progress, row, 2)
+            self._progress_bars.append(progress)
+
+            # Col 3: Min spin (-180 to +180)
             spin_min = QDoubleSpinBox()
             spin_min.setRange(-180.0, 180.0)
             spin_min.setDecimals(1)
@@ -5083,10 +5164,10 @@ class ServoLimitsView(BaseViewWidget):
                 'QDoubleSpinBox { background: #2a2a2a; color: #ddd; '
                 'border: 1px solid #555; padding: 2px; }'
             )
-            grid.addWidget(spin_min, row, 2)
+            grid.addWidget(spin_min, row, 3)
             self._spin_min.append(spin_min)
 
-            # Col 3: Max spin
+            # Col 4: Max spin
             spin_max = QDoubleSpinBox()
             spin_max.setRange(-180.0, 180.0)
             spin_max.setDecimals(1)
@@ -5096,55 +5177,55 @@ class ServoLimitsView(BaseViewWidget):
                 'QDoubleSpinBox { background: #2a2a2a; color: #ddd; '
                 'border: 1px solid #555; padding: 2px; }'
             )
-            grid.addWidget(spin_max, row, 3)
+            grid.addWidget(spin_max, row, 4)
             self._spin_max.append(spin_max)
 
-            # Col 4: Raw min label
+            # Col 5: Raw min label
             lbl_rmin = QLabel('--')
             lbl_rmin.setStyleSheet('color: #888; font-family: monospace; font-size: 10px;')
-            grid.addWidget(lbl_rmin, row, 4)
+            grid.addWidget(lbl_rmin, row, 5)
             self._lbl_raw_min.append(lbl_rmin)
 
-            # Col 5: Raw max label
+            # Col 6: Raw max label
             lbl_rmax = QLabel('--')
             lbl_rmax.setStyleSheet('color: #888; font-family: monospace; font-size: 10px;')
-            grid.addWidget(lbl_rmax, row, 5)
+            grid.addWidget(lbl_rmax, row, 6)
             self._lbl_raw_max.append(lbl_rmax)
 
-            # Col 6: Range label
+            # Col 7: Range label
             lbl_range = QLabel('--')
             lbl_range.setStyleSheet('color: #8f8; font-family: monospace; font-size: 10px;')
-            grid.addWidget(lbl_range, row, 6)
+            grid.addWidget(lbl_range, row, 7)
 
-            # Col 7: Status label
+            # Col 8: Status label
             lbl_st = QLabel('')
             lbl_st.setStyleSheet('color: #aaa; font-size: 10px;')
-            grid.addWidget(lbl_st, row, 7)
+            grid.addWidget(lbl_st, row, 8)
             self._lbl_status.append(lbl_st)
 
-            # Col 8: Per-joint write button
+            # Col 9: Per-joint write button
             btn_w = make_button('Write', lambda checked, idx=i: self._write_one(idx),
                                 tooltip=f'Write limits for {name}', color='#6a4400',
                                 min_w=60, min_h=26)
-            grid.addWidget(btn_w, row, 8)
+            grid.addWidget(btn_w, row, 9)
 
-            # Col 9: Teach start/stop button
+            # Col 10: Teach start/stop button
             btn_teach = make_button(
                 'Teach', lambda checked, idx=i: self._toggle_teach(idx),
                 tooltip=f'Start/stop teach-range mode for {name}',
                 color='#2e7d32', min_w=70, min_h=26,
             )
-            grid.addWidget(btn_teach, row, 9)
+            grid.addWidget(btn_teach, row, 10)
             self._btn_teach.append(btn_teach)
 
-            # Col 10: Observed range during teach
+            # Col 11: Observed range during teach
             lbl_obs = QLabel('--')
             lbl_obs.setStyleSheet(
                 'color: #aaa; font-family: monospace; font-size: 10px; '
                 'min-width: 100px;'
             )
             lbl_obs.setToolTip('Observed min..max while teaching')
-            grid.addWidget(lbl_obs, row, 10)
+            grid.addWidget(lbl_obs, row, 11)
             self._lbl_teach_range.append(lbl_obs)
 
             # Connect spinbox changes to update the range label
@@ -5246,6 +5327,9 @@ class ServoLimitsView(BaseViewWidget):
                 f'color: {color}; font-family: monospace; font-size: 12px; '
                 f'font-weight: bold; min-width: 60px;'
             )
+
+            # Update progress bar showing angle within limits
+            self._progress_bars[i].set_values(mn, mx, deg)
 
             # If this servo is in teach mode, update observed min/max
             if self._teaching[i]:
