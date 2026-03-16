@@ -4167,6 +4167,23 @@ class FetchGameView(BaseViewWidget):
         btn_row2.addWidget(self._reset_btn)
         right_layout.addLayout(btn_row2)
 
+        # Track Yaw mode
+        right_layout.addWidget(section_label('Track Yaw'))
+
+        track_row = QHBoxLayout()
+        self._track_yaw_btn = make_button('\u25cb Track Yaw', self._on_toggle_track_yaw,
+                                           color='#3a1a5c')
+        track_row.addWidget(self._track_yaw_btn)
+        self._flip_sign_btn = make_button('Flip Sign (+1)', self._on_flip_sign)
+        track_row.addWidget(self._flip_sign_btn)
+        right_layout.addLayout(track_row)
+
+        self._track_yaw_info = QLabel('Idle')
+        self._track_yaw_info.setStyleSheet(
+            'color: #aaa; font-size: 10px; font-family: monospace; padding: 2px;')
+        self._track_yaw_info.setWordWrap(True)
+        right_layout.addWidget(self._track_yaw_info)
+
         # Selection mode
         right_layout.addWidget(section_label('Cube Selection'))
         mode_row = QHBoxLayout()
@@ -4292,6 +4309,7 @@ class FetchGameView(BaseViewWidget):
         # Stop the controller to avoid background robot motions
         if self._controller:
             self._controller.stop_auto()
+            self._controller.stop_track_yaw()
         if self._cam_thread:
             self._cam_thread.stop()
             self._cam_thread = None
@@ -4364,6 +4382,26 @@ class FetchGameView(BaseViewWidget):
         if self._controller:
             self._controller.reset()
 
+    def _on_toggle_track_yaw(self):
+        if not self._controller:
+            return
+        if self._controller.state.track_yaw_active:
+            self._controller.stop_track_yaw()
+            self._track_yaw_btn.setText('\u25cb Track Yaw')
+            self._track_yaw_btn.setStyleSheet(
+                'background-color: #3a1a5c; color: white; padding: 4px;')
+        else:
+            self._controller.start_track_yaw()
+            self._track_yaw_btn.setText('\u25cf Tracking')
+            self._track_yaw_btn.setStyleSheet(
+                'background-color: #6a2aac; color: white; padding: 4px;')
+
+    def _on_flip_sign(self):
+        if not self._controller:
+            return
+        new_sign = self._controller.toggle_track_yaw_sign()
+        self._flip_sign_btn.setText(f'Flip Sign ({new_sign:+d})')
+
     def _on_mode_changed(self, text):
         if self._controller:
             self._controller.cube_selection_mode = text
@@ -4428,7 +4466,7 @@ class FetchGameView(BaseViewWidget):
                 self._gripper_cam_label.size(), Qt.KeepAspectRatio,
                 Qt.SmoothTransformation)
             self._gripper_cam_label.setPixmap(gc_pix)
-        elif state.state not in (FetchState.REFINE,):
+        elif not state.track_yaw_active and state.state not in (FetchState.REFINE,):
             self._gripper_cam_label.setText('No feed')
 
         # Gripper cam info
@@ -4450,6 +4488,16 @@ class FetchGameView(BaseViewWidget):
             self._auto_btn.setText('Auto Run')
             self._auto_btn.setStyleSheet(
                 'background-color: #0a3a6a; color: white; padding: 4px;')
+
+        # Track yaw info
+        if state.track_yaw_active:
+            self._track_yaw_info.setText(state.track_yaw_status)
+            self._track_yaw_btn.setText('\u25cf Tracking')
+            self._track_yaw_btn.setStyleSheet(
+                'background-color: #6a2aac; color: white; padding: 4px;')
+        elif state.track_yaw_status:
+            self._track_yaw_info.setText(state.track_yaw_status)
+        self._flip_sign_btn.setText(f'Flip Sign ({state.track_yaw_sign:+d})')
 
     def _update_pos_table(self, state):
         """Update the position table with current state."""

@@ -58,6 +58,13 @@ class FetchGameState:
     refine_error_px: float = float('inf')
     # Target
     place_target_3d: Optional[np.ndarray] = None  # [x,y,z] mm in base frame
+    # Track yaw mode
+    track_yaw_active: bool = False
+    track_yaw_detected: float = 0.0     # Detected cube yaw (degrees)
+    track_yaw_target_j5: float = 0.0    # Computed target J5 (degrees)
+    track_yaw_current_j5: float = 0.0   # Current J5 reading (degrees)
+    track_yaw_sign: int = 1             # +1 or -1 for wrist roll direction
+    track_yaw_status: str = ''          # Human-readable status line
     # Progress
     auto_mode: bool = False
     step_count: int = 0
@@ -92,12 +99,19 @@ class FetchGameController:
         self.cube_selection_mode = cube_selection_mode
 
         self.state = FetchGameState()
+        # Load wrist_roll_sign from config (default +1)
+        config = getattr(app, 'config', None) or {}
+        vs_cfg = config.get('visual_servo', {})
+        self.state.track_yaw_sign = int(vs_cfg.get('wrist_roll_sign', 1))
+
         self._click_xy = None  # For click-to-select mode
         self._transform = None
         self._solver = None
         self._worker_thread = None
         self._abort = False
         self._speed = 150
+        self._track_yaw_thread = None
+        self._track_yaw_stop = False
 
         # Lock protecting all FetchGameState field reads/writes.
         # RLock allows the same thread to re-acquire (e.g. step() -> _set_state()).
@@ -358,6 +372,179 @@ class FetchGameController:
             import traceback
             traceback.print_exc()
             self._set_state(FetchState.ERROR, f'Error: {e}')
+
+    # ------------------------------------------------------------------
+    # Track-yaw mode — continuous gripper-cam yaw detection + J5 tracking
+    # ------------------------------------------------------------------
+
+    def start_track_yaw(self):
+        """Start continuous yaw tracking: gripper cam detects cube, J5 follows.
+
+        Opens the gripper camera and continuously:
+          1. Detects cube yaw via green_cube_detector
+          2. Computes optimal J5 via CubeFaceAligner
+          3. Moves J5 to match (accounting for wrist_roll_sign)
+          4. Updates state for GUI display
+        """
+        if self._track_yaw_thread and self._track_yaw_thread.is_alive():
+            log.warning("Track yaw already running")
+            return
+
+        self.ensure_ready()
+        self._track_yaw_stop = False
+        with self._lock:
+            self.state.track_yaw_active = True
+            self.state.track_yaw_status = 'Starting...'
+
+        self._track_yaw_thread = threading.Thread(
+            target=self._track_yaw_loop, daemon=True)
+        self._track_yaw_thread.start()
+
+    def stop_track_yaw(self):
+        """Stop continuous yaw tracking."""
+        self._track_yaw_stop = True
+        with self._lock:
+            self.state.track_yaw_active = False
+            self.state.track_yaw_status = 'Stopped'
+        t = self._track_yaw_thread
+        if t and t.is_alive():
+            t.join(timeout=2.0)
+
+    def toggle_track_yaw_sign(self):
+        """Flip the wrist_roll sign (+1 <-> -1)."""
+        with self._lock:
+            self.state.track_yaw_sign *= -1
+            sign = self.state.track_yaw_sign
+        log.info(f"Track yaw: wrist_roll_sign flipped to {sign:+d}")
+        return sign
+
+    def _track_yaw_loop(self):
+        """Background loop for continuous yaw tracking."""
+        from vision.green_cube_detector import detect_green_cubes
+        from cube_face_aligner import CubeFaceAligner
+        import math
+
+        config = self.app.config or {}
+        gc = config.get('gripper_camera', {})
+        cam_index = gc.get('device_index', 8)
+        cam_w = gc.get('width', 640)
+        cam_h = gc.get('height', 480)
+
+        robot = self.app.robot
+        if robot is None:
+            with self._lock:
+                self.state.track_yaw_status = 'No robot connected'
+                self.state.track_yaw_active = False
+            return
+
+        aligner = CubeFaceAligner.from_config(config)
+
+        # Open gripper camera
+        cap = cv2.VideoCapture(cam_index, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(cam_index)
+        if not cap.isOpened():
+            log.warning(f"Track yaw: cannot open gripper cam /dev/video{cam_index}")
+            with self._lock:
+                self.state.track_yaw_status = 'Gripper cam unavailable'
+                self.state.track_yaw_active = False
+            return
+
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_h)
+
+        # Warm up
+        for _ in range(5):
+            cap.read()
+
+        log.info("Track yaw: started")
+        deadband_deg = 3.0  # Don't move for tiny corrections
+
+        try:
+            while not self._track_yaw_stop:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    time.sleep(0.05)
+                    continue
+
+                cubes, _ = detect_green_cubes(frame, min_area=100)
+
+                # Annotate frame for GUI
+                gc_vis = frame.copy()
+                h_gc, w_gc = gc_vis.shape[:2]
+                cv2.drawMarker(gc_vis, (w_gc // 2, h_gc // 2), (255, 255, 0),
+                               cv2.MARKER_CROSS, 30, 1)
+                if cubes:
+                    from vision.green_cube_detector import annotate_frame
+                    gc_vis = annotate_frame(gc_vis, cubes, target_idx=0)
+
+                with self._lock:
+                    self.state.gripper_cam_frame = gc_vis
+
+                if not cubes:
+                    with self._lock:
+                        self.state.track_yaw_status = 'No cube detected'
+                        self.state.gripper_cam_detection = None
+                    time.sleep(0.1)
+                    continue
+
+                cube = cubes[0]
+                detected_yaw = cube.yaw_deg
+
+                # Read current joint angles
+                angles = robot.get_angles()
+                if not angles or len(angles) < 6:
+                    with self._lock:
+                        self.state.track_yaw_status = 'Cannot read joints'
+                    time.sleep(0.1)
+                    continue
+
+                current_j5 = angles[4]
+
+                # Read sign from state (can be toggled live from GUI)
+                with self._lock:
+                    sign = self.state.track_yaw_sign
+
+                # Apply sign to the detected yaw before alignment
+                effective_yaw = detected_yaw * sign
+
+                plan = aligner.compute_alignment(effective_yaw, current_j5)
+
+                with self._lock:
+                    self.state.gripper_cam_detection = (cube.cx, cube.cy)
+                    self.state.track_yaw_detected = detected_yaw
+                    self.state.track_yaw_current_j5 = current_j5
+                    if plan.valid:
+                        self.state.track_yaw_target_j5 = plan.selected_j5_deg
+                        self.state.track_yaw_status = (
+                            f'yaw={detected_yaw:+.0f}\u00b0 '
+                            f'sign={sign:+d} '
+                            f'J5: {current_j5:.0f}\u00b0\u2192{plan.selected_j5_deg:.0f}\u00b0 '
+                            f'(\u0394={plan.delta_deg:+.1f}\u00b0)')
+                    else:
+                        self.state.track_yaw_status = f'yaw={detected_yaw:+.0f}\u00b0 plan invalid'
+
+                # Move J5 if delta is significant
+                if plan.valid and abs(plan.delta_deg) >= deadband_deg:
+                    cmd = list(angles)
+                    cmd[4] = plan.selected_j5_deg
+                    robot.move_joints(cmd, speed=100)
+                    time.sleep(0.3)
+                else:
+                    time.sleep(0.1)
+
+        except Exception as e:
+            log.error(f"Track yaw error: {e}")
+            import traceback
+            traceback.print_exc()
+            with self._lock:
+                self.state.track_yaw_status = f'Error: {e}'
+        finally:
+            cap.release()
+            with self._lock:
+                self.state.track_yaw_active = False
+            log.info("Track yaw: stopped")
 
     # ------------------------------------------------------------------
     # State actions (run in worker thread)

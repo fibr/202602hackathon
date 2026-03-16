@@ -78,6 +78,7 @@ visual_servo:
   # Sign flips for mirrored or upside-down camera mounts
   cam_flip_x: false
   cam_flip_y: false
+  wrist_roll_sign: 1            # +1 or -1: flip if J5 tracks cube yaw backwards
   max_iterations: 12          # Max correction iterations before proceeding
   pixel_threshold: 20.0       # Convergence: stop when |error| < this (pixels)
   gain: 0.6                   # Proportional gain (0-1); lower = more stable
