@@ -46,6 +46,7 @@ from robot.lerobot_arm101 import (  # noqa: E402
     ADDR_TORQUE_ENABLE, ADDR_GOAL_POSITION, ADDR_GOAL_SPEED,
     ADDR_PRESENT_POSITION, ADDR_MAX_TORQUE,
     DEFAULT_MOTOR_IDS,
+    ADDR_MIN_ANGLE_LIMIT, ADDR_MAX_ANGLE_LIMIT, ADDR_LOCK,
 )
 
 # Grab the COMM_SUCCESS value as seen by lerobot_arm101 (from our mock).
@@ -986,3 +987,407 @@ class TestZHeightSafety:
         arm.write_all_angles([0.0, 90.0, -90.0, 45.0, -45.0, 0.0])
         gp = _goal_pos_calls(arm.packet_handler)
         assert len(gp) == 6
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Angle limits — EEPROM read/write and conversion
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _lock_calls(pkt, value):
+    """Return write1ByteTxRx calls targeting ADDR_LOCK with the given value."""
+    return [c for c in pkt.write1ByteTxRx.call_args_list
+            if c[0][2] == ADDR_LOCK and c[0][3] == value]
+
+
+def _min_limit_calls(pkt):
+    """Return write2ByteTxRx calls targeting ADDR_MIN_ANGLE_LIMIT."""
+    return [c for c in pkt.write2ByteTxRx.call_args_list
+            if c[0][2] == ADDR_MIN_ANGLE_LIMIT]
+
+
+def _max_limit_calls(pkt):
+    """Return write2ByteTxRx calls targeting ADDR_MAX_ANGLE_LIMIT."""
+    return [c for c in pkt.write2ByteTxRx.call_args_list
+            if c[0][2] == ADDR_MAX_ANGLE_LIMIT]
+
+
+class TestReadAngleLimits:
+    """Tests for read_angle_limits() and read_all_angle_limits()."""
+
+    def test_returns_min_max_on_success(self, arm):
+        """read_angle_limits returns (min_raw, max_raw) when both reads succeed."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (500, COMM_SUCCESS, 0),   # min limit
+            (3500, COMM_SUCCESS, 0),  # max limit
+        ]
+        result = arm.read_angle_limits(1)
+        assert result == (500, 3500)
+
+    def test_returns_error_sentinel_when_min_read_fails(self, arm):
+        """read_angle_limits returns (-1, -1) if min-limit read fails."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (0, 1, 0),               # min read fails (result != COMM_SUCCESS)
+            (3500, COMM_SUCCESS, 0), # max read succeeds (irrelevant)
+        ]
+        result = arm.read_angle_limits(1)
+        assert result == (-1, -1)
+
+    def test_returns_error_sentinel_when_max_read_fails(self, arm):
+        """read_angle_limits returns (-1, -1) if max-limit read fails."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (500, COMM_SUCCESS, 0),  # min read succeeds
+            (0, 1, 0),               # max read fails
+        ]
+        result = arm.read_angle_limits(1)
+        assert result == (-1, -1)
+
+    def test_reads_from_correct_addresses(self, arm):
+        """read_angle_limits reads ADDR_MIN_ANGLE_LIMIT then ADDR_MAX_ANGLE_LIMIT."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (0, COMM_SUCCESS, 0),
+            (0, COMM_SUCCESS, 0),
+        ]
+        arm.read_angle_limits(2)
+        calls = arm.packet_handler.read2ByteTxRx.call_args_list
+        # First call should target ADDR_MIN_ANGLE_LIMIT
+        assert calls[0][0][2] == ADDR_MIN_ANGLE_LIMIT
+        # Second call should target ADDR_MAX_ANGLE_LIMIT
+        assert calls[1][0][2] == ADDR_MAX_ANGLE_LIMIT
+
+    def test_reads_target_correct_motor(self, arm):
+        """read_angle_limits passes the given motor_id to both reads."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (100, COMM_SUCCESS, 0),
+            (200, COMM_SUCCESS, 0),
+        ]
+        arm.read_angle_limits(3)
+        calls = arm.packet_handler.read2ByteTxRx.call_args_list
+        assert calls[0][0][1] == 3
+        assert calls[1][0][1] == 3
+
+    def test_zero_zero_is_valid_continuous_rotation_mode(self, arm):
+        """(0, 0) means continuous rotation — must be returned as-is, not as error."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (0, COMM_SUCCESS, 0),
+            (0, COMM_SUCCESS, 0),
+        ]
+        result = arm.read_angle_limits(1)
+        assert result == (0, 0)
+
+    def test_read_all_angle_limits_returns_list_for_all_motors(self, arm):
+        """read_all_angle_limits returns one (min, max) tuple per motor."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (100, COMM_SUCCESS, 0), (3000, COMM_SUCCESS, 0),  # motor 1
+            (200, COMM_SUCCESS, 0), (3100, COMM_SUCCESS, 0),  # motor 2
+            (300, COMM_SUCCESS, 0), (3200, COMM_SUCCESS, 0),  # motor 3
+            (400, COMM_SUCCESS, 0), (3300, COMM_SUCCESS, 0),  # motor 4
+            (500, COMM_SUCCESS, 0), (3400, COMM_SUCCESS, 0),  # motor 5
+            (600, COMM_SUCCESS, 0), (3500, COMM_SUCCESS, 0),  # motor 6
+        ]
+        limits = arm.read_all_angle_limits()
+        assert len(limits) == 6
+        assert limits[0] == (100, 3000)
+        assert limits[5] == (600, 3500)
+
+    def test_read_all_angle_limits_propagates_errors(self, arm):
+        """read_all_angle_limits passes through (-1, -1) for failed motors."""
+        arm.packet_handler.read2ByteTxRx.side_effect = [
+            (0, 1, 0), (0, COMM_SUCCESS, 0),  # motor 1 fails (min read fails)
+            (200, COMM_SUCCESS, 0), (3100, COMM_SUCCESS, 0),  # motor 2 ok
+            (300, COMM_SUCCESS, 0), (3200, COMM_SUCCESS, 0),  # motor 3 ok
+            (400, COMM_SUCCESS, 0), (3300, COMM_SUCCESS, 0),  # motor 4 ok
+            (500, COMM_SUCCESS, 0), (3400, COMM_SUCCESS, 0),  # motor 5 ok
+            (600, COMM_SUCCESS, 0), (3500, COMM_SUCCESS, 0),  # motor 6 ok
+        ]
+        limits = arm.read_all_angle_limits()
+        assert limits[0] == (-1, -1)
+        assert limits[1] == (200, 3100)
+
+
+class TestWriteAngleLimits:
+    """Tests for write_angle_limits(): EEPROM sequence, clamping, error handling."""
+
+    @pytest.fixture
+    def fast_arm(self, arm):
+        """arm with time.sleep patched to a no-op for fast tests."""
+        with mock.patch('robot.lerobot_arm101.time.sleep'):
+            yield arm
+
+    # ── EEPROM unlock/lock sequence ───────────────────────────────────────────
+
+    def test_eeprom_unlock_before_write(self, fast_arm):
+        """ADDR_LOCK must be set to 0 (unlock) before writing limits."""
+        fast_arm.packet_handler.write1ByteTxRx.reset_mock()
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+        unlock_calls = _lock_calls(fast_arm.packet_handler, 0)
+        assert len(unlock_calls) == 1
+
+    def test_eeprom_lock_after_write(self, fast_arm):
+        """ADDR_LOCK must be set to 1 (lock) after writing limits."""
+        fast_arm.packet_handler.write1ByteTxRx.reset_mock()
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+        lock_calls = _lock_calls(fast_arm.packet_handler, 1)
+        assert len(lock_calls) == 1
+
+    def test_eeprom_unlock_before_limit_writes(self, fast_arm):
+        """EEPROM unlock (ADDR_LOCK=0) must occur before min/max limit writes."""
+        fast_arm.packet_handler.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+
+        # Extract ordered sequence of (method_name, addr, value) from mock_calls.
+        # mock_calls on the packet_handler contains all child-attribute calls.
+        seq = []
+        for mc in fast_arm.packet_handler.mock_calls:
+            name = mc[0]  # e.g. 'write1ByteTxRx' or 'write2ByteTxRx'
+            args = mc[1]  # positional args tuple
+            if name == 'write1ByteTxRx' and len(args) >= 4:
+                seq.append(('w1', args[2], args[3]))
+            elif name == 'write2ByteTxRx' and len(args) >= 4:
+                seq.append(('w2', args[2], args[3]))
+
+        unlock_idx = next(i for i, c in enumerate(seq) if c == ('w1', ADDR_LOCK, 0))
+        min_idx = next(i for i, c in enumerate(seq) if c[0] == 'w2' and c[1] == ADDR_MIN_ANGLE_LIMIT)
+        max_idx = next(i for i, c in enumerate(seq) if c[0] == 'w2' and c[1] == ADDR_MAX_ANGLE_LIMIT)
+        lock_idx = next(i for i, c in enumerate(seq) if c == ('w1', ADDR_LOCK, 1))
+
+        # Ordering: unlock → min → max → lock
+        assert unlock_idx < min_idx
+        assert min_idx < max_idx
+        assert max_idx < lock_idx
+
+    def test_torque_disabled_before_eeprom_unlock(self, fast_arm):
+        """Torque disable (ADDR_TORQUE_ENABLE=0) must come before EEPROM unlock."""
+        fast_arm.packet_handler.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+
+        seq = []
+        for mc in fast_arm.packet_handler.mock_calls:
+            name = mc[0]
+            args = mc[1]
+            if name == 'write1ByteTxRx' and len(args) >= 4:
+                seq.append((args[2], args[3]))  # (addr, value)
+
+        torque_off_idx = next(i for i, c in enumerate(seq) if c == (ADDR_TORQUE_ENABLE, 0))
+        unlock_idx = next(i for i, c in enumerate(seq) if c == (ADDR_LOCK, 0))
+        assert torque_off_idx < unlock_idx
+
+    def test_torque_disabled_targets_correct_motor(self, fast_arm):
+        """Torque disable must target the given motor_id, not all motors."""
+        fast_arm.packet_handler.write1ByteTxRx.reset_mock()
+        fast_arm._enabled = False  # keep disabled to avoid re-enable
+        fast_arm.write_angle_limits(3, 500, 3500)
+        torque_off_calls = [c for c in fast_arm.packet_handler.write1ByteTxRx.call_args_list
+                            if c[0][2] == ADDR_TORQUE_ENABLE and c[0][3] == 0]
+        assert len(torque_off_calls) == 1
+        assert torque_off_calls[0][0][1] == 3
+
+    def test_min_max_written_to_correct_motor(self, fast_arm):
+        """Limit values are written to the specified motor_id."""
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(4, 500, 3500)
+        min_calls = _min_limit_calls(fast_arm.packet_handler)
+        max_calls = _max_limit_calls(fast_arm.packet_handler)
+        assert min_calls[0][0][1] == 4
+        assert max_calls[0][0][1] == 4
+
+    def test_min_max_values_written_correctly(self, fast_arm):
+        """The exact min_raw and max_raw values are written to EEPROM."""
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 800, 3200)
+        min_calls = _min_limit_calls(fast_arm.packet_handler)
+        max_calls = _max_limit_calls(fast_arm.packet_handler)
+        assert min_calls[0][0][3] == 800
+        assert max_calls[0][0][3] == 3200
+
+    # ── Value clamping ─────────────────────────────────────────────────────────
+
+    def test_min_raw_clamped_to_zero(self, fast_arm):
+        """min_raw below 0 is clamped to 0 (written as 0)."""
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        # Use -100 min and 500 max; clamped min=0, which is < max=500 → valid
+        fast_arm.write_angle_limits(1, -100, 500)
+        min_calls = _min_limit_calls(fast_arm.packet_handler)
+        assert min_calls[0][0][3] == 0
+
+    def test_max_raw_clamped_to_4095(self, fast_arm):
+        """max_raw above 4095 is clamped to 4095."""
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 9999)
+        max_calls = _max_limit_calls(fast_arm.packet_handler)
+        assert max_calls[0][0][3] == 4095
+
+    def test_both_clamped_simultaneously(self, fast_arm):
+        """Both min and max are independently clamped to [0, 4095]."""
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        # -500 → 0, 5000 → 4095
+        fast_arm.write_angle_limits(1, -500, 5000)
+        min_calls = _min_limit_calls(fast_arm.packet_handler)
+        max_calls = _max_limit_calls(fast_arm.packet_handler)
+        assert min_calls[0][0][3] == 0
+        assert max_calls[0][0][3] == 4095
+
+    # ── ValueError / error handling ───────────────────────────────────────────
+
+    def test_raises_value_error_when_min_equals_max(self, fast_arm):
+        """min_raw == max_raw (both non-zero) must raise ValueError."""
+        with pytest.raises(ValueError, match="must be less than max_raw"):
+            fast_arm.write_angle_limits(1, 2048, 2048)
+
+    def test_raises_value_error_when_min_greater_than_max(self, fast_arm):
+        """min_raw > max_raw must raise ValueError."""
+        with pytest.raises(ValueError, match="must be less than max_raw"):
+            fast_arm.write_angle_limits(1, 3000, 1000)
+
+    def test_zero_zero_does_not_raise(self, fast_arm):
+        """Both 0 is valid (continuous rotation mode) and must not raise."""
+        # Should not raise
+        fast_arm.write_angle_limits(1, 0, 0)
+
+    def test_ioerror_propagates_from_write_failure(self, fast_arm):
+        """IOError from _write1/_write2 propagates out of write_angle_limits."""
+        fast_arm.packet_handler.write1ByteTxRx.return_value = (1, 0)
+        fast_arm.packet_handler.getTxRxResult.return_value = "COMM_TX_FAIL"
+        with pytest.raises(IOError):
+            fast_arm.write_angle_limits(1, 500, 3500)
+
+    # ── Torque re-enable after write ──────────────────────────────────────────
+
+    def test_torque_reenabled_after_write_when_arm_was_enabled(self, fast_arm):
+        """If arm._enabled is True, torque is re-enabled after the EEPROM write."""
+        fast_arm._enabled = True
+        fast_arm.packet_handler.write1ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+        torque_on_calls = _torque_enable_calls(fast_arm.packet_handler, 1)
+        assert len(torque_on_calls) == 1
+        assert torque_on_calls[0][0][1] == 1  # motor_id
+
+    def test_torque_not_reenabled_when_arm_was_disabled(self, fast_arm):
+        """If arm._enabled is False, torque is NOT re-enabled after write."""
+        fast_arm._enabled = False
+        fast_arm.packet_handler.write1ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+        torque_on_calls = _torque_enable_calls(fast_arm.packet_handler, 1)
+        assert len(torque_on_calls) == 0
+
+    def test_safe_mode_writes_max_torque_before_reenabling(self, fast_arm):
+        """In safe mode with arm enabled, max_torque is written before re-enabling torque."""
+        fast_arm._enabled = True
+        fast_arm.safe_mode = True
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.packet_handler.write1ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(2, 500, 3500)
+
+        # max torque write must occur
+        mt_calls = _max_torque_calls(fast_arm.packet_handler, SAFE_MODE_MAX_TORQUE)
+        assert len(mt_calls) == 1
+        assert mt_calls[0][0][1] == 2  # correct motor
+
+        # max torque write must come BEFORE torque enable
+        all_w2_calls = fast_arm.packet_handler.write2ByteTxRx.call_args_list
+        all_w1_calls = fast_arm.packet_handler.write1ByteTxRx.call_args_list
+        # verify torque enable was written
+        torque_on = _torque_enable_calls(fast_arm.packet_handler, 1)
+        assert len(torque_on) == 1
+
+    def test_normal_mode_no_max_torque_write_on_reenable(self, fast_arm):
+        """In normal mode (not safe), max_torque register is NOT written on re-enable."""
+        fast_arm._enabled = True
+        fast_arm.safe_mode = False
+        fast_arm.packet_handler.write2ByteTxRx.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+        mt_calls = [c for c in fast_arm.packet_handler.write2ByteTxRx.call_args_list
+                    if c[0][2] == ADDR_MAX_TORQUE]
+        assert len(mt_calls) == 0
+
+    def test_eeprom_lock_before_torque_reenable(self, fast_arm):
+        """EEPROM lock (ADDR_LOCK=1) must happen before torque re-enable."""
+        fast_arm._enabled = True
+        fast_arm.packet_handler.reset_mock()
+        fast_arm.write_angle_limits(1, 500, 3500)
+
+        seq = []
+        for mc in fast_arm.packet_handler.mock_calls:
+            name = mc[0]
+            args = mc[1]
+            if name == 'write1ByteTxRx' and len(args) >= 4:
+                seq.append((args[2], args[3]))  # (addr, value)
+
+        lock_idx = next(i for i, c in enumerate(seq) if c == (ADDR_LOCK, 1))
+        torque_on_idx = next(i for i, c in enumerate(seq) if c == (ADDR_TORQUE_ENABLE, 1))
+        assert lock_idx < torque_on_idx
+
+
+class TestAngleLimitConversion:
+    """Tests for angle_limits_to_deg() and deg_to_angle_limits()."""
+
+    def test_angle_limits_to_deg_at_center_is_zero(self, arm):
+        """POS_CENTER for both min and max → 0.0° for both (no offset)."""
+        min_deg, max_deg = arm.angle_limits_to_deg(1, POS_CENTER, POS_CENTER)
+        assert min_deg == pytest.approx(0.0, abs=1e-6)
+        assert max_deg == pytest.approx(0.0, abs=1e-6)
+
+    def test_angle_limits_to_deg_typical_range(self, arm):
+        """Typical servo limits convert correctly to degree range."""
+        # 500 raw → roughly (500 - 2048) * DEG_PER_POS ≈ -136°
+        # 3500 raw → roughly (3500 - 2048) * DEG_PER_POS ≈ +127°
+        min_raw, max_raw = 500, 3500
+        min_deg, max_deg = arm.angle_limits_to_deg(1, min_raw, max_raw)
+        expected_min = LeRobotArm101._pos_to_deg(min_raw)
+        expected_max = LeRobotArm101._pos_to_deg(max_raw)
+        assert min_deg == pytest.approx(expected_min, abs=0.1)
+        assert max_deg == pytest.approx(expected_max, abs=0.1)
+
+    def test_angle_limits_to_deg_returns_tuple(self, arm):
+        """angle_limits_to_deg returns a 2-element tuple."""
+        result = arm.angle_limits_to_deg(1, 1000, 3000)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_deg_to_angle_limits_zero_deg_is_center(self, arm):
+        """0° for both min and max → POS_CENTER for both (no offset)."""
+        min_raw, max_raw = arm.deg_to_angle_limits(1, 0.0, 0.0)
+        assert min_raw == POS_CENTER
+        assert max_raw == POS_CENTER
+
+    def test_deg_to_angle_limits_typical_range(self, arm):
+        """Typical degree limits convert correctly to raw positions."""
+        min_deg, max_deg = -90.0, 90.0
+        min_raw, max_raw = arm.deg_to_angle_limits(1, min_deg, max_deg)
+        expected_min = LeRobotArm101._deg_to_pos(min_deg)
+        expected_max = LeRobotArm101._deg_to_pos(max_deg)
+        assert min_raw == expected_min
+        assert max_raw == expected_max
+
+    def test_deg_to_angle_limits_returns_tuple(self, arm):
+        """deg_to_angle_limits returns a 2-element tuple."""
+        result = arm.deg_to_angle_limits(1, -45.0, 45.0)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_roundtrip_raw_to_deg_to_raw(self, arm):
+        """raw → deg → raw should recover the original value (±1 quantisation)."""
+        for raw_pair in [(500, 3500), (1000, 3000), (2000, 2500)]:
+            min_raw, max_raw = raw_pair
+            min_deg, max_deg = arm.angle_limits_to_deg(1, min_raw, max_raw)
+            min_raw2, max_raw2 = arm.deg_to_angle_limits(1, min_deg, max_deg)
+            assert abs(min_raw2 - min_raw) <= 1, (
+                f"min roundtrip error: {min_raw} → {min_deg:.3f}° → {min_raw2}"
+            )
+            assert abs(max_raw2 - max_raw) <= 1, (
+                f"max roundtrip error: {max_raw} → {max_deg:.3f}° → {max_raw2}"
+            )
+
+    def test_roundtrip_deg_to_raw_to_deg(self, arm):
+        """deg → raw → deg should recover close to the original angle (±0.1°)."""
+        for deg_pair in [(-90.0, 90.0), (-45.0, 45.0), (-135.0, 135.0)]:
+            min_deg, max_deg = deg_pair
+            min_raw, max_raw = arm.deg_to_angle_limits(1, min_deg, max_deg)
+            min_deg2, max_deg2 = arm.angle_limits_to_deg(1, min_raw, max_raw)
+            assert abs(min_deg2 - min_deg) < 0.1, (
+                f"min deg roundtrip error: {min_deg}° → {min_raw} → {min_deg2:.4f}°"
+            )
+            assert abs(max_deg2 - max_deg) < 0.1, (
+                f"max deg roundtrip error: {max_deg}° → {max_raw} → {max_deg2:.4f}°"
+            )
