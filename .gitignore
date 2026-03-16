@@ -54,3 +54,6 @@ logs/
 *.o
 *.so
 *.dylib
+
+# Mesh backup directory (created during simplification, not needed in VCS)
+assets/so101/assets_original_backup/

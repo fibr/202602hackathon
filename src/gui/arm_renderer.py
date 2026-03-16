@@ -73,7 +73,9 @@ _MAT_STS3215 = (30, 30, 30)        # dark (rgba 0.1, 0.1, 0.1)
 _MAT_DEFAULT = (160, 160, 160)     # gray fallback
 
 # Target face count per mesh after decimation (for real-time rendering).
-# With ~17 mesh parts, this gives ~13k total faces at ~8ms per frame.
+# The STL files on disk are already pre-simplified to ~10% of original
+# (~500-14k faces each, 94k total).  This further decimates to 800 for
+# real-time rendering: with ~17 mesh parts, ~13k total faces at ~8ms/frame.
 _MESH_TARGET_FACES = 800
 
 
