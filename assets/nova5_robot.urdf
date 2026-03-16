@@ -137,11 +137,19 @@
           rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
       </material>
     </visual>
+    <!-- Compound collision: arm tube (cylinder) + joint housing (box) -->
     <collision>
-      <!-- Box approximating upper arm: spans ~400mm in -x (joint3 at x=-0.3998) -->
-      <origin xyz="-0.200 -0.007 0.050" rpy="0 0 0"/>
+      <!-- Cylinder approximating the long arm tube: ~330mm along -x -->
+      <origin xyz="-0.165 -0.007 0.050" rpy="0 0 0"/>
       <geometry>
-        <box size="0.420 0.080 0.120"/>
+        <cylinder radius="0.040" length="0.330"/>
+      </geometry>
+    </collision>
+    <collision>
+      <!-- Box approximating joint3 housing: bulky area near joint3 (x=-0.3998) -->
+      <origin xyz="-0.360 -0.007 0.050" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.100 0.090 0.120"/>
       </geometry>
     </collision>
   </link>
@@ -193,11 +201,19 @@
           rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
       </material>
     </visual>
+    <!-- Compound collision: arm tube (cylinder) + joint housing (box) -->
     <collision>
-      <!-- Box approximating forearm: spans ~330mm in -x, 135mm in +z (joint4 at x=-0.330, z=0.135) -->
-      <origin xyz="-0.165 -0.006 0.068" rpy="0 0 0"/>
+      <!-- Cylinder approximating the long arm tube: ~280mm along -x -->
+      <origin xyz="-0.140 -0.006 0.068" rpy="0 0 0"/>
       <geometry>
-        <box size="0.370 0.070 0.180"/>
+        <cylinder radius="0.035" length="0.280"/>
+      </geometry>
+    </collision>
+    <collision>
+      <!-- Box approximating joint4 housing: bulky area near joint4 (x=-0.330, z=0.135) -->
+      <origin xyz="-0.290 -0.006 0.068" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.100 0.080 0.120"/>
       </geometry>
     </collision>
   </link>
