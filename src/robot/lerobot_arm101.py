@@ -509,9 +509,18 @@ class LeRobotArm101:
 
     # --- Gripper ---
 
-    def gripper_open(self, speed: int = None):
-        """Open the gripper (motor 6)."""
-        self.write_position(self.motor_ids[5], GRIPPER_OPEN_POS,
+    def gripper_open(self, speed: int = None, fraction: float = 1.0):
+        """Open the gripper (motor 6).
+
+        Args:
+            speed: Servo speed (0-4095). None = use default.
+            fraction: How far to open, 0.0 = closed, 1.0 = fully open.
+                Values in between give a partial open (useful for small
+                objects where full open is unnecessary).
+        """
+        fraction = max(0.0, min(1.0, fraction))
+        target = int(GRIPPER_CLOSE_POS + fraction * (GRIPPER_OPEN_POS - GRIPPER_CLOSE_POS))
+        self.write_position(self.motor_ids[5], target,
                             speed or self.speed)
 
     def gripper_close(self, speed: int = None):

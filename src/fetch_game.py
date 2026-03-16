@@ -88,7 +88,7 @@ class FetchGameController:
 
     def __init__(self, app,
                  hover_height_mm: float = 40.0,
-                 grasp_height_mm: float = 8.0,
+                 grasp_height_mm: float = 18.0,
                  lift_height_mm: float = 80.0,
                  place_pos_mm: np.ndarray = None,
                  cube_selection_mode: str = 'largest'):
@@ -110,7 +110,9 @@ class FetchGameController:
         self._solver = None
         self._worker_thread = None
         self._abort = False
-        self._speed = 150
+        # Use safe-mode speed for all fetch game motions (arm101 safe_mode
+        # speed=80).  This keeps torque low and movement gentle.
+        self._speed = 80
         self._track_yaw_thread = None
         self._track_yaw_stop = False
 
@@ -122,7 +124,7 @@ class FetchGameController:
         self.on_state_changed: Optional[Callable] = None
 
     def ensure_ready(self):
-        """Lazy-init calibration transform and IK solver."""
+        """Lazy-init calibration transform, IK solver, and safe mode."""
         if self._transform is None:
             from config_loader import config_path
             import os
@@ -138,6 +140,14 @@ class FetchGameController:
                 self._solver = Arm101IKSolver()
             except Exception as e:
                 log.warning(f"Failed to init IK solver: {e}")
+
+        # Ensure safe mode is active (reduced torque + speed) for all
+        # fetch game motions.  This is a no-op if already in safe mode.
+        robot = self.app.robot
+        if robot and hasattr(robot, 'set_safe_mode'):
+            if not getattr(robot, 'safe_mode', False):
+                robot.set_safe_mode(True)
+                log.info("Fetch game: enabled safe mode (reduced torque/speed)")
 
     def set_click_target(self, x: int, y: int):
         """Set click position for 'closest_to_click' selection mode."""
@@ -530,7 +540,7 @@ class FetchGameController:
                 if plan.valid and abs(plan.delta_deg) >= deadband_deg:
                     cmd = list(angles)
                     cmd[4] = plan.selected_j5_deg
-                    robot.move_joints(cmd, speed=100)
+                    robot.move_joints(cmd, speed=self._speed)
                     time.sleep(0.3)
                 else:
                     time.sleep(0.1)
@@ -739,7 +749,7 @@ class FetchGameController:
                 solution = self._solver.solve_ik_position(new_pos, seed_motor_deg=seed)
                 if solution is not None:
                     cmd = list(solution) + [angles[5]]
-                    robot.move_joints(cmd, speed=100)
+                    robot.move_joints(cmd, speed=self._speed)
                     time.sleep(0.4)
 
                     # Update refined position
@@ -923,7 +933,7 @@ class FetchGameController:
             solution = self._solver.solve_ik_position(new_pos, seed_motor_deg=seed)
             if solution is not None:
                 cmd = list(solution) + [angles[5]]
-                robot.move_joints(cmd, speed=80)  # Slightly slower for precision
+                robot.move_joints(cmd, speed=self._speed)
                 time.sleep(0.3)
 
                 with self._lock:
@@ -936,17 +946,21 @@ class FetchGameController:
         log.info(f"[RECENTER] Re-centering pass complete")
 
     def _do_open_gripper(self):
-        """Open the gripper before descending."""
+        """Open the gripper partially before descending.
+
+        Uses fraction=0.5 (half open) — enough for a small cube without
+        swinging the gripper fingers excessively wide.
+        """
         if self._abort:
             return
         robot = self.app.robot
         if robot is None:
             return
         if hasattr(robot, 'gripper_open'):
-            robot.gripper_open()
+            robot.gripper_open(fraction=0.5)
             time.sleep(0.5)
         with self._lock:
-            self.state.status_text = 'Gripper opened'
+            self.state.status_text = 'Gripper half-opened'
 
     def _do_descend(self):
         """Lower the arm to grasp height.
