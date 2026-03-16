@@ -4909,6 +4909,11 @@ class ServoLimitsView(BaseViewWidget):
     Reads the current min/max position limits from each servo, displays them
     in degrees, and allows reconfiguration.  Changes are written to servo
     EEPROM so they persist across power cycles.
+
+    Also provides:
+    - Live angle readout (polled at 5 Hz)
+    - "Teach Range" mode: disable torque on a servo, move it by hand, and
+      the observed min/max angles are recorded as the new limits.
     """
 
     view_id = 'servo_limits'
@@ -4921,6 +4926,8 @@ class ServoLimitsView(BaseViewWidget):
         'J4 Wrist Flex', 'J5 Wrist Roll', 'J6 Gripper',
     ]
 
+    _POLL_INTERVAL_MS = 200  # 5 Hz live angle polling
+
     def __init__(self, app, parent=None):
         super().__init__(app, parent)
         self._spin_min = []
@@ -4928,6 +4935,13 @@ class ServoLimitsView(BaseViewWidget):
         self._lbl_raw_min = []
         self._lbl_raw_max = []
         self._lbl_status = []
+        self._lbl_live = []          # live angle labels
+        self._lbl_teach_range = []   # teach-range observed range labels
+        self._btn_teach = []         # teach start/stop buttons
+        self._teaching = [False] * 6  # which servos are in teach mode
+        self._teach_min = [None] * 6  # observed min during teach (degrees)
+        self._teach_max = [None] * 6  # observed max during teach (degrees)
+        self._poll_timer = None
         self._build_ui()
 
     # ---- UI construction ----
@@ -4985,8 +4999,9 @@ class ServoLimitsView(BaseViewWidget):
         grid.setSpacing(4)
 
         # Header row
-        headers = ['Joint', 'Min (deg)', 'Max (deg)', 'Raw Min', 'Raw Max',
-                    'Range (deg)', 'Status', '']
+        headers = ['Joint', 'Live Angle', 'Min (deg)', 'Max (deg)',
+                    'Raw Min', 'Raw Max', 'Range (deg)', 'Status', '',
+                    'Teach Range', 'Observed']
         for col, h in enumerate(headers):
             lbl = QLabel(h)
             lbl.setStyleSheet('color: #aaa; font-weight: bold; font-size: 11px;')
@@ -4995,12 +5010,22 @@ class ServoLimitsView(BaseViewWidget):
         for i, name in enumerate(self._JOINT_NAMES):
             row = i + 1
 
-            # Joint name
+            # Col 0: Joint name
             jlbl = QLabel(name)
             jlbl.setStyleSheet('color: #ddd; font-family: monospace;')
             grid.addWidget(jlbl, row, 0)
 
-            # Min spin (-180 to +180)
+            # Col 1: Live angle readout
+            lbl_live = QLabel('--')
+            lbl_live.setStyleSheet(
+                'color: #4fc3f7; font-family: monospace; font-size: 12px; '
+                'font-weight: bold; min-width: 60px;'
+            )
+            lbl_live.setToolTip('Current servo angle (live)')
+            grid.addWidget(lbl_live, row, 1)
+            self._lbl_live.append(lbl_live)
+
+            # Col 2: Min spin (-180 to +180)
             spin_min = QDoubleSpinBox()
             spin_min.setRange(-180.0, 180.0)
             spin_min.setDecimals(1)
@@ -5010,10 +5035,10 @@ class ServoLimitsView(BaseViewWidget):
                 'QDoubleSpinBox { background: #2a2a2a; color: #ddd; '
                 'border: 1px solid #555; padding: 2px; }'
             )
-            grid.addWidget(spin_min, row, 1)
+            grid.addWidget(spin_min, row, 2)
             self._spin_min.append(spin_min)
 
-            # Max spin
+            # Col 3: Max spin
             spin_max = QDoubleSpinBox()
             spin_max.setRange(-180.0, 180.0)
             spin_max.setDecimals(1)
@@ -5023,37 +5048,56 @@ class ServoLimitsView(BaseViewWidget):
                 'QDoubleSpinBox { background: #2a2a2a; color: #ddd; '
                 'border: 1px solid #555; padding: 2px; }'
             )
-            grid.addWidget(spin_max, row, 2)
+            grid.addWidget(spin_max, row, 3)
             self._spin_max.append(spin_max)
 
-            # Raw min label
+            # Col 4: Raw min label
             lbl_rmin = QLabel('--')
             lbl_rmin.setStyleSheet('color: #888; font-family: monospace; font-size: 10px;')
-            grid.addWidget(lbl_rmin, row, 3)
+            grid.addWidget(lbl_rmin, row, 4)
             self._lbl_raw_min.append(lbl_rmin)
 
-            # Raw max label
+            # Col 5: Raw max label
             lbl_rmax = QLabel('--')
             lbl_rmax.setStyleSheet('color: #888; font-family: monospace; font-size: 10px;')
-            grid.addWidget(lbl_rmax, row, 4)
+            grid.addWidget(lbl_rmax, row, 5)
             self._lbl_raw_max.append(lbl_rmax)
 
-            # Range label
+            # Col 6: Range label
             lbl_range = QLabel('--')
             lbl_range.setStyleSheet('color: #8f8; font-family: monospace; font-size: 10px;')
-            grid.addWidget(lbl_range, row, 5)
+            grid.addWidget(lbl_range, row, 6)
 
-            # Status label
+            # Col 7: Status label
             lbl_st = QLabel('')
             lbl_st.setStyleSheet('color: #aaa; font-size: 10px;')
-            grid.addWidget(lbl_st, row, 6)
+            grid.addWidget(lbl_st, row, 7)
             self._lbl_status.append(lbl_st)
 
-            # Per-joint write button
+            # Col 8: Per-joint write button
             btn_w = make_button('Write', lambda checked, idx=i: self._write_one(idx),
                                 tooltip=f'Write limits for {name}', color='#6a4400',
                                 min_w=60, min_h=26)
-            grid.addWidget(btn_w, row, 7)
+            grid.addWidget(btn_w, row, 8)
+
+            # Col 9: Teach start/stop button
+            btn_teach = make_button(
+                'Teach', lambda checked, idx=i: self._toggle_teach(idx),
+                tooltip=f'Start/stop teach-range mode for {name}',
+                color='#2e7d32', min_w=70, min_h=26,
+            )
+            grid.addWidget(btn_teach, row, 9)
+            self._btn_teach.append(btn_teach)
+
+            # Col 10: Observed range during teach
+            lbl_obs = QLabel('--')
+            lbl_obs.setStyleSheet(
+                'color: #aaa; font-family: monospace; font-size: 10px; '
+                'min-width: 100px;'
+            )
+            lbl_obs.setToolTip('Observed min..max while teaching')
+            grid.addWidget(lbl_obs, row, 10)
+            self._lbl_teach_range.append(lbl_obs)
 
             # Connect spinbox changes to update the range label
             def _update_range(val, r_lbl=lbl_range, smin=spin_min, smax=spin_max):
@@ -5068,6 +5112,20 @@ class ServoLimitsView(BaseViewWidget):
 
         scroll.setWidget(scroll_w)
         root.addWidget(scroll, stretch=1)
+
+        # ---- Teach-range instructions ----
+        teach_info = QLabel(
+            'Teach Range: Click "Teach" on a joint to disable its torque and '
+            'start recording.  Move the joint by hand to the desired min and '
+            'max positions.  Click "Stop" to finish \u2014 observed min/max are '
+            'copied into the limit spinboxes.  Click "Write" to commit to EEPROM.'
+        )
+        teach_info.setWordWrap(True)
+        teach_info.setStyleSheet(
+            'color: #8bc34a; font-size: 11px; padding: 4px; '
+            'background: #1a2e1a; border-radius: 3px; margin-top: 4px;'
+        )
+        root.addWidget(teach_info)
 
         # ---- Info footer ----
         self._info_label = QLabel('Press "Read All Limits" to query the servos.')
@@ -5093,6 +5151,156 @@ class ServoLimitsView(BaseViewWidget):
             )
             return None
         return robot
+
+    # ---- Live angle polling ----
+
+    def _start_polling(self):
+        """Start the live-angle polling timer."""
+        if self._poll_timer is None:
+            self._poll_timer = QTimer()
+            self._poll_timer.timeout.connect(self._poll_angles)
+        self._poll_timer.start(self._POLL_INTERVAL_MS)
+
+    def _stop_polling(self):
+        """Stop the live-angle polling timer."""
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+
+    def _poll_angles(self):
+        """Read current angles from all servos and update the live labels."""
+        arm = self._get_arm()
+        if arm is None:
+            return
+        try:
+            angles = arm.read_all_angles()
+        except Exception:
+            return  # silently skip on transient errors
+
+        for i, deg in enumerate(angles):
+            if deg is None or deg == -999.0:
+                self._lbl_live[i].setText('ERR')
+                self._lbl_live[i].setStyleSheet(
+                    'color: #f44; font-family: monospace; font-size: 12px; '
+                    'font-weight: bold; min-width: 60px;'
+                )
+                continue
+
+            self._lbl_live[i].setText(f'{deg:+.1f}\u00b0')
+
+            # Highlight color based on whether angle is near the limit edges
+            mn = self._spin_min[i].value()
+            mx = self._spin_max[i].value()
+            if mn < mx and (deg <= mn + 5 or deg >= mx - 5):
+                color = '#ff9800'  # orange = near limit
+            else:
+                color = '#4fc3f7'  # blue = normal
+            self._lbl_live[i].setStyleSheet(
+                f'color: {color}; font-family: monospace; font-size: 12px; '
+                f'font-weight: bold; min-width: 60px;'
+            )
+
+            # If this servo is in teach mode, update observed min/max
+            if self._teaching[i]:
+                if self._teach_min[i] is None or deg < self._teach_min[i]:
+                    self._teach_min[i] = deg
+                if self._teach_max[i] is None or deg > self._teach_max[i]:
+                    self._teach_max[i] = deg
+                self._lbl_teach_range[i].setText(
+                    f'{self._teach_min[i]:+.1f}..{self._teach_max[i]:+.1f}\u00b0'
+                )
+                self._lbl_teach_range[i].setStyleSheet(
+                    'color: #8bc34a; font-family: monospace; font-size: 10px; '
+                    'font-weight: bold; min-width: 100px;'
+                )
+
+    # ---- Teach-range mode ----
+
+    def _toggle_teach(self, idx: int):
+        """Start or stop teach-range mode for a single servo."""
+        if self._teaching[idx]:
+            self._stop_teach(idx)
+        else:
+            self._start_teach(idx)
+
+    def _start_teach(self, idx: int):
+        """Disable torque on servo *idx* and begin recording min/max."""
+        arm = self._get_arm()
+        if arm is None:
+            return
+
+        mid = arm.motor_ids[idx]
+        try:
+            # Disable torque so user can move the joint by hand
+            arm.disable_torque([mid])
+        except Exception as e:
+            self._info_label.setText(
+                f'Could not disable torque on {self._JOINT_NAMES[idx]}: {e}')
+            return
+
+        self._teaching[idx] = True
+        self._teach_min[idx] = None
+        self._teach_max[idx] = None
+        self._lbl_teach_range[idx].setText('recording...')
+        self._lbl_teach_range[idx].setStyleSheet(
+            'color: #ff9800; font-family: monospace; font-size: 10px; '
+            'font-weight: bold; min-width: 100px;'
+        )
+        self._btn_teach[idx].setText('Stop')
+        self._btn_teach[idx].setStyleSheet(
+            'QPushButton { background-color: #c62828; color: white; '
+            'border: 1px solid #555; border-radius: 3px; padding: 2px 8px; }'
+            'QPushButton:hover { background-color: #e53935; }'
+        )
+        self._info_label.setText(
+            f'Teaching {self._JOINT_NAMES[idx]}: torque OFF. '
+            f'Move the joint by hand, then click Stop.')
+
+    def _stop_teach(self, idx: int):
+        """Stop teaching, re-enable torque, and copy observed range to spinboxes."""
+        arm = self._get_arm()
+        self._teaching[idx] = False
+
+        # Re-enable torque
+        if arm is not None:
+            mid = arm.motor_ids[idx]
+            try:
+                arm.enable_torque([mid])
+            except Exception:
+                pass  # best-effort
+
+        self._btn_teach[idx].setText('Teach')
+        self._btn_teach[idx].setStyleSheet(
+            'QPushButton { background-color: #2e7d32; color: white; '
+            'border: 1px solid #555; border-radius: 3px; padding: 2px 8px; }'
+            'QPushButton:hover { background-color: #43a047; }'
+        )
+
+        # Copy observed range into the limit spinboxes
+        if self._teach_min[idx] is not None and self._teach_max[idx] is not None:
+            # Add a small margin (2 deg) so the extremes aren't right at the edge
+            margin = 2.0
+            obs_min = self._teach_min[idx] - margin
+            obs_max = self._teach_max[idx] + margin
+            self._spin_min[idx].setValue(round(obs_min, 1))
+            self._spin_max[idx].setValue(round(obs_max, 1))
+            self._lbl_teach_range[idx].setText(
+                f'{self._teach_min[idx]:+.1f}..{self._teach_max[idx]:+.1f}\u00b0'
+            )
+            self._lbl_teach_range[idx].setStyleSheet(
+                'color: #8bc34a; font-family: monospace; font-size: 10px; '
+                'font-weight: bold; min-width: 100px;'
+            )
+            self._info_label.setText(
+                f'{self._JOINT_NAMES[idx]}: observed '
+                f'{self._teach_min[idx]:+.1f}..{self._teach_max[idx]:+.1f}\u00b0 '
+                f'(+/-{margin}\u00b0 margin applied). '
+                f'Click Write to commit to EEPROM.')
+        else:
+            self._lbl_teach_range[idx].setText('no data')
+            self._lbl_teach_range[idx].setStyleSheet(
+                'color: #888; font-family: monospace; font-size: 10px; min-width: 100px;')
+            self._info_label.setText(
+                f'{self._JOINT_NAMES[idx]}: no motion recorded during teach.')
 
     # ---- Actions ----
 
@@ -5275,10 +5483,19 @@ class ServoLimitsView(BaseViewWidget):
             self._info_label.setText('All limits removed (0/0). Full range enabled.')
 
     def on_activate(self):
-        """Auto-read limits when view is shown."""
+        """Auto-read limits and start live polling when view is shown."""
         arm = self._get_arm()
         if arm is not None:
             self._read_all()
+        self._start_polling()
+
+    def on_deactivate(self):
+        """Stop polling and any active teach sessions when leaving the view."""
+        self._stop_polling()
+        # Stop any active teach sessions (re-enable torque)
+        for i in range(len(self._JOINT_NAMES)):
+            if self._teaching[i]:
+                self._stop_teach(i)
 
 
 class UnifiedPyQtApp(QMainWindow):
