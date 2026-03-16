@@ -424,10 +424,6 @@ class FetchGameController:
         mount_angle_deg = refine_cfg.get('mount_angle_deg', 0.0)
         mount_angle_rad = math.radians(mount_angle_deg)
 
-        # Compute scale from current height
-        z_mm = self.hover_height_mm
-        scale_mm_per_px = z_mm * math.tan(math.radians(hfov_deg / 2.0)) / (cam_w / 2.0)
-
         robot = self.app.robot
         if robot is None:
             with self._lock:
@@ -507,6 +503,19 @@ class FetchGameController:
                     with self._lock:
                         self.state.status_text = f'Refined! err={error_px:.1f}px'
                     break
+
+                # Get actual arm height via FK for more accurate scale computation
+                angles = robot.get_angles()
+                if not angles or len(angles) < 5:
+                    log.warning("[REFINE] Could not get robot angles for scale computation")
+                    continue
+
+                seed = np.array(angles[:5])
+                current_pos, _ = self._solver.forward_kin(seed)
+                z_mm = current_pos[2]  # Use actual arm Z instead of hover_height_mm
+                scale_mm_per_px = z_mm * math.tan(math.radians(hfov_deg / 2.0)) / (cam_w / 2.0)
+                log.debug(f"[REFINE] iter {iteration+1}: Recomputed scale_mm_per_px={scale_mm_per_px:.4f} "
+                         f"using actual Z={z_mm:.1f}mm (was configured hover_height={self.hover_height_mm:.1f}mm)")
 
                 # Compute correction in robot frame (rotate by mount angle)
                 ex_mm = ex * scale_mm_per_px
