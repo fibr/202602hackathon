@@ -387,6 +387,8 @@ class FetchGameController:
 
     def _do_approach(self):
         """Move arm above the target cube."""
+        if self._abort:
+            return
         with self._lock:
             target = self.state.target_cube_3d
         if target is None:
@@ -569,6 +571,8 @@ class FetchGameController:
         We rotate J5 by the detected yaw so the gripper fingers align with
         the nearest cube edge.
         """
+        if self._abort:
+            return
         import math
 
         robot = self.app.robot
@@ -612,6 +616,8 @@ class FetchGameController:
 
     def _do_open_gripper(self):
         """Open the gripper before descending."""
+        if self._abort:
+            return
         robot = self.app.robot
         if robot is None:
             return
@@ -623,6 +629,8 @@ class FetchGameController:
 
     def _do_descend(self):
         """Lower the arm to grasp height."""
+        if self._abort:
+            return
         # Snapshot positions under the lock to avoid races with camera/GUI.
         with self._lock:
             pos = self.state.refined_pos_3d
@@ -639,6 +647,8 @@ class FetchGameController:
 
     def _do_grasp(self):
         """Close the gripper to grasp the cube."""
+        if self._abort:
+            return
         robot = self.app.robot
         if robot is None:
             return
@@ -650,6 +660,8 @@ class FetchGameController:
 
     def _do_lift(self):
         """Lift the cube to a safe height."""
+        if self._abort:
+            return
         with self._lock:
             pos = self.state.refined_pos_3d
             if pos is None:
@@ -665,6 +677,8 @@ class FetchGameController:
 
     def _do_transport(self):
         """Move to the place target position (at lift height first, then above place)."""
+        if self._abort:
+            return
         place = self.place_pos_mm.copy()
         # First move at lift height to avoid collisions
         transit_pos = place.copy()
@@ -675,6 +689,8 @@ class FetchGameController:
 
     def _do_place(self):
         """Lower to place height and open gripper."""
+        if self._abort:
+            return
         robot = self.app.robot
         place = self.place_pos_mm.copy()
         self._move_to_position(place, 'place')
@@ -688,6 +704,8 @@ class FetchGameController:
 
     def _do_retract(self):
         """Move back to a safe position above the place location."""
+        if self._abort:
+            return
         retract_pos = self.place_pos_mm.copy()
         retract_pos[2] = self.lift_height_mm
         self._move_to_position(retract_pos, 'retract')
