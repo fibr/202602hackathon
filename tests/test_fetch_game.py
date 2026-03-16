@@ -50,7 +50,7 @@ def _make_mock_robot(angles=None, pose=None):
     robot = mock.MagicMock()
     robot.get_angles.return_value = list(angles or [0.0, -30.0, 80.0, 0.0, -50.0, 30.0])
     robot.get_pose.return_value = list(pose or [200.0, 0.0, 100.0, 180.0, 0.0, 0.0])
-    robot.move_joints.return_value = None
+    robot.move_joints.return_value = True
     robot.gripper_open.return_value = None
     robot.gripper_close.return_value = None
     return robot
@@ -761,6 +761,15 @@ class TestMoveToPosition:
 
         with pytest.raises(RuntimeError, match="IK failed"):
             ctrl._move_to_position(np.array([200.0, 0.0, 80.0]))
+
+    def test_move_joints_failure_raises(self):
+        robot = _make_mock_robot()
+        robot.move_joints.return_value = False  # e.g. Z-safety rejection
+        solver = _make_mock_solver()
+        ctrl = _make_controller(robot=robot, solver=solver)
+
+        with pytest.raises(RuntimeError, match="move_joints failed"):
+            ctrl._move_to_position(np.array([200.0, 0.0, 5.0]), 'low_z')
 
     def test_bad_angles_raises(self):
         robot = _make_mock_robot()

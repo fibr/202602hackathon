@@ -28,6 +28,10 @@ import numpy as np
 import yaml
 from typing import Optional
 
+from logger import get_logger
+
+log = get_logger('arm101')
+
 # Try importing scservo_sdk; provide helpful error if missing
 try:
     from scservo_sdk import PortHandler, PacketHandler, COMM_SUCCESS
@@ -583,7 +587,8 @@ class LeRobotArm101:
         try:
             self.write_all_angles(angles, speed)
             return True
-        except Exception:
+        except Exception as e:
+            log.warning(f"move_joints failed: {e}")
             return False
 
     # --- Low-level helpers ---

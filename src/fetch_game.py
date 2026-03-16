@@ -569,7 +569,13 @@ class FetchGameController:
             raise RuntimeError(f"IK failed for {label}: {pos_mm}")
 
         cmd = list(solution) + [angles[5]]
-        robot.move_joints(cmd, speed=self._speed)
+        ok = robot.move_joints(cmd, speed=self._speed)
+        if not ok:
+            raise RuntimeError(
+                f"move_joints failed for {label} at "
+                f"({pos_mm[0]:.1f}, {pos_mm[1]:.1f}, {pos_mm[2]:.1f})mm — "
+                f"check Z-safety limits or servo errors"
+            )
         time.sleep(0.5)  # Wait for motion to complete
         log.info(f"Moved to {label}: ({pos_mm[0]:.1f}, {pos_mm[1]:.1f}, {pos_mm[2]:.1f})")
 
@@ -943,7 +949,12 @@ class FetchGameController:
             self.state.status_text = 'Gripper opened'
 
     def _do_descend(self):
-        """Lower the arm to grasp height."""
+        """Lower the arm to grasp height.
+
+        Temporarily lowers the Z-safety limit to allow reaching the grasp
+        height (which is typically below the default 30mm safety floor).
+        The safety limit is restored after the move completes.
+        """
         if self._abort:
             return
         # Snapshot positions under the lock to avoid races with camera/GUI.
@@ -956,7 +967,26 @@ class FetchGameController:
 
         grasp_pos = pos.copy()
         grasp_pos[2] = self.grasp_height_mm
-        self._move_to_position(grasp_pos, 'descend')
+
+        # Temporarily lower Z-safety to allow reaching grasp height.
+        # The default min_safe_z (30mm) blocks grasp_height_mm (typically 8mm).
+        robot = self.app.robot
+        lowered_z_safety = False
+        if robot and hasattr(robot, 'set_z_safety'):
+            margin = 5.0  # mm below grasp height
+            min_z = max(0.0, self.grasp_height_mm - margin)
+            robot.set_z_safety(enabled=True, min_z_mm=min_z)
+            lowered_z_safety = True
+            log.info(f"Descend: Z-safety lowered to {min_z:.0f}mm for grasp")
+
+        try:
+            self._move_to_position(grasp_pos, 'descend')
+        finally:
+            # Restore default Z-safety
+            if lowered_z_safety and robot and hasattr(robot, 'set_z_safety'):
+                robot.set_z_safety(enabled=True, min_z_mm=30.0)
+                log.info("Descend: Z-safety restored to 30mm")
+
         with self._lock:
             self.state.status_text = f'At grasp height z={self.grasp_height_mm:.0f}mm'
 
@@ -1003,13 +1033,32 @@ class FetchGameController:
             self.state.status_text = f'Above place target at z={self.lift_height_mm:.0f}mm'
 
     def _do_place(self):
-        """Lower to place height and open gripper."""
+        """Lower to place height and open gripper.
+
+        Temporarily lowers Z-safety if the place target is below the
+        default safety floor.
+        """
         if self._abort:
             return
         robot = self.app.robot
         place = self.place_pos_mm.copy()
-        self._move_to_position(place, 'place')
-        time.sleep(0.3)
+
+        # Temporarily lower Z-safety if place position is below default limit
+        lowered_z_safety = False
+        if robot and hasattr(robot, 'set_z_safety') and place[2] < 30.0:
+            margin = 5.0
+            min_z = max(0.0, place[2] - margin)
+            robot.set_z_safety(enabled=True, min_z_mm=min_z)
+            lowered_z_safety = True
+            log.info(f"Place: Z-safety lowered to {min_z:.0f}mm")
+
+        try:
+            self._move_to_position(place, 'place')
+            time.sleep(0.3)
+        finally:
+            if lowered_z_safety and robot and hasattr(robot, 'set_z_safety'):
+                robot.set_z_safety(enabled=True, min_z_mm=30.0)
+                log.info("Place: Z-safety restored to 30mm")
 
         if robot and hasattr(robot, 'gripper_open'):
             robot.gripper_open()
