@@ -95,11 +95,26 @@ def detect_green_cubes(
         cx = int(M['m10'] / M['m00'])
         cy = int(M['m01'] / M['m00'])
 
-        # Yaw from minimum-area rotated rectangle
+        # Yaw from minimum-area rotated rectangle.
+        # OpenCV minAreaRect returns angle in [-90, 0) for the rotation of
+        # the rect's width-edge relative to the horizontal.  For a square
+        # (or near-square) cube, orientation repeats every 90°, so we
+        # normalize to [-45, +45) — the smallest rotation needed to align
+        # the gripper with a cube edge.
         yaw_deg = 0.0
         if len(contour) >= 5:
             rect = cv2.minAreaRect(contour)
-            yaw_deg = rect[2]  # angle in [-90, 0)
+            rw, rh = rect[1]
+            raw_angle = rect[2]  # in [-90, 0)
+            # OpenCV convention: angle is between the width-edge and
+            # horizontal.  If width < height, the rect is "tall" and the
+            # angle refers to the short side — add 90° to get the long-
+            # side angle.  For cubes (rw ≈ rh) this doesn't matter much,
+            # but handle it correctly for robustness.
+            if rw < rh:
+                raw_angle += 90.0
+            # Normalize to [-45, +45) for square symmetry
+            yaw_deg = ((raw_angle + 45.0) % 90.0) - 45.0
 
         # Solidity (how square-like the contour is)
         hull = cv2.convexHull(contour)
@@ -204,9 +219,21 @@ def annotate_frame(
             cv2.drawMarker(vis, (det.cx, det.cy), (0, 255, 255),
                            cv2.MARKER_CROSS, 20, 2)
 
+        # Draw orientation line (yaw) through the centroid
+        if abs(det.yaw_deg) > 0.01 or is_target:
+            import math
+            yaw_rad = math.radians(det.yaw_deg)
+            line_len = max(w, h) // 2
+            dx = int(line_len * math.cos(yaw_rad))
+            dy = int(line_len * math.sin(yaw_rad))
+            cv2.line(vis, (det.cx - dx, det.cy - dy),
+                     (det.cx + dx, det.cy + dy),
+                     (0, 165, 255), 2)  # orange line for yaw
+
         # Label
         tag = " [TARGET]" if is_target else ""
-        label = f"{label_prefix} {i+1} A={det.area:.0f}{tag}"
+        yaw_str = f" y={det.yaw_deg:.0f}°" if abs(det.yaw_deg) > 0.5 else ""
+        label = f"{label_prefix} {i+1} A={det.area:.0f}{yaw_str}{tag}"
         cv2.putText(vis, label, (x, y - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 

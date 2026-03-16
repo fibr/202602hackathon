@@ -496,6 +496,62 @@ class FetchGameController:
         finally:
             cap.release()
 
+        # --- Align gripper yaw (J5 = wrist_roll) with detected cube orientation ---
+        self._align_gripper_yaw()
+
+    def _align_gripper_yaw(self):
+        """Rotate wrist_roll (J5) to align gripper fingers with cube edges.
+
+        Uses the estimated_yaw_deg captured during gripper-camera refinement.
+        For the SO-ARM101, J5 (wrist_roll) rotates around the approach axis
+        (roughly vertical during top-down grasp), so adjusting it doesn't
+        change X/Y/Z position — it just reorients the gripper.
+
+        The cube yaw is in image coordinates relative to the gripper camera.
+        We rotate J5 by the detected yaw so the gripper fingers align with
+        the nearest cube edge.
+        """
+        import math
+
+        robot = self.app.robot
+        if robot is None or self._solver is None:
+            return
+
+        yaw = self.state.estimated_yaw_deg
+        if abs(yaw) < 2.0:
+            log.info(f"Cube yaw {yaw:.1f}° is near-zero, skipping alignment")
+            return
+
+        config = self.app.config or {}
+        refine_cfg = config.get('visual_servoing', {})
+        mount_angle_deg = refine_cfg.get('mount_angle_deg', 0.0)
+
+        # The detected yaw is in camera image coordinates.
+        # Adjust for camera mount rotation relative to gripper.
+        # Then negate: if the cube is rotated +20° in the image, we need
+        # to rotate the gripper by +20° (same direction) to align.
+        gripper_yaw_correction = yaw + mount_angle_deg
+
+        angles = robot.get_angles()
+        if not angles or len(angles) < 6:
+            return
+
+        # J5 is wrist_roll (index 4 in 0-based motor angles)
+        current_j5 = angles[4]
+        new_j5 = current_j5 + gripper_yaw_correction
+
+        # Clamp to safe range (typical wrist_roll range is about ±150°)
+        new_j5 = max(-150.0, min(150.0, new_j5))
+
+        log.info(f"Aligning gripper: cube_yaw={yaw:.1f}° mount={mount_angle_deg:.1f}° "
+                 f"J5: {current_j5:.1f}° -> {new_j5:.1f}°")
+
+        cmd = list(angles)
+        cmd[4] = new_j5
+        robot.move_joints(cmd, speed=100)
+        time.sleep(0.5)
+        self.state.status_text = f'Gripper aligned: yaw correction {gripper_yaw_correction:.1f}°'
+
     def _do_open_gripper(self):
         """Open the gripper before descending."""
         robot = self.app.robot
