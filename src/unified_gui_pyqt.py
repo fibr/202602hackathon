@@ -5082,7 +5082,8 @@ class ServoLimitsView(BaseViewWidget):
 
     def _get_arm(self):
         """Return the LeRobotArm101 driver or None."""
-        robot = getattr(self.app, '_robot', None)
+        self.app.ensure_robot()
+        robot = self.app.robot
         if robot is None:
             self._info_label.setText('No robot connected. Start with --safe or connect first.')
             return None
