@@ -29,10 +29,12 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
+    <!-- Collision bounding box for entire base_link (motor holder, base plate, servo, mounting plate) -->
+    <!-- x: ~-0.045 to +0.065, y: ~±0.042, z: ~-0.004 to +0.090 -->
     <collision>
-      <origin xyz="-0.00636471 -9.94414e-05 -0.0024" rpy="1.5708 -1.67685e-15 1.5708"/>
+      <origin xyz="0.010 0 0.038" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/base_motor_holder_so101_v1.stl"/>
+        <box size="0.115 0.090 0.098"/>
       </geometry>
     </collision>
     <!-- Part base_so101_v2 -->
@@ -43,12 +45,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="-0.00636471 -8.97657e-09 -0.0024" rpy="1.5708 -2.78073e-29 1.5708"/>
-      <geometry>
-        <mesh filename="assets/base_so101_v2.stl"/>
-      </geometry>
-    </collision>
     <!-- Part sts3215_03a_v1 -->
     <visual>
       <origin xyz="0.0263353 -8.97657e-09 0.0437" rpy="-8.21148e-16 7.84513e-18 1.249e-15"/>
@@ -57,12 +53,6 @@
       </geometry>
       <material name="sts3215"/>
     </visual>
-    <collision>
-      <origin xyz="0.0263353 -8.97657e-09 0.0437" rpy="-8.21148e-16 7.84513e-18 1.249e-15"/>
-      <geometry>
-        <mesh filename="assets/sts3215_03a_v1.stl"/>
-      </geometry>
-    </collision>
     <!-- Part waveshare_mounting_plate_so101_v2 -->
     <visual>
       <origin xyz="-0.0309827 -0.000199441 0.0474" rpy="1.5708 -1.35493e-14 1.5708"/>
@@ -71,12 +61,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="-0.0309827 -0.000199441 0.0474" rpy="1.5708 -1.35493e-14 1.5708"/>
-      <geometry>
-        <mesh filename="assets/waveshare_mounting_plate_so101_v2.stl"/>
-      </geometry>
-    </collision>
   </link>
 
   <!-- Link shoulder -->
@@ -94,10 +78,12 @@
       </geometry>
       <material name="sts3215"/>
     </visual>
+    <!-- Collision bounding box for shoulder_link (servo, motor holder, rotation pitch) -->
+    <!-- x: ~-0.090 to +0.040, z: ~-0.042 to +0.048 -->
     <collision>
-      <origin xyz="-0.0303992 0.000422241 -0.0417" rpy="1.5708 1.5708 0"/>
+      <origin xyz="-0.025 0 -0.010" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/sts3215_03a_v1.stl"/>
+        <box size="0.135 0.055 0.110"/>
       </geometry>
     </collision>
     <!-- Part motor_holder_so101_base_v1 -->
@@ -108,12 +94,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="-0.0675992 -0.000177759 0.0158499" rpy="1.5708 -1.5708 0"/>
-      <geometry>
-        <mesh filename="assets/motor_holder_so101_base_v1.stl"/>
-      </geometry>
-    </collision>
     <!-- Part rotation_pitch_so101_v1 -->
     <visual>
       <origin xyz="0.0122008 2.22413e-05 0.0464" rpy="-1.5708 2.35221e-33 0"/>
@@ -122,12 +102,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="0.0122008 2.22413e-05 0.0464" rpy="-1.5708 2.35221e-33 0"/>
-      <geometry>
-        <mesh filename="assets/rotation_pitch_so101_v1.stl"/>
-      </geometry>
-    </collision>
   </link>
 
   <!-- Link upper_arm -->
@@ -145,10 +119,12 @@
       </geometry>
       <material name="sts3215"/>
     </visual>
+    <!-- Collision bounding box for upper_arm_link (servo at x=-0.113 and upper arm structure) -->
+    <!-- x: ~-0.145 to +0.000, y: ~-0.018 to +0.035, z: ~+0.000 to +0.038 -->
     <collision>
-      <origin xyz="-0.11257 -0.0155 0.0187" rpy="-3.14159 -5.27356e-16 -1.5708"/>
+      <origin xyz="-0.065 -0.003 0.018" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/sts3215_03a_v1.stl"/>
+        <box size="0.155 0.060 0.055"/>
       </geometry>
     </collision>
     <!-- Part upper_arm_so101_v1 -->
@@ -159,12 +135,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="-0.065085 0.012 0.0182" rpy="3.14159 -0 -1.30911e-30"/>
-      <geometry>
-        <mesh filename="assets/upper_arm_so101_v1.stl"/>
-      </geometry>
-    </collision>
   </link>
 
   <!-- Link lower_arm -->
@@ -182,10 +152,12 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
+    <!-- Collision bounding box for lower_arm_link (under arm, wrist holder, servo at x=-0.122) -->
+    <!-- x: ~-0.158 to +0.000, y: ~-0.045 to +0.020, z: ~+0.000 to +0.038 -->
     <collision>
-      <origin xyz="-0.0648499 -0.032 0.0182" rpy="3.14159 -0 6.67202e-31"/>
+      <origin xyz="-0.065 -0.013 0.018" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/under_arm_so101_v1.stl"/>
+        <box size="0.165 0.070 0.050"/>
       </geometry>
     </collision>
     <!-- Part motor_holder_so101_wrist_v1 -->
@@ -196,12 +168,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="-0.0648499 -0.032 0.018" rpy="-3.14159 -2.55351e-15 -1.83387e-30"/>
-      <geometry>
-        <mesh filename="assets/motor_holder_so101_wrist_v1.stl"/>
-      </geometry>
-    </collision>
     <!-- Part sts3215_03a_v1_4 -->
     <visual>
       <origin xyz="-0.1224 0.0052 0.0187" rpy="-3.14159 -7.88861e-31 -3.14159"/>
@@ -210,12 +176,6 @@
       </geometry>
       <material name="sts3215"/>
     </visual>
-    <collision>
-      <origin xyz="-0.1224 0.0052 0.0187" rpy="-3.14159 -7.88861e-31 -3.14159"/>
-      <geometry>
-        <mesh filename="assets/sts3215_03a_v1.stl"/>
-      </geometry>
-    </collision>
   </link>
 
   <!-- Link wrist -->
@@ -233,10 +193,12 @@
       </geometry>
       <material name="sts3215"/>
     </visual>
+    <!-- Collision bounding box for wrist_link (no-horn servo + wrist roll-pitch bracket) -->
+    <!-- y: ~-0.080 to +0.000, z: ~-0.005 to +0.065, x: ~±0.022 -->
     <collision>
-      <origin xyz="8.32667e-17 -0.0424 0.0306" rpy="1.5708 1.5708 0"/>
+      <origin xyz="0 -0.040 0.030" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/sts3215_03a_no_horn_v1.stl"/>
+        <box size="0.048 0.090 0.075"/>
       </geometry>
     </collision>
     <!-- Part wrist_roll_pitch_so101_v2 -->
@@ -247,12 +209,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="0 -0.028 0.0181" rpy="-1.5708 -1.5708 0"/>
-      <geometry>
-        <mesh filename="assets/wrist_roll_pitch_so101_v2.stl"/>
-      </geometry>
-    </collision>
   </link>
 
   <!-- Link gripper -->
@@ -270,10 +226,13 @@
       </geometry>
       <material name="sts3215"/>
     </visual>
+    <!-- Collision bounding box for gripper_link (servo + wrist roll follower) -->
+    <!-- x: ~-0.010 to +0.030, y: ~±0.022, z: ~-0.060 to +0.010 -->
+    <!-- gripper_frame is at z=-0.098 so include up to z=-0.100 -->
     <collision>
-      <origin xyz="0.0077 0.0001 -0.0234" rpy="-1.5708 -5.19179e-17 -1.66533e-16"/>
+      <origin xyz="0.004 0 -0.048" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/sts3215_03a_v1.stl"/>
+        <box size="0.042 0.045 0.110"/>
       </geometry>
     </collision>
     <!-- Part wrist_roll_follower_so101_v1 -->
@@ -284,12 +243,6 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
-    <collision>
-      <origin xyz="8.32667e-17 -0.000218214 0.000949706" rpy="-3.14159 -5.55112e-17 0"/>
-      <geometry>
-        <mesh filename="assets/wrist_roll_follower_so101_v1.stl"/>
-      </geometry>
-    </collision>
     <!-- Wrist camera (32x32 snap-on UVC camera, faces downward in gripper frame) -->
     <!-- T_cam_to_gripper: xyz=[10mm, -20mm, -35mm], R=Rx(pi) — from cameras.yaml -->
     <visual>
@@ -333,10 +286,11 @@
       </geometry>
       <material name="3d_printed"/>
     </visual>
+    <!-- Box approximating the moving jaw (inertial center y=-0.030, z=0.019) -->
     <collision>
-      <origin xyz="-5.55112e-17 -5.55112e-17 0.0189" rpy="9.53145e-17 6.93889e-18 1.24077e-24"/>
+      <origin xyz="-0.002 -0.025 0.025" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="assets/moving_jaw_so101_v1.stl"/>
+        <box size="0.030 0.060 0.060"/>
       </geometry>
     </collision>
   </link>

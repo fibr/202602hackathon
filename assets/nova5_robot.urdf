@@ -36,12 +36,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Cylinder approximating the cylindrical base pedestal (r=75mm, h=240mm) -->
+      <origin xyz="0 0 0.120" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/base_link.STL" />
+        <cylinder radius="0.075" length="0.240"/>
       </geometry>
     </collision>
   </link>
@@ -84,12 +82,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Box approximating the shoulder housing (inertial center ~y=-0.022, z=-0.026) -->
+      <origin xyz="0 -0.022 -0.030" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/Link1.STL" />
+        <box size="0.120 0.100 0.120"/>
       </geometry>
     </collision>
   </link>
@@ -142,12 +138,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Box approximating upper arm: spans ~400mm in -x (joint3 at x=-0.3998) -->
+      <origin xyz="-0.200 -0.007 0.050" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/Link2.STL" />
+        <box size="0.420 0.080 0.120"/>
       </geometry>
     </collision>
   </link>
@@ -200,12 +194,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Box approximating forearm: spans ~330mm in -x, 135mm in +z (joint4 at x=-0.330, z=0.135) -->
+      <origin xyz="-0.165 -0.006 0.068" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/Link3.STL" />
+        <box size="0.370 0.070 0.180"/>
       </geometry>
     </collision>
   </link>
@@ -258,12 +250,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Box approximating wrist-1: spans 120mm in -y (joint5 at y=-0.12) -->
+      <origin xyz="0 -0.055 -0.015" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/Link4.STL" />
+        <box size="0.080 0.140 0.090"/>
       </geometry>
     </collision>
   </link>
@@ -316,12 +306,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Box approximating wrist-2: spans 88mm in +y (joint6 at y=0.088) -->
+      <origin xyz="0 0.044 -0.010" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/Link5.STL" />
+        <box size="0.080 0.120 0.075"/>
       </geometry>
     </collision>
   </link>
@@ -374,12 +362,10 @@
       </material>
     </visual>
     <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+      <!-- Cylinder approximating the end-effector flange (r=40mm, h=45mm) -->
+      <origin xyz="0 0 -0.022" rpy="0 0 0"/>
       <geometry>
-        <mesh
-          filename="package://dobot_description/meshes/nova5/Link6.STL" />
+        <cylinder radius="0.040" length="0.045"/>
       </geometry>
     </collision>
   </link>
