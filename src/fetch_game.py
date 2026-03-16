@@ -10,6 +10,7 @@ All coordinates are in mm (base frame).
 """
 
 import enum
+import math
 import time
 import threading
 from dataclasses import dataclass, field
@@ -598,7 +599,6 @@ class FetchGameController:
         from center, and iteratively corrects arm position.
         """
         from vision.green_cube_detector import detect_green_cubes
-        import math
 
         config = self.app.config or {}
         gc = config.get('gripper_camera', {})
@@ -749,11 +749,17 @@ class FetchGameController:
                 log.warning(f"Refine did not converge after {max_iters} iterations "
                             f"(last error: {last_error:.0f}px)")
 
+            # --- Align gripper yaw (J5 = wrist_roll) with detected cube orientation ---
+            self._align_gripper_yaw()
+
+            # --- Quick re-centering visual servo pass after J5 rotation ---
+            # After rotating J5, the cube may shift slightly in the gripper camera.
+            # Run a quick re-centering pass (3-5 iterations max) to correct any drift.
+            self._quick_recenter_after_yaw(cap, img_cx, img_cy, detect_green_cubes,
+                                          mount_angle_rad, hfov_deg, cam_w)
+
         finally:
             cap.release()
-
-        # --- Align gripper yaw (J5 = wrist_roll) with detected cube orientation ---
-        self._align_gripper_yaw()
 
     def _align_gripper_yaw(self):
         """Rotate wrist_roll (J5) to align gripper fingers with cube edges.
@@ -787,6 +793,141 @@ class FetchGameController:
 
         time.sleep(0.5)
         self.state.status_text = plan.summary()
+
+    def _quick_recenter_after_yaw(self, cap, img_cx, img_cy, detect_fn,
+                                  mount_angle_rad, hfov_deg, cam_w):
+        """Quick re-centering visual servo pass after J5 yaw alignment.
+
+        After rotating J5 to align the gripper with the cube, the cube may
+        shift slightly in the gripper camera view. This method runs a quick
+        (max 3-5 iterations) re-centering pass to correct any drift.
+
+        Args:
+            cap: Open cv2.VideoCapture for the gripper camera.
+            img_cx: Image center X (pixels).
+            img_cy: Image center Y (pixels).
+            detect_fn: Cube detection function (detect_green_cubes).
+            mount_angle_rad: Camera mount angle (radians).
+            hfov_deg: Camera horizontal field of view (degrees).
+            cam_w: Camera width (pixels).
+        """
+        if self._abort:
+            return
+
+        robot = self.app.robot
+        if robot is None or self._solver is None:
+            return
+
+        max_iters = 3
+        gain = 0.5
+        pixel_threshold = 15.0
+
+        with self._lock:
+            self.state.status_text = 'Re-centering after yaw alignment...'
+
+        log.info("[RECENTER] Starting quick re-centering pass after J5 rotation...")
+
+        for iteration in range(max_iters):
+            if self._abort:
+                break
+
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+
+            cubes, _ = detect_fn(frame, min_area=100)
+
+            # Annotate frame for GUI display
+            gc_vis = frame.copy()
+            h_gc, w_gc = gc_vis.shape[:2]
+            cv2.drawMarker(gc_vis, (w_gc // 2, h_gc // 2), (255, 255, 0),
+                           cv2.MARKER_CROSS, 30, 1)
+            if cubes:
+                from vision.green_cube_detector import annotate_frame
+                gc_vis = annotate_frame(gc_vis, cubes, target_idx=0)
+            with self._lock:
+                self.state.gripper_cam_frame = gc_vis
+
+            if not cubes:
+                with self._lock:
+                    self.state.gripper_cam_detection = None
+                    self.state.status_text = (
+                        f'Recenter iter {iteration+1}/{max_iters}: '
+                        f'no cube detected, retrying...')
+                time.sleep(0.2)
+                continue
+
+            cube = cubes[0]
+            ex = cube.cx - img_cx
+            ey = cube.cy - img_cy
+            error_px = np.hypot(ex, ey)
+
+            with self._lock:
+                self.state.gripper_cam_detection = (cube.cx, cube.cy)
+                self.state.refine_error_px = error_px
+                self.state.status_text = (
+                    f'Recenter iter {iteration+1}/{max_iters}: '
+                    f'err={error_px:.0f}px'
+                )
+
+            if error_px < pixel_threshold:
+                log.info(f"[RECENTER] Converged after {iteration+1} iteration(s): "
+                         f"error={error_px:.1f}px < {pixel_threshold}px")
+                with self._lock:
+                    self.state.status_text = f'Re-centered! err={error_px:.1f}px'
+                break
+
+            # Compute correction
+            angles = robot.get_angles()
+            if not angles or len(angles) < 5:
+                log.warning("[RECENTER] Could not get robot angles")
+                continue
+
+            seed = np.array(angles[:5])
+            current_pos, _ = self._solver.forward_kin(seed)
+            z_mm = current_pos[2]
+            scale_mm_per_px = z_mm * math.tan(math.radians(hfov_deg / 2.0)) / (cam_w / 2.0)
+
+            # Pixel error to mm error (rotate by mount angle for robot frame)
+            ex_mm = ex * scale_mm_per_px
+            ey_mm = ey * scale_mm_per_px
+            cos_a = math.cos(mount_angle_rad)
+            sin_a = math.sin(mount_angle_rad)
+            dx_mm = (cos_a * ex_mm - sin_a * ey_mm) * gain
+            dy_mm = (sin_a * ex_mm + cos_a * ey_mm) * gain
+
+            # Clamp correction magnitude
+            mag = np.hypot(dx_mm, dy_mm)
+            if mag > 10.0:
+                dx_mm *= 10.0 / mag
+                dy_mm *= 10.0 / mag
+
+            # Apply small corrective move
+            angles = robot.get_angles()
+            if not angles or len(angles) < 6:
+                break
+
+            seed = np.array(angles[:5])
+            current_pos, _ = self._solver.forward_kin(seed)
+
+            new_pos = current_pos.copy()
+            new_pos[0] += dx_mm
+            new_pos[1] += dy_mm
+
+            solution = self._solver.solve_ik_position(new_pos, seed_motor_deg=seed)
+            if solution is not None:
+                cmd = list(solution) + [angles[5]]
+                robot.move_joints(cmd, speed=80)  # Slightly slower for precision
+                time.sleep(0.3)
+
+                with self._lock:
+                    self.state.refined_pos_3d = new_pos.copy()
+                log.debug(f"[RECENTER] iter {iteration+1}: correction "
+                         f"dx={dx_mm:+.2f}mm dy={dy_mm:+.2f}mm")
+            else:
+                log.warning(f"[RECENTER] IK failed for corrective move at iter {iteration+1}")
+
+        log.info(f"[RECENTER] Re-centering pass complete")
 
     def _do_open_gripper(self):
         """Open the gripper before descending."""
