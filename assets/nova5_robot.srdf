@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MoveIt SRDF for Dobot Nova5 — adjacent-link collision exclusions.
+
+  These pairs are *always* in physical contact (connected by a joint) and
+  would produce constant false-positive self-collision hits if checked.
+  Disabling them lets a primitive-based collision checker focus on genuinely
+  dangerous non-adjacent link pairs.
+
+  Link chain (URDF joint → child):
+    dummy_joint  (fixed)  : dummy_link  → base_link
+    joint1       (revolute): base_link   → Link1
+    joint2       (revolute): Link1       → Link2
+    joint3       (revolute): Link2       → Link3
+    joint4       (revolute): Link3       → Link4
+    joint5       (revolute): Link4       → Link5
+    joint6       (revolute): Link5       → Link6
+    tool_joint   (fixed)  : Link6       → tool_tip
+
+  reason="Adjacent" — MoveIt's standard tag for directly-connected links.
+  reason="Default"  — used for pairs that are never in collision in any
+                      reachable configuration (e.g. far-apart links in a
+                      serial chain where geometry cannot reach).
+-->
+<robot name="nova5_robot">
+
+  <!-- ═══════════════════════════════════════════════
+       Robot group: all 6 actuated joints
+       ═══════════════════════════════════════════════ -->
+  <group name="nova5_arm">
+    <joint name="joint1"/>
+    <joint name="joint2"/>
+    <joint name="joint3"/>
+    <joint name="joint4"/>
+    <joint name="joint5"/>
+    <joint name="joint6"/>
+  </group>
+
+  <!-- ═══════════════════════════════════════════════
+       Adjacent-link pairs (always in contact)
+       ═══════════════════════════════════════════════ -->
+  <disable_collisions link1="dummy_link"  link2="base_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link"   link2="Link1"     reason="Adjacent"/>
+  <disable_collisions link1="Link1"       link2="Link2"     reason="Adjacent"/>
+  <disable_collisions link1="Link2"       link2="Link3"     reason="Adjacent"/>
+  <disable_collisions link1="Link3"       link2="Link4"     reason="Adjacent"/>
+  <disable_collisions link1="Link4"       link2="Link5"     reason="Adjacent"/>
+  <disable_collisions link1="Link5"       link2="Link6"     reason="Adjacent"/>
+  <disable_collisions link1="Link6"       link2="tool_tip"  reason="Adjacent"/>
+
+  <!-- ═══════════════════════════════════════════════
+       Nearly-adjacent pairs (2 hops apart).
+       In a serial chain these neighbouring links
+       typically overlap at joints and always collide.
+       ═══════════════════════════════════════════════ -->
+  <disable_collisions link1="dummy_link"  link2="Link1"     reason="Default"/>
+  <disable_collisions link1="base_link"   link2="Link2"     reason="Default"/>
+  <disable_collisions link1="Link1"       link2="Link3"     reason="Default"/>
+  <disable_collisions link1="Link2"       link2="Link4"     reason="Default"/>
+  <disable_collisions link1="Link3"       link2="Link5"     reason="Default"/>
+  <disable_collisions link1="Link4"       link2="Link6"     reason="Default"/>
+  <disable_collisions link1="Link5"       link2="tool_tip"  reason="Default"/>
+
+</robot>

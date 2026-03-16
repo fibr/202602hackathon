@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MoveIt SRDF for SO-ARM101 — adjacent-link collision exclusions.
+
+  These pairs are *always* in physical contact (connected by a joint) and
+  would produce constant false-positive self-collision hits if checked.
+  Disabling them lets a primitive-based collision checker focus on genuinely
+  dangerous non-adjacent link pairs.
+
+  Link chain (URDF joint → child):
+    shoulder_pan        (revolute): base_link         → shoulder_link
+    shoulder_lift       (revolute): shoulder_link     → upper_arm_link
+    elbow_flex          (revolute): upper_arm_link    → lower_arm_link
+    wrist_flex          (revolute): lower_arm_link    → wrist_link
+    wrist_roll          (revolute): wrist_link        → gripper_link
+    gripper_frame_joint (fixed)  : gripper_link      → gripper_frame_link
+    gripper             (revolute): gripper_link      → moving_jaw_so101_v1_link
+
+  reason="Adjacent" — MoveIt's standard tag for directly-connected links.
+  reason="Default"  — used for pairs that are never in collision in any
+                      reachable configuration (e.g. far-apart links in a
+                      serial chain where geometry cannot reach).
+-->
+<robot name="so101_new_calib">
+
+  <!-- ═══════════════════════════════════════════════
+       Robot group: 5 IK-controlled joints + gripper
+       ═══════════════════════════════════════════════ -->
+  <group name="arm101">
+    <joint name="shoulder_pan"/>
+    <joint name="shoulder_lift"/>
+    <joint name="elbow_flex"/>
+    <joint name="wrist_flex"/>
+    <joint name="wrist_roll"/>
+  </group>
+
+  <group name="gripper">
+    <joint name="gripper"/>
+  </group>
+
+  <!-- ═══════════════════════════════════════════════
+       Adjacent-link pairs (always in contact)
+       ═══════════════════════════════════════════════ -->
+  <disable_collisions link1="base_link"               link2="shoulder_link"          reason="Adjacent"/>
+  <disable_collisions link1="shoulder_link"           link2="upper_arm_link"         reason="Adjacent"/>
+  <disable_collisions link1="upper_arm_link"          link2="lower_arm_link"         reason="Adjacent"/>
+  <disable_collisions link1="lower_arm_link"          link2="wrist_link"             reason="Adjacent"/>
+  <disable_collisions link1="wrist_link"              link2="gripper_link"           reason="Adjacent"/>
+  <disable_collisions link1="gripper_link"            link2="gripper_frame_link"     reason="Adjacent"/>
+  <disable_collisions link1="gripper_link"            link2="moving_jaw_so101_v1_link" reason="Adjacent"/>
+
+  <!-- ═══════════════════════════════════════════════
+       Nearly-adjacent pairs (2 hops apart).
+       In a serial chain these neighbouring links
+       typically overlap at joints and always collide.
+       ═══════════════════════════════════════════════ -->
+  <disable_collisions link1="base_link"               link2="upper_arm_link"         reason="Default"/>
+  <disable_collisions link1="shoulder_link"           link2="lower_arm_link"         reason="Default"/>
+  <disable_collisions link1="upper_arm_link"          link2="wrist_link"             reason="Default"/>
+  <disable_collisions link1="lower_arm_link"          link2="gripper_link"           reason="Default"/>
+  <disable_collisions link1="wrist_link"              link2="gripper_frame_link"     reason="Default"/>
+  <disable_collisions link1="wrist_link"              link2="moving_jaw_so101_v1_link" reason="Default"/>
+
+</robot>
