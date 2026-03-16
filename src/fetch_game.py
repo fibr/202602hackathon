@@ -99,6 +99,10 @@ class FetchGameController:
         self._abort = False
         self._speed = 150
 
+        # Lock protecting all FetchGameState field reads/writes.
+        # RLock allows the same thread to re-acquire (e.g. step() -> _set_state()).
+        self._lock = threading.RLock()
+
         # Callbacks for GUI updates
         self.on_state_changed: Optional[Callable] = None
 
@@ -128,8 +132,10 @@ class FetchGameController:
 
     def set_place_target(self, pos_mm: np.ndarray):
         """Set the place target position in base frame (mm)."""
-        self.place_pos_mm = pos_mm.copy()
-        self.state.place_target_3d = pos_mm.copy()
+        copy = pos_mm.copy()
+        self.place_pos_mm = copy
+        with self._lock:
+            self.state.place_target_3d = copy.copy()
         log.info(f"Place target: ({pos_mm[0]:.0f}, {pos_mm[1]:.0f}, {pos_mm[2]:.0f})")
 
     def update_detection(self, frame: np.ndarray):
@@ -147,21 +153,21 @@ class FetchGameController:
         from vision.green_cube_detector import detect_green_cubes, select_target_cube
         self.ensure_ready()
 
+        # Run detection outside the lock — this is the heavy computation.
         cubes, info = detect_green_cubes(frame)
-        self.state.num_cubes_detected = len(cubes)
 
         target_idx = select_target_cube(
             cubes,
             mode=self.cube_selection_mode,
             click_xy=self._click_xy,
         )
-        self.state.target_cube_idx = target_idx
 
+        # Pre-compute 3D position outside the lock (no state mutation yet).
+        new_cube_3d = None
+        cube_px = None
         if target_idx >= 0 and target_idx < len(cubes):
             cube = cubes[target_idx]
-            self.state.target_cube_px = (cube.cx, cube.cy)
-
-            # Ray-plane intersection for 3D position
+            cube_px = (cube.cx, cube.cy)
             if self._transform and self.app.camera:
                 intr = self.app.camera.intrinsics
                 ray_cam = np.array([
@@ -175,120 +181,157 @@ class FetchGameController:
                 cube_z = 10.0  # cube center height above table
                 if abs(ray_base[2]) > 1e-6:
                     s = (cube_z - origin_base[2]) / ray_base[2]
-                    if s > 0:  # only accept intersections in front of camera
-                        self.state.target_cube_3d = origin_base + s * ray_base
+                    if s > 0:
+                        new_cube_3d = origin_base + s * ray_base
                     else:
                         log.debug(f"Negative ray scale {s:.2f}, ignoring")
-                        self.state.target_cube_3d = None
 
-            # Auto-advance: if in DETECT state with auto_mode and we have a target
-            if (self.state.auto_mode
-                    and self.state.state == FetchState.DETECT
-                    and self.state.target_cube_3d is not None
-                    and not (self._worker_thread and self._worker_thread.is_alive())):
-                self.step()
-        else:
-            self.state.target_cube_px = None
-            self.state.target_cube_3d = None
+        # Commit detection results and check for auto-advance under the lock.
+        do_step = False
+        with self._lock:
+            self.state.num_cubes_detected = len(cubes)
+            self.state.target_cube_idx = target_idx
+            if cube_px is not None:
+                self.state.target_cube_px = cube_px
+                self.state.target_cube_3d = new_cube_3d
+                # Auto-advance: if in DETECT state with auto_mode and we have a target
+                if (self.state.auto_mode
+                        and self.state.state == FetchState.DETECT
+                        and self.state.target_cube_3d is not None
+                        and not (self._worker_thread and self._worker_thread.is_alive())):
+                    do_step = True
+            else:
+                self.state.target_cube_px = None
+                self.state.target_cube_3d = None
+
+        # Call step() outside the lock to avoid re-entrant locking issues.
+        if do_step:
+            self.step()
 
         return cubes, target_idx
 
     def _set_state(self, new_state: FetchState, status: str = ''):
-        """Transition to a new state."""
-        old = self.state.state
-        self.state.state = new_state
-        self.state.status_text = status or new_state.value
-        self.state.step_count += 1
-        log.info(f"State: {old.value} -> {new_state.value}: {status}")
-        if self.on_state_changed:
+        """Transition to a new state (thread-safe)."""
+        with self._lock:
+            old = self.state.state
+            self.state.state = new_state
+            self.state.status_text = status or new_state.value
+            self.state.step_count += 1
+            log.info(f"State: {old.value} -> {new_state.value}: {status}")
+            callback = self.on_state_changed
+        # Invoke callback outside the lock to prevent holding it during
+        # arbitrary GUI operations (avoids deadlock with GUI thread).
+        if callback:
             try:
-                self.on_state_changed(self.state)
+                callback(self.state)
             except Exception:
                 pass
 
     def reset(self):
-        """Reset to IDLE state."""
+        """Reset to IDLE state (thread-safe).
+
+        _abort is set first (no lock needed — boolean write is atomic in CPython)
+        so the worker thread can see it and stop early.  The join() is done
+        outside the lock to prevent a deadlock where the worker waits to acquire
+        _lock (to call step()) while we hold it waiting for the worker to finish.
+        """
         self._abort = True
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=2.0)
-        self._abort = False
-        self.state = FetchGameState()
-        self.state.place_target_3d = self.place_pos_mm.copy()
+        worker = self._worker_thread
+        if worker and worker.is_alive():
+            worker.join(timeout=2.0)
+        with self._lock:
+            self._abort = False
+            self.state = FetchGameState()
+            self.state.place_target_3d = self.place_pos_mm.copy()
         self._set_state(FetchState.IDLE, 'Reset — ready')
 
     def step(self):
         """Advance one step in the state machine (non-blocking).
 
         Starts a worker thread for the current state's action.
+        Thread-safe: acquiring _lock ensures the state read and the
+        subsequent transition are atomic (no two threads can both observe
+        the same state and both trigger the same action).
+
+        Note: reset() is intentionally called *outside* the lock to avoid a
+        deadlock where the worker thread (waiting to acquire _lock to call
+        step()) is being joined while _lock is held by the calling thread.
         """
-        if self._worker_thread and self._worker_thread.is_alive():
-            log.warning("Worker still running, ignoring step")
-            return
+        do_reset = False
+        with self._lock:
+            if self._worker_thread and self._worker_thread.is_alive():
+                log.warning("Worker still running, ignoring step")
+                return
 
-        self._abort = False
-        current = self.state.state
+            self._abort = False
+            current = self.state.state
 
-        if current == FetchState.IDLE:
-            self._set_state(FetchState.DETECT, 'Scanning for cubes...')
+            if current == FetchState.IDLE:
+                self._set_state(FetchState.DETECT, 'Scanning for cubes...')
 
-        elif current == FetchState.DETECT:
-            if self.state.target_cube_3d is not None:
-                self._set_state(FetchState.APPROACH, 'Moving above target cube...')
-                self._run_async(self._do_approach)
-            else:
-                self.state.status_text = 'No cube detected — waiting...'
+            elif current == FetchState.DETECT:
+                if self.state.target_cube_3d is not None:
+                    self._set_state(FetchState.APPROACH, 'Moving above target cube...')
+                    self._run_async(self._do_approach)
+                else:
+                    self.state.status_text = 'No cube detected — waiting...'
 
-        elif current == FetchState.APPROACH:
-            # After approach, try gripper cam refinement
-            self._set_state(FetchState.REFINE, 'Refining with gripper camera...')
-            self._run_async(self._do_refine)
+            elif current == FetchState.APPROACH:
+                # After approach, try gripper cam refinement
+                self._set_state(FetchState.REFINE, 'Refining with gripper camera...')
+                self._run_async(self._do_refine)
 
-        elif current == FetchState.REFINE:
-            self._set_state(FetchState.OPEN_GRIPPER, 'Opening gripper...')
-            self._run_async(self._do_open_gripper)
+            elif current == FetchState.REFINE:
+                self._set_state(FetchState.OPEN_GRIPPER, 'Opening gripper...')
+                self._run_async(self._do_open_gripper)
 
-        elif current == FetchState.OPEN_GRIPPER:
-            self._set_state(FetchState.DESCEND, 'Descending to grasp...')
-            self._run_async(self._do_descend)
+            elif current == FetchState.OPEN_GRIPPER:
+                self._set_state(FetchState.DESCEND, 'Descending to grasp...')
+                self._run_async(self._do_descend)
 
-        elif current == FetchState.DESCEND:
-            self._set_state(FetchState.GRASP, 'Closing gripper...')
-            self._run_async(self._do_grasp)
+            elif current == FetchState.DESCEND:
+                self._set_state(FetchState.GRASP, 'Closing gripper...')
+                self._run_async(self._do_grasp)
 
-        elif current == FetchState.GRASP:
-            self._set_state(FetchState.LIFT, 'Lifting cube...')
-            self._run_async(self._do_lift)
+            elif current == FetchState.GRASP:
+                self._set_state(FetchState.LIFT, 'Lifting cube...')
+                self._run_async(self._do_lift)
 
-        elif current == FetchState.LIFT:
-            self._set_state(FetchState.TRANSPORT, 'Transporting to target...')
-            self._run_async(self._do_transport)
+            elif current == FetchState.LIFT:
+                self._set_state(FetchState.TRANSPORT, 'Transporting to target...')
+                self._run_async(self._do_transport)
 
-        elif current == FetchState.TRANSPORT:
-            self._set_state(FetchState.PLACE, 'Placing cube...')
-            self._run_async(self._do_place)
+            elif current == FetchState.TRANSPORT:
+                self._set_state(FetchState.PLACE, 'Placing cube...')
+                self._run_async(self._do_place)
 
-        elif current == FetchState.PLACE:
-            self._set_state(FetchState.RETRACT, 'Retracting...')
-            self._run_async(self._do_retract)
+            elif current == FetchState.PLACE:
+                self._set_state(FetchState.RETRACT, 'Retracting...')
+                self._run_async(self._do_retract)
 
-        elif current == FetchState.RETRACT:
-            self._set_state(FetchState.DONE, 'Fetch complete!')
+            elif current == FetchState.RETRACT:
+                self._set_state(FetchState.DONE, 'Fetch complete!')
 
-        elif current == FetchState.DONE:
-            self.reset()
+            elif current in (FetchState.DONE, FetchState.ERROR):
+                # reset() joins the worker thread — must be called outside the
+                # lock to avoid deadlock (worker may be trying to acquire _lock
+                # to call step() while we're waiting for it to finish here).
+                do_reset = True
 
-        elif current == FetchState.ERROR:
+        if do_reset:
             self.reset()
 
     def start_auto(self):
         """Run the full fetch sequence automatically."""
         self.reset()
-        self.state.auto_mode = True
+        with self._lock:
+            self.state.auto_mode = True
         self._set_state(FetchState.DETECT, 'Auto: scanning...')
 
     def stop_auto(self):
         """Stop auto mode."""
-        self.state.auto_mode = False
+        with self._lock:
+            self.state.auto_mode = False
         self._abort = True
 
     def _run_async(self, fn):
@@ -301,12 +344,17 @@ class FetchGameController:
         """Wrapper that catches exceptions and transitions to ERROR."""
         try:
             fn()
-            # In auto mode, advance to next step
-            if self.state.auto_mode and not self._abort:
+            # In auto mode, advance to next step.
+            # Read auto_mode under the lock; step() also acquires the lock.
+            with self._lock:
+                should_advance = self.state.auto_mode and not self._abort
+            if should_advance:
                 time.sleep(0.2)
                 self.step()
         except Exception as e:
-            log.error(f"Fetch game error in {self.state.state.value}: {e}")
+            with self._lock:
+                state_name = self.state.state.value
+            log.error(f"Fetch game error in {state_name}: {e}")
             import traceback
             traceback.print_exc()
             self._set_state(FetchState.ERROR, f'Error: {e}')
@@ -339,18 +387,20 @@ class FetchGameController:
 
     def _do_approach(self):
         """Move arm above the target cube."""
-        target = self.state.target_cube_3d
+        with self._lock:
+            target = self.state.target_cube_3d
         if target is None:
             raise RuntimeError("No target cube position")
 
-        # Snapshot target position to avoid race with detection thread
+        # Snapshot target position to avoid race with detection thread.
         hover_pos = target.copy()
         hover_pos[2] = self.hover_height_mm
         self._move_to_position(hover_pos, 'approach')
-        self.state.status_text = f'Hovering above cube at z={self.hover_height_mm:.0f}mm'
-        # Store the approach position as refined_pos_3d baseline
-        self.state.refined_pos_3d = hover_pos.copy()
-        self.state.refined_pos_3d[2] = target[2]  # keep original Z for later use
+        refined = hover_pos.copy()
+        refined[2] = target[2]  # keep original Z for later use
+        with self._lock:
+            self.state.status_text = f'Hovering above cube at z={self.hover_height_mm:.0f}mm'
+            self.state.refined_pos_3d = refined
 
     def _do_refine(self):
         """Use gripper camera to refine position over the cube.
@@ -378,7 +428,8 @@ class FetchGameController:
 
         robot = self.app.robot
         if robot is None:
-            self.state.status_text = 'Refine: no robot, skipping'
+            with self._lock:
+                self.state.status_text = 'Refine: no robot, skipping'
             return
 
         # Try to open gripper camera
@@ -387,7 +438,8 @@ class FetchGameController:
             cap = cv2.VideoCapture(cam_index)
         if not cap.isOpened():
             log.warning(f"Cannot open gripper cam /dev/video{cam_index}, skipping refine")
-            self.state.status_text = 'Gripper cam unavailable, skipping refine'
+            with self._lock:
+                self.state.status_text = 'Gripper cam unavailable, skipping refine'
             return
 
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -424,31 +476,34 @@ class FetchGameController:
                 if cubes:
                     from vision.green_cube_detector import annotate_frame
                     gc_vis = annotate_frame(gc_vis, cubes, target_idx=0)
-                self.state.gripper_cam_frame = gc_vis
+                with self._lock:
+                    self.state.gripper_cam_frame = gc_vis
 
                 if not cubes:
-                    self.state.gripper_cam_detection = None
-                    self.state.status_text = f'Refine iter {iteration+1}: no cube in gripper cam'
+                    with self._lock:
+                        self.state.gripper_cam_detection = None
+                        self.state.status_text = (
+                            f'Refine iter {iteration+1}: no cube in gripper cam')
                     time.sleep(0.2)
                     continue
 
                 cube = cubes[0]
-                self.state.gripper_cam_detection = (cube.cx, cube.cy)
-                self.state.estimated_yaw_deg = cube.yaw_deg
-
                 ex = cube.cx - img_cx
                 ey = cube.cy - img_cy
                 error_px = np.hypot(ex, ey)
-                self.state.refine_error_px = error_px
-
-                self.state.status_text = (
-                    f'Refine iter {iteration+1}/{max_iters}: '
-                    f'err={error_px:.0f}px yaw={cube.yaw_deg:.0f}deg'
-                )
+                with self._lock:
+                    self.state.gripper_cam_detection = (cube.cx, cube.cy)
+                    self.state.estimated_yaw_deg = cube.yaw_deg
+                    self.state.refine_error_px = error_px
+                    self.state.status_text = (
+                        f'Refine iter {iteration+1}/{max_iters}: '
+                        f'err={error_px:.0f}px yaw={cube.yaw_deg:.0f}deg'
+                    )
 
                 if error_px < pixel_threshold:
                     log.info(f"Refine converged: error={error_px:.1f}px")
-                    self.state.status_text = f'Refined! err={error_px:.1f}px'
+                    with self._lock:
+                        self.state.status_text = f'Refined! err={error_px:.1f}px'
                     break
 
                 # Compute correction in robot frame (rotate by mount angle)
@@ -484,14 +539,17 @@ class FetchGameController:
                     time.sleep(0.4)
 
                     # Update refined position
-                    self.state.refined_pos_3d = new_pos.copy()
+                    with self._lock:
+                        self.state.refined_pos_3d = new_pos.copy()
             else:
                 # Exhausted iterations without converging
+                with self._lock:
+                    last_error = self.state.refine_error_px
+                    self.state.status_text = (
+                        f'Refine: {last_error:.0f}px error '
+                        f'(threshold {pixel_threshold:.0f}px)')
                 log.warning(f"Refine did not converge after {max_iters} iterations "
-                            f"(last error: {self.state.refine_error_px:.0f}px)")
-                self.state.status_text = (
-                    f'Refine: {self.state.refine_error_px:.0f}px error '
-                    f'(threshold {pixel_threshold:.0f}px)')
+                            f"(last error: {last_error:.0f}px)")
 
         finally:
             cap.release()
@@ -560,21 +618,24 @@ class FetchGameController:
         if hasattr(robot, 'gripper_open'):
             robot.gripper_open()
             time.sleep(0.5)
-        self.state.status_text = 'Gripper opened'
+        with self._lock:
+            self.state.status_text = 'Gripper opened'
 
     def _do_descend(self):
         """Lower the arm to grasp height."""
-        # Use refined position if available, else use original detection
-        pos = self.state.refined_pos_3d
-        if pos is None:
-            pos = self.state.target_cube_3d
+        # Snapshot positions under the lock to avoid races with camera/GUI.
+        with self._lock:
+            pos = self.state.refined_pos_3d
+            if pos is None:
+                pos = self.state.target_cube_3d
         if pos is None:
             raise RuntimeError("No target position for descend")
 
         grasp_pos = pos.copy()
         grasp_pos[2] = self.grasp_height_mm
         self._move_to_position(grasp_pos, 'descend')
-        self.state.status_text = f'At grasp height z={self.grasp_height_mm:.0f}mm'
+        with self._lock:
+            self.state.status_text = f'At grasp height z={self.grasp_height_mm:.0f}mm'
 
     def _do_grasp(self):
         """Close the gripper to grasp the cube."""
@@ -584,20 +645,23 @@ class FetchGameController:
         if hasattr(robot, 'gripper_close'):
             robot.gripper_close()
             time.sleep(0.8)
-        self.state.status_text = 'Gripper closed — cube grasped'
+        with self._lock:
+            self.state.status_text = 'Gripper closed — cube grasped'
 
     def _do_lift(self):
         """Lift the cube to a safe height."""
-        pos = self.state.refined_pos_3d
-        if pos is None:
-            pos = self.state.target_cube_3d
+        with self._lock:
+            pos = self.state.refined_pos_3d
+            if pos is None:
+                pos = self.state.target_cube_3d
         if pos is None:
             raise RuntimeError("No position for lift")
 
         lift_pos = pos.copy()
         lift_pos[2] = self.lift_height_mm
         self._move_to_position(lift_pos, 'lift')
-        self.state.status_text = f'Lifted to z={self.lift_height_mm:.0f}mm'
+        with self._lock:
+            self.state.status_text = f'Lifted to z={self.lift_height_mm:.0f}mm'
 
     def _do_transport(self):
         """Move to the place target position (at lift height first, then above place)."""
@@ -606,7 +670,8 @@ class FetchGameController:
         transit_pos = place.copy()
         transit_pos[2] = self.lift_height_mm
         self._move_to_position(transit_pos, 'transport')
-        self.state.status_text = f'Above place target at z={self.lift_height_mm:.0f}mm'
+        with self._lock:
+            self.state.status_text = f'Above place target at z={self.lift_height_mm:.0f}mm'
 
     def _do_place(self):
         """Lower to place height and open gripper."""
@@ -618,11 +683,13 @@ class FetchGameController:
         if robot and hasattr(robot, 'gripper_open'):
             robot.gripper_open()
             time.sleep(0.5)
-        self.state.status_text = 'Cube placed!'
+        with self._lock:
+            self.state.status_text = 'Cube placed!'
 
     def _do_retract(self):
         """Move back to a safe position above the place location."""
         retract_pos = self.place_pos_mm.copy()
         retract_pos[2] = self.lift_height_mm
         self._move_to_position(retract_pos, 'retract')
-        self.state.status_text = 'Retracted to safe height'
+        with self._lock:
+            self.state.status_text = 'Retracted to safe height'
