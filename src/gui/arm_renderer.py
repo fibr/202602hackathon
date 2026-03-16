@@ -70,6 +70,7 @@ _LINK_THICKNESS = 3
 # Material colors (BGR) — from URDF material definitions
 _MAT_3D_PRINTED = (30, 209, 255)   # yellow-gold (rgba 1.0, 0.82, 0.12)
 _MAT_STS3215 = (30, 30, 30)        # dark (rgba 0.1, 0.1, 0.1)
+_MAT_CAMERA = (89, 63, 38)         # dark teal (rgba 0.15, 0.25, 0.35)
 _MAT_DEFAULT = (160, 160, 160)     # gray fallback
 
 # Target face count per mesh after decimation (for real-time rendering).
@@ -289,6 +290,7 @@ class ArmRenderer:
             mat_colors = {
                 '3d_printed': _MAT_3D_PRINTED,
                 'sts3215': _MAT_STS3215,
+                'camera': _MAT_CAMERA,
             }
 
             for link_name, vis_list in visuals.items():

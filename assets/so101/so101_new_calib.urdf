@@ -10,6 +10,9 @@
   <material name="sts3215">
     <color rgba="0.1 0.1 0.1 1.0"/>
   </material>
+  <material name="camera">
+    <color rgba="0.15 0.25 0.35 1.0"/>
+  </material>
 
   <!-- Link base -->
   <link name="base_link">
@@ -287,6 +290,15 @@
         <mesh filename="assets/wrist_roll_follower_so101_v1.stl"/>
       </geometry>
     </collision>
+    <!-- Wrist camera (32x32 snap-on UVC camera, faces downward in gripper frame) -->
+    <!-- T_cam_to_gripper: xyz=[10mm, -20mm, -35mm], R=Rx(pi) — from cameras.yaml -->
+    <visual>
+      <origin xyz="0.01 -0.02 -0.035" rpy="3.14159 0 0"/>
+      <geometry>
+        <mesh filename="assets/wrist_camera_so101_v1.stl"/>
+      </geometry>
+      <material name="camera"/>
+    </visual>
   </link>
 
   <!-- Gripper frame (dummy link + fixed joint) -->

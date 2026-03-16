@@ -5,6 +5,11 @@ notes:
   default: 2048 (servo center) if no offset defined
   signs: +1 = motor and URDF agree, -1 = inverted
   usage: angle_deg = sign * (raw_position - zero_raw) * 360/4096
+# URDF convention offsets (degrees): urdf_angle = motor_deg * sign + urdf_offset
+# wrist_roll: the URDF mesh was 180deg rotated from the physical wrist at servo zero.
+# Adding 180deg offset aligns the digital twin with reality.
+urdf_offsets_deg:
+  wrist_roll: 180.0
 joint_signs:
   elbow_flex: 1
   shoulder_lift: 1
