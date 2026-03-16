@@ -103,9 +103,9 @@ def _load_servo_offsets() -> tuple:
                 signs[mid] = float(sign_val)
     return offsets, signs
 
-# Gripper positions (motor 6)
-GRIPPER_OPEN_POS = 2600
-GRIPPER_CLOSE_POS = 1800
+# Gripper positions (motor 6) — defaults if not provided in config
+DEFAULT_GRIPPER_OPEN_POS = 2600
+DEFAULT_GRIPPER_CLOSE_POS = 1800
 
 # Default speed for moves (0-4095, ~0 means max speed for STS)
 DEFAULT_MOVE_SPEED = 200
@@ -139,7 +139,8 @@ class LeRobotArm101:
 
     def __init__(self, port: str, baudrate: int = DEFAULT_BAUDRATE,
                  motor_ids: Optional[list] = None, speed: int = DEFAULT_MOVE_SPEED,
-                 safe_mode: bool = False):
+                 safe_mode: bool = False, gripper_open_pos: int = None,
+                 gripper_close_pos: int = None):
         if not HAS_SCSERVO:
             raise ImportError(
                 "scservo_sdk not installed. Run: pip install feetech-servo-sdk"
@@ -151,6 +152,10 @@ class LeRobotArm101:
         self.safe_mode = safe_mode
         self.speed = SAFE_MODE_SPEED if safe_mode else speed
         self._enabled = False
+
+        # Gripper positions from config, with fallback to defaults
+        self.gripper_open_pos = gripper_open_pos if gripper_open_pos is not None else DEFAULT_GRIPPER_OPEN_POS
+        self.gripper_close_pos = gripper_close_pos if gripper_close_pos is not None else DEFAULT_GRIPPER_CLOSE_POS
 
         # Initialize SDK
         self._lock = threading.Lock()
@@ -519,13 +524,13 @@ class LeRobotArm101:
                 objects where full open is unnecessary).
         """
         fraction = max(0.0, min(1.0, fraction))
-        target = int(GRIPPER_CLOSE_POS + fraction * (GRIPPER_OPEN_POS - GRIPPER_CLOSE_POS))
+        target = int(self.gripper_close_pos + fraction * (self.gripper_open_pos - self.gripper_close_pos))
         self.write_position(self.motor_ids[5], target,
                             speed or self.speed)
 
     def gripper_close(self, speed: int = None):
         """Close the gripper (motor 6)."""
-        self.write_position(self.motor_ids[5], GRIPPER_CLOSE_POS,
+        self.write_position(self.motor_ids[5], self.gripper_close_pos,
                             speed or self.speed)
 
     # --- Joint jog ---

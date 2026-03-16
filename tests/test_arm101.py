@@ -41,13 +41,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from robot.lerobot_arm101 import (  # noqa: E402
     LeRobotArm101,
     POS_CENTER, POS_PER_DEG, DEG_PER_POS,
-    GRIPPER_OPEN_POS, GRIPPER_CLOSE_POS,
+    DEFAULT_GRIPPER_OPEN_POS, DEFAULT_GRIPPER_CLOSE_POS,
     DEFAULT_MOVE_SPEED, SAFE_MODE_SPEED, SAFE_MODE_MAX_TORQUE,
     ADDR_TORQUE_ENABLE, ADDR_GOAL_POSITION, ADDR_GOAL_SPEED,
     ADDR_PRESENT_POSITION, ADDR_MAX_TORQUE,
     DEFAULT_MOTOR_IDS,
     ADDR_MIN_ANGLE_LIMIT, ADDR_MAX_ANGLE_LIMIT, ADDR_LOCK,
 )
+
+# For backward compatibility and readability in test assertions
+GRIPPER_OPEN_POS = DEFAULT_GRIPPER_OPEN_POS
+GRIPPER_CLOSE_POS = DEFAULT_GRIPPER_CLOSE_POS
 
 # Grab the COMM_SUCCESS value as seen by lerobot_arm101 (from our mock).
 import robot.lerobot_arm101 as _arm101_mod

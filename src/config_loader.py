@@ -106,6 +106,8 @@ def connect_robot(config: dict, safe_mode: bool = False):
             motor_ids=ac.get('motor_ids', [1, 2, 3, 4, 5, 6]),
             speed=ac.get('speed', 200),
             safe_mode=safe_mode,
+            gripper_open_pos=ac.get('gripper_open_pos'),
+            gripper_close_pos=ac.get('gripper_close_pos'),
         )
         arm.connect()
         return arm
