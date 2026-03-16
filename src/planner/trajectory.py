@@ -48,7 +48,8 @@ def quintic_trajectory(q_start: np.ndarray, q_goal: np.ndarray,
 def execute_trajectory(robot, q_start: np.ndarray, q_goal: np.ndarray,
                        max_step_deg: float = 5.0,
                        step_timeout: float = 10.0,
-                       retries: int = 2) -> bool:
+                       retries: int = 2,
+                       collision_check_fn=None) -> bool:
     """Move from q_start to q_goal using a smooth quintic trajectory.
 
     Subdivides the motion into small steps and sends each as a MovJ(joint=...)
@@ -61,6 +62,12 @@ def execute_trajectory(robot, q_start: np.ndarray, q_goal: np.ndarray,
         max_step_deg: Maximum joint travel per step
         step_timeout: Timeout per individual step
         retries: Number of retry attempts per failed step
+        collision_check_fn: Optional callable ``f(q_deg) -> bool``.
+            If provided, each waypoint is checked before execution.
+            If the function returns ``True`` (collision detected), the
+            trajectory is aborted and ``False`` is returned.
+            Pass ``ik_solver.check_self_collision`` to enable self-
+            collision rejection without modifying the IK layer.
 
     Returns:
         True if all steps completed successfully.
@@ -78,6 +85,14 @@ def execute_trajectory(robot, q_start: np.ndarray, q_goal: np.ndarray,
               f"max_step={max_step_deg}deg")
 
     for i, q in enumerate(configs[1:], start=1):  # skip q_start
+        # --- Self-collision check before sending command ---
+        if collision_check_fn is not None and collision_check_fn(q):
+            log.error(
+                f"Self-collision detected at step {i}/{total} "
+                f"q={np.round(q, 1)} — aborting trajectory"
+            )
+            return False
+
         for attempt in range(retries + 1):
             ok = robot.movj_joints(*q, timeout=step_timeout)
             if ok:

@@ -9,6 +9,7 @@ import os
 import numpy as np
 import pinocchio as pin
 from logger import get_logger
+from kinematics.collision_filter import build_collision_model, NOVA5_DISABLED_PAIRS
 
 log = get_logger('ik')
 
@@ -35,8 +36,14 @@ class IKSolver:
             urdf_path: Override path to URDF file.
         """
         urdf = urdf_path or _URDF_PATH
+        self._urdf_path = os.path.abspath(urdf)
         self.model = pin.buildModelFromUrdf(urdf)
         self.data = self.model.createData()
+
+        # Collision model is built lazily on first call to check_self_collision
+        self._coll_geom_model: pin.GeometryModel | None = None
+        self._coll_geom_data: pin.GeometryData | None = None
+        self._coll_data: pin.Data | None = None
 
         # Find the tool_tip frame
         self.ee_frame_id = self.model.getFrameId('tool_tip')
@@ -228,6 +235,55 @@ class IKSolver:
             current_seed = joints
 
         return joint_path
+
+    # ------------------------------------------------------------------
+    # Self-collision checking
+    # ------------------------------------------------------------------
+
+    def _ensure_collision_model(self) -> None:
+        """Build the collision geometry model on the first call (lazy init)."""
+        if self._coll_geom_model is not None:
+            return
+        log.info("Building Nova5 collision model (first call to check_self_collision)...")
+        _, self._coll_geom_model = build_collision_model(
+            urdf_path=self._urdf_path,
+            disabled_pairs=NOVA5_DISABLED_PAIRS,
+        )
+        self._coll_geom_data = self._coll_geom_model.createData()
+        # Separate kinematic data so FK inside computeCollisions
+        # does not corrupt the main self.data used by solve_ik / forward_kin.
+        self._coll_data = self.model.createData()
+        log.info(
+            f"Nova5 collision model ready: "
+            f"{len(self._coll_geom_model.collisionPairs)} active pairs"
+        )
+
+    def check_self_collision(self, q_deg: np.ndarray) -> bool:
+        """Check whether a joint configuration causes Nova5 self-collision.
+
+        Uses Pinocchio's HPP-FCL broadphase collision detection.  The
+        geometry model is built lazily on the first call and reused for
+        all subsequent calls (thread-unsafe — do not call from multiple
+        threads).
+
+        Adjacent and nearly-adjacent link pairs that are always in
+        contact are pre-filtered via ``NOVA5_DISABLED_PAIRS`` so they
+        never trigger a false positive.
+
+        Args:
+            q_deg: 6 joint angles in degrees (Dobot / IKSolver convention).
+
+        Returns:
+            ``True`` if any non-filtered link pair is in collision,
+            ``False`` otherwise.
+        """
+        self._ensure_collision_model()
+        q = np.radians(q_deg)
+        return bool(pin.computeCollisions(
+            self.model, self._coll_data,
+            self._coll_geom_model, self._coll_geom_data,
+            q, True,  # stop_at_first_collision
+        ))
 
     @staticmethod
     def _normalize_angles(q: np.ndarray) -> np.ndarray:

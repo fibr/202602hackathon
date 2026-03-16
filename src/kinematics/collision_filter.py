@@ -31,8 +31,7 @@ Usage — quick example
     geom_data = geom_model.createData()
 
     q = pin.neutral(model)
-    pin.computeCollisions(model, data, geom_model, geom_data, q, stop_at_first=True)
-    in_collision = pin.hasCollisions(geom_data)
+    in_collision = pin.computeCollisions(model, data, geom_model, geom_data, q, True)
 
 Notes
 -----

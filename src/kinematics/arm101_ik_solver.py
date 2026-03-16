@@ -23,6 +23,7 @@ import os
 import numpy as np
 import pinocchio as pin
 import yaml
+from kinematics.collision_filter import build_collision_model, SO101_DISABLED_PAIRS
 
 # URDF path relative to this file
 _URDF_PATH = os.path.join(
@@ -124,8 +125,14 @@ class Arm101IKSolver:
         if not os.path.exists(urdf):
             raise FileNotFoundError(f"URDF not found: {urdf}")
 
+        self._urdf_path = os.path.abspath(urdf)
         self.model = pin.buildModelFromUrdf(urdf)
         self.data = self.model.createData()
+
+        # Collision model is built lazily on first call to check_self_collision
+        self._coll_geom_model: pin.GeometryModel | None = None
+        self._coll_geom_data: pin.GeometryData | None = None
+        self._coll_data: pin.Data | None = None
 
         # Find end-effector frame
         self.ee_frame_id = self.model.getFrameId(EE_FRAME)
@@ -315,3 +322,56 @@ class Arm101IKSolver:
                 'offset_deg': self.offsets_deg[i],
             })
         return info
+
+    # ------------------------------------------------------------------
+    # Self-collision checking
+    # ------------------------------------------------------------------
+
+    def _ensure_collision_model(self) -> None:
+        """Build the collision geometry model on the first call (lazy init)."""
+        if self._coll_geom_model is not None:
+            return
+        import logging
+        _log = logging.getLogger('arm101_ik')
+        _log.info("Building SO-ARM101 collision model (first call to check_self_collision)...")
+        _, self._coll_geom_model = build_collision_model(
+            urdf_path=self._urdf_path,
+            disabled_pairs=SO101_DISABLED_PAIRS,
+        )
+        self._coll_geom_data = self._coll_geom_model.createData()
+        # Separate kinematic data so FK inside computeCollisions
+        # does not corrupt self.data used by solve_ik / forward_kin.
+        self._coll_data = self.model.createData()
+        _log.info(
+            f"SO-ARM101 collision model ready: "
+            f"{len(self._coll_geom_model.collisionPairs)} active pairs"
+        )
+
+    def check_self_collision(self, motor_deg: np.ndarray) -> bool:
+        """Check whether a joint configuration causes SO-ARM101 self-collision.
+
+        Converts motor angles to URDF joint angles (applying the stored
+        ``signs`` and ``offsets_deg``) before running HPP-FCL broadphase
+        collision detection.
+
+        Adjacent and nearly-adjacent link pairs that are always in
+        contact are pre-filtered via ``SO101_DISABLED_PAIRS`` so they
+        never trigger a false positive.
+
+        Args:
+            motor_deg: 5 (or 6) motor angles in degrees, in the same
+                convention as ``solve_ik`` output (raw servo degrees,
+                0 = servo center).  If 5 values are given the gripper
+                joint is assumed to be at 0.
+
+        Returns:
+            ``True`` if any non-filtered link pair is in collision,
+            ``False`` otherwise.
+        """
+        self._ensure_collision_model()
+        q = self._motor_to_urdf(motor_deg)
+        return bool(pin.computeCollisions(
+            self.model, self._coll_data,
+            self._coll_geom_model, self._coll_geom_data,
+            q, True,  # stop_at_first_collision
+        ))
